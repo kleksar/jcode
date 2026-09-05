@@ -139,7 +139,6 @@ fn right_fact_stack_uses_transcript_status_notification_and_input_rows_in_order(
 
 #[test]
 fn right_fact_stack_uses_neutral_gray_except_for_context_usage() {
-    use ratatui::style::Color;
     use unicode_width::UnicodeWidthStr;
 
     let _lock = viewport_snapshot_test_lock();
@@ -153,24 +152,36 @@ fn right_fact_stack_uses_neutral_gray_except_for_context_usage() {
 
     let rows = buffer_rows(&terminal);
     let buffer = terminal.backend().buffer();
-    let neutral = Color::Rgb(140, 140, 150);
+    let mut neutral = None;
     for needle in ["OpenAI · OAuth", "GPT-5.6 Sol high", "~/jcode"] {
         let y = row_containing(&rows, needle);
         let byte_x = rows[y].find(needle).expect("fact text start");
         let x = UnicodeWidthStr::width(&rows[y][..byte_x]) as u16;
         let width = UnicodeWidthStr::width(needle) as u16;
-        assert!(
+        let expected = neutral.get_or_insert_with(|| {
             (x..x + width)
-                .filter(|&cell_x| buffer[(cell_x, y as u16)].symbol() != " ")
-                .all(|cell_x| buffer[(cell_x, y as u16)].fg == neutral),
-            "{needle:?} should use only neutral gray"
+                .find(|&cell_x| buffer[(cell_x, y as u16)].symbol() != " ")
+                .map(|cell_x| buffer[(cell_x, y as u16)].fg)
+                .expect("non-blank fact cell")
+        });
+        let mismatches = (x..x + width)
+            .filter(|&cell_x| buffer[(cell_x, y as u16)].symbol() != " ")
+            .filter_map(|cell_x| {
+                let cell = &buffer[(cell_x, y as u16)];
+                (cell.fg != *expected).then(|| (cell_x, cell.symbol().to_string(), cell.fg))
+            })
+            .collect::<Vec<_>>();
+        assert!(
+            mismatches.is_empty(),
+            "{needle:?} should use only neutral gray; mismatches={mismatches:?}; row={}",
+            rows[y]
         );
     }
 
     let context_y = row_containing(&rows, "74k/256k");
     let filled_x = rows[context_y].find('▰').expect("filled context cell");
     let filled_x = UnicodeWidthStr::width(&rows[context_y][..filled_x]) as u16;
-    assert_ne!(buffer[(filled_x, context_y as u16)].fg, neutral);
+    assert_ne!(buffer[(filled_x, context_y as u16)].fg, neutral.unwrap());
 }
 
 #[test]
@@ -266,6 +277,37 @@ fn right_fact_stack_hides_as_a_unit_when_streaming_chrome_cannot_fit_it() {
         }),
         "the stack must hide completely rather than render a partial block:\n{}",
         rows.join("\n")
+    );
+}
+
+#[test]
+fn pinned_session_footer_keeps_facts_context_and_shortcuts_in_stable_rows() {
+    let _lock = viewport_snapshot_test_lock();
+    clear_flicker_frame_history_for_tests();
+    let state = fact_test_state(String::new(), false);
+    let backend = TestBackend::new(120, 30);
+    let mut terminal = Terminal::new(backend).expect("test terminal");
+    terminal
+        .draw(|frame| crate::tui::ui::draw(frame, &state))
+        .expect("pinned session footer frame");
+
+    let rows = buffer_rows(&terminal);
+    let facts = &rows[28];
+    let hints = &rows[29];
+    assert!(facts.contains("~/jcode"), "facts row: {facts}");
+    assert!(facts.contains("GPT-5.6 Sol/high"), "facts row: {facts}");
+    assert!(facts.contains("71% left"), "facts row: {facts}");
+    assert!(hints.contains("chat mode"), "hint row: {hints}");
+    assert!(hints.contains("Shift+Enter newline"), "hint row: {hints}");
+    assert!(hints.contains("Ctrl+R history"), "hint row: {hints}");
+    assert!(
+        rows.iter().any(|row| row.contains("1❯")),
+        "composer should use the stronger prompt glyph:\n{}",
+        rows.join("\n")
+    );
+    assert!(
+        rows.iter().all(|row| !row.contains("74k/256k")),
+        "wide layouts should use the pinned footer instead of the floating fact stack"
     );
 }
 

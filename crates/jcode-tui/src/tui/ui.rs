@@ -561,10 +561,10 @@ use status_support::{
 };
 use theme_support::{
     accent_color, activity_indicator, activity_indicator_frame_index, ai_color, ai_text,
-    asap_color, blend_color, dim_color, file_link_color, header_icon_color,
-    header_name_color, header_session_color, pending_color, prompt_entry_bg_color,
-    prompt_entry_color, prompt_entry_shimmer_color, queued_color, rainbow_prompt_color,
-    system_message_color, tool_color, user_bg, user_color, user_text,
+    asap_color, blend_color, dim_color, file_link_color, header_icon_color, header_name_color,
+    header_session_color, pending_color, prompt_entry_bg_color, prompt_entry_color,
+    prompt_entry_shimmer_color, queued_color, rainbow_prompt_color, system_message_color,
+    tool_color, user_bg, user_color, user_text,
 };
 
 pub(crate) use jcode_tui_markdown::{CopyTargetKind, RawCopyTarget};
@@ -3082,6 +3082,7 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
     // Elastic overscroll status line revealed when the user scrolls past the
     // bottom of the transcript. Rendered directly below the input line.
     let overscroll_height: u16 = if app.chat_overscroll_active() { 1 } else { 0 };
+    let session_footer_height = input_ui::session_footer_height(chat_area);
     let fixed_height = 1
         + queued_height
         + swarm_strip_height
@@ -3090,7 +3091,8 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
         + inline_ui_gap_height
         + input_height
         + overscroll_height
-        + donut_height; // status + queued + swarm strip + notification + inline UI + gap + input + overscroll + donut
+        + donut_height
+        + session_footer_height; // status + queued + swarm strip + notification + inline UI + gap + input + overscroll + donut + footer
     let available_height = chat_area.height;
     // Overflow decisions (native scrollbar, and thus the wrap width) must not
     // depend on the transient overscroll row. Otherwise revealing the line at
@@ -3195,17 +3197,23 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
     let use_packed = terminal_clear_collapsed
         || (!swarm_page_active && content_height + fixed_height <= available_height);
 
-    // Layout: messages (includes header), queued, status, notification, inline UI, gap, input, donut
+    // Layout: messages (includes header), queued, status, notification, inline UI,
+    // gap, input, overscroll, donut, and the pinned session footer.
     // All vertical chunks are within the chat_area (left column).
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints(if use_packed {
             vec![
-                Constraint::Length(if terminal_clear_collapsed {
-                    0
+                if terminal_clear_collapsed {
+                    Constraint::Length(0)
+                } else if session_footer_height > 0 {
+                    // Roomy terminals use a true bottom-pinned composer: the
+                    // transcript owns all spare rows and the footer stays on
+                    // the terminal edge instead of floating after short chat.
+                    Constraint::Min(content_height.max(1))
                 } else {
-                    content_height.max(1)
-                }), // 0 Messages (exact height; 0 when terminal-cleared)
+                    Constraint::Length(content_height.max(1))
+                }, // 0 Messages (elastic with polished footer; 0 when terminal-cleared)
                 Constraint::Length(queued_height), // 1 Queued messages (above status)
                 Constraint::Length(swarm_strip_height), // 2 Swarm strip (above status)
                 Constraint::Length(1),             // 3 Status line
@@ -3215,19 +3223,21 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
                 Constraint::Length(input_height),  // 7 Input
                 Constraint::Length(overscroll_height), // 8 Overscroll status line
                 Constraint::Length(donut_height),  // 9 Donut animation
+                Constraint::Length(session_footer_height), // 10 Session footer
             ]
         } else {
             vec![
-                Constraint::Min(3),                       // 0 Messages (scrollable)
-                Constraint::Length(queued_height),        // 1 Queued messages (above status)
-                Constraint::Length(swarm_strip_height),   // 2 Swarm strip (above status)
-                Constraint::Length(1),                    // 3 Status line
-                Constraint::Length(notification_height),  // 4 Notification line
-                Constraint::Length(inline_block_height),  // 5 Inline UI
-                Constraint::Length(inline_ui_gap_height), // 6 Inline UI/input spacing
-                Constraint::Length(input_height),         // 7 Input
-                Constraint::Length(overscroll_height),    // 8 Overscroll status line
-                Constraint::Length(donut_height),         // 9 Donut animation
+                Constraint::Min(3),                        // 0 Messages (scrollable)
+                Constraint::Length(queued_height),         // 1 Queued messages (above status)
+                Constraint::Length(swarm_strip_height),    // 2 Swarm strip (above status)
+                Constraint::Length(1),                     // 3 Status line
+                Constraint::Length(notification_height),   // 4 Notification line
+                Constraint::Length(inline_block_height),   // 5 Inline UI
+                Constraint::Length(inline_ui_gap_height),  // 6 Inline UI/input spacing
+                Constraint::Length(input_height),          // 7 Input
+                Constraint::Length(overscroll_height),     // 8 Overscroll status line
+                Constraint::Length(donut_height),          // 9 Donut animation
+                Constraint::Length(session_footer_height), // 10 Session footer
             ]
         })
         .split(chat_area);
@@ -3460,7 +3470,13 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
     if let Some(ref mut capture) = debug_capture {
         capture.render_order.push("draw_status".to_string());
     }
-    input_ui::draw_status(frame, app, chunks[3], pending_count);
+    input_ui::draw_status(
+        frame,
+        app,
+        chunks[3],
+        pending_count,
+        session_footer_height > 0,
+    );
     if notification_height > 0 {
         input_ui::draw_notification(frame, app, chunks[4]);
     }
@@ -3481,11 +3497,14 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
     );
 
     if overscroll_height > 0 {
-        input_ui::draw_overscroll_status(frame, app, chunks[8]);
+        input_ui::draw_overscroll_status(frame, app, chunks[8], session_footer_height > 0);
     }
 
     if donut_height > 0 {
         animations::draw_idle_animation(frame, app, chunks[9]);
+    }
+    if session_footer_height > 0 {
+        input_ui::draw_session_footer(frame, app, chunks[10]);
     }
     let chrome_elapsed = chrome_start.elapsed();
 
@@ -3579,14 +3598,16 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
     // Session facts use actual final-frame cells for collision detection. They
     // prefer the composer chrome and may climb into a few transcript-tail rows
     // only when the right suffix is genuinely unused.
-    input_ui::draw_right_fact_stack(
-        frame,
-        app,
-        messages_area,
-        chunks[7],
-        chat_scrollbar_visible,
-        input_cursor,
-    );
+    if session_footer_height == 0 {
+        input_ui::draw_right_fact_stack(
+            frame,
+            app,
+            messages_area,
+            chunks[7],
+            chat_scrollbar_visible,
+            input_cursor,
+        );
+    }
 
     // Command-suggestion popover: a late overlay pass so the palette floats
     // over existing rows (blank space, pinned footer, or the transcript tail)

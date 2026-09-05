@@ -269,6 +269,7 @@ fn claude_version_segment(raw: &str, family: &str) -> Option<String> {
     }
 }
 
+#[cfg(test)]
 fn auth_dot_color(state: AuthState) -> Color {
     match state {
         AuthState::Available => rgb(100, 200, 100),
@@ -277,6 +278,7 @@ fn auth_dot_color(state: AuthState) -> Color {
     }
 }
 
+#[cfg(test)]
 fn auth_dot_char(state: AuthState) -> &'static str {
     match state {
         AuthState::Available => "●",
@@ -315,6 +317,7 @@ impl ActiveCredentialOverrides {
 }
 
 /// Configured providers with their full labels, in display order.
+#[cfg(test)]
 fn auth_full_specs(
     auth: &AuthStatus,
     active: ActiveCredentialOverrides,
@@ -389,6 +392,7 @@ fn auth_full_specs(
 /// Vertical auth inventory: one line per provider. Configured providers get
 /// green/yellow dots; unconfigured ones get a dim hollow dot so they read as
 /// available-to-add without cluttering the `/login` heading.
+#[cfg(test)]
 pub(super) fn build_auth_status_lines(
     auth: &AuthStatus,
     active: ActiveCredentialOverrides,
@@ -517,7 +521,6 @@ fn abbreviate_home(path: &str) -> String {
     path.to_string()
 }
 
-#[cfg(test)]
 fn truncate_to_width(text: &str, width: usize) -> String {
     let char_count = text.chars().count();
     if char_count <= width {
@@ -583,7 +586,6 @@ fn version_display_candidates() -> Vec<String> {
     vec![full, core, minor, shortest]
 }
 
-#[cfg(test)]
 fn configured_auth_count(auth: &AuthStatus) -> usize {
     [
         auth.jcode,
@@ -679,13 +681,30 @@ fn build_persistent_header_with_auth(
         .as_deref()
         .map(|version| header_version_label(version, include_hash));
 
-    // First line: `jcode` (+ `self-dev` when running a dev/canary build),
-    // followed by any remaining status badges rendered dimly.
+    // First line: a compact product/version lockup. Keeping the version beside
+    // the name saves a whole row and mirrors the visual hierarchy of polished
+    // coding TUIs: product first, runtime details below.
     {
         let mut spans = vec![Span::styled(
             "jcode".to_string(),
             Style::default().fg(header_name_color()).bold(),
         )];
+        if client_version_label.is_none() {
+            let version_text = if is_running_stable_release() {
+                let tag = jcode_build_meta::git_tag();
+                if tag.is_empty() || tag.contains('-') {
+                    format!("{} · release", semver())
+                } else {
+                    format!("{} · release {}", semver(), tag)
+                }
+            } else {
+                semver().to_string()
+            };
+            let suffix = format!(" {}", version_text);
+            if "jcode".chars().count() + suffix.chars().count() <= w {
+                spans.push(Span::styled(suffix, Style::default().fg(dim_color())));
+            }
+        }
         if is_canary {
             spans.push(Span::styled(
                 " self-dev".to_string(),
@@ -737,14 +756,6 @@ fn build_persistent_header_with_auth(
             }
         }
         lines.push(Line::from(spans).alignment(align));
-    } else if server_name.is_none() {
-        lines.push(
-            Line::from(Span::styled(
-                "JCode".to_string(),
-                Style::default().fg(header_name_color()),
-            ))
-            .alignment(align),
-        );
     }
 
     // Single model line: dim active-route method on the left, styled model
@@ -772,16 +783,6 @@ fn build_persistent_header_with_auth(
     // Keep a little headroom below the full width so the line never
     // wraps when the render area subtracts side margins.
     let fit_width = w.saturating_sub(4);
-    if !model_is_placeholder && !nice_model.is_empty() {
-        let hint = "/model to switch · ";
-        if model_line_len + hint.chars().count() <= fit_width {
-            model_line_len += hint.chars().count();
-            model_spans.push(Span::styled(
-                hint.to_string(),
-                Style::default().fg(dim_color()),
-            ));
-        }
-    }
     if !provider_label.is_empty() {
         let prefix = format!("{} · ", provider_label);
         if model_line_len + prefix.chars().count() <= fit_width {
@@ -795,6 +796,17 @@ fn build_persistent_header_with_auth(
         // white so the model reads as a distinct, styled element.
         Style::default().fg(rgb(255, 150, 200)).bold(),
     ));
+    if let Some(effort) = app
+        .info_widget_data()
+        .reasoning_effort
+        .filter(|effort| !effort.trim().is_empty())
+    {
+        let suffix = format!(" · {} effort", effort.trim());
+        if model_line_len + suffix.chars().count() <= fit_width {
+            model_line_len += suffix.chars().count();
+            model_spans.push(Span::styled(suffix, Style::default().fg(dim_color())));
+        }
+    }
     if let Some(upstream) = upstream.as_deref() {
         let suffix = format!(" via {}", upstream);
         if model_line_len + suffix.chars().count() <= fit_width {
@@ -803,25 +815,6 @@ fn build_persistent_header_with_auth(
     }
     if !nice_model.is_empty() {
         lines.push(Line::from(model_spans).alignment(align));
-    }
-
-    // When there is no server/client version labeling (standalone mode),
-    // still surface the running version on the jcode line's own row.
-    if client_version_label.is_none() {
-        let version_text = if is_running_stable_release() {
-            let tag = jcode_build_meta::git_tag();
-            if tag.is_empty() || tag.contains('-') {
-                format!("{} · release", semver())
-            } else {
-                format!("{} · release {}", semver(), tag)
-            }
-        } else {
-            semver().to_string()
-        };
-        lines.push(
-            Line::from(Span::styled(version_text, Style::default().fg(dim_color())))
-                .alignment(align),
-        );
     }
 
     lines
@@ -838,71 +831,47 @@ fn build_header_lines_with_auth(
     app: &dyn TuiState,
     width: u16,
     auth: &AuthStatus,
-    active: ActiveCredentialOverrides,
+    _active: ActiveCredentialOverrides,
 ) -> Vec<Line<'static>> {
     let mut lines: Vec<Line> = Vec::new();
     let align = ratatui::layout::Alignment::Left;
     let w = width as usize;
 
-    // Auth inventory: `/login` heading, then one provider per line (dim
-    // hollow dot for unconfigured providers).
-    let auth_lines = build_auth_status_lines(auth, active);
-    let login_heading = "/login to add provider".to_string();
-    lines.push(
-        Line::from(Span::styled(
-            login_heading,
-            Style::default().fg(dim_color()),
-        ))
-        .alignment(align),
-    );
-    for line in auth_lines {
-        lines.push(line.alignment(align));
+    // Credentials are management detail, not permanent chrome. Only surface a
+    // concise actionable warning when nothing is configured. `/login` remains
+    // the full inventory and editor.
+    if configured_auth_count(auth) == 0 {
+        lines.push(
+            Line::from(vec![
+                Span::styled("⚠ ", Style::default().fg(rgb(255, 200, 100))),
+                Span::styled(
+                    "No provider configured",
+                    Style::default().fg(rgb(255, 200, 100)),
+                ),
+                Span::styled(" · run /login", Style::default().fg(dim_color())),
+            ])
+            .alignment(align),
+        );
     }
 
     let mcps = app.mcp_servers();
     if !mcps.is_empty() {
-        const MAX_MCPS: usize = 4;
-        let shown: Vec<String> = mcps
-            .iter()
-            .take(MAX_MCPS)
-            .map(|(name, count)| {
-                if *count > 0 {
-                    format!("{} ({} tools)", name, count)
-                } else {
-                    format!("{} (…)", name)
-                }
-            })
-            .collect();
-        let mut mcp_text = format!("mcp: {}", shown.join(", "));
-        if mcps.len() > MAX_MCPS {
-            mcp_text.push_str(&format!(" +{} more", mcps.len() - MAX_MCPS));
-        }
-        if mcp_text.chars().count() > w {
-            mcp_text = format!("mcp: {} servers", mcps.len());
-        }
-        lines.push(
-            Line::from(Span::styled(mcp_text, Style::default().fg(dim_color()))).alignment(align),
+        let tool_count: usize = mcps.iter().map(|(_, count)| *count).sum();
+        let noun = if mcps.len() == 1 { "server" } else { "servers" };
+        let tool_noun = if tool_count == 1 { "tool" } else { "tools" };
+        let mcp_text = format!(
+            "mcp: {} {} · {} {} · /mcp to manage",
+            mcps.len(),
+            noun,
+            tool_count,
+            tool_noun
         );
-    }
-
-    let skills = app.available_skills();
-    if !skills.is_empty() {
-        const MAX_SKILLS: usize = 6;
-        let shown: Vec<String> = skills
-            .iter()
-            .take(MAX_SKILLS)
-            .map(|s| format!("/{}", s))
-            .collect();
-        let mut skills_text = format!("skills: {}", shown.join(" "));
-        if skills.len() > MAX_SKILLS {
-            skills_text.push_str(&format!(" +{} more", skills.len() - MAX_SKILLS));
-        }
-        if skills_text.chars().count() > w {
-            skills_text = format!("skills: {} loaded", skills.len());
-        }
         lines.push(
-            Line::from(Span::styled(skills_text, Style::default().fg(dim_color())))
-                .alignment(align),
+            Line::from(Span::styled(
+                truncate_to_width(&mcp_text, w),
+                Style::default().fg(dim_color()),
+            ))
+            .alignment(align),
         );
     }
 
@@ -1121,6 +1090,43 @@ mod tests {
                     .collect::<String>()
             })
             .collect()
+    }
+
+    #[test]
+    fn persistent_header_folds_local_version_into_the_brand_row() {
+        let app = create_test_app();
+        let lines = rendered_header_lines(&app, 120);
+
+        assert!(lines[0].starts_with("jcode v"), "header lines: {lines:?}");
+        assert!(
+            !lines.iter().any(|line| line.trim() == "JCode"),
+            "the brand should not be repeated on a second row: {lines:?}"
+        );
+        assert!(
+            !lines.iter().any(|line| line.contains("/model to switch")),
+            "permanent chrome should not contain command coaching: {lines:?}"
+        );
+    }
+
+    #[test]
+    fn secondary_header_collapses_empty_auth_inventory_to_one_actionable_warning() {
+        let app = create_test_app();
+        let lines = build_header_lines_with_auth(
+            &app,
+            120,
+            &AuthStatus::default(),
+            ActiveCredentialOverrides::default(),
+        );
+        let rendered = lines
+            .iter()
+            .flat_map(|line| line.spans.iter())
+            .map(|span| span.content.as_ref())
+            .collect::<String>();
+
+        assert!(rendered.contains("No provider configured · run /login"));
+        assert!(!rendered.contains("anthropic"), "rendered: {rendered}");
+        assert!(!rendered.contains("openrouter"), "rendered: {rendered}");
+        assert!(!rendered.contains("copilot"), "rendered: {rendered}");
     }
 
     #[test]
