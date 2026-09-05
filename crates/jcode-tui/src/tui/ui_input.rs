@@ -397,11 +397,11 @@ pub(super) fn input_prompt(app: &dyn TuiState) -> (&'static str, Color) {
     if mode.is_shell() {
         ("$ ", shell_mode_color())
     } else if app.is_processing() {
-        ("… ", queued_color())
+        ("↳ ", queued_color())
     } else if app.active_skill().is_some() {
         ("» ", accent_color())
     } else {
-        ("> ", user_color())
+        ("❯ ", user_color())
     }
 }
 
@@ -751,7 +751,13 @@ fn append_batch_progress_spans(
     }
 }
 
-pub(super) fn draw_status(frame: &mut Frame, app: &dyn TuiState, area: Rect, pending_count: usize) {
+pub(super) fn draw_status(
+    frame: &mut Frame,
+    app: &dyn TuiState,
+    area: Rect,
+    pending_count: usize,
+    show_idle_separator: bool,
+) {
     let elapsed = app.elapsed().map(|d| d.as_secs_f32()).unwrap_or(0.0);
     let stale_secs = app.time_since_activity().map(|d| d.as_secs_f32());
     let (cache_read, cache_creation) = app.streaming_cache_tokens();
@@ -1046,6 +1052,15 @@ pub(super) fn draw_status(frame: &mut Frame, app: &dyn TuiState, area: Rect, pen
         } else {
             Line::from("")
         }
+    };
+
+    let line = if show_idle_separator && line.width() == 0 && area.width > 0 {
+        Line::from(Span::styled(
+            "─".repeat(area.width as usize),
+            Style::default().fg(rgb(58, 58, 68)),
+        ))
+    } else {
+        line
     };
 
     crate::memory::check_staleness();
@@ -1915,7 +1930,12 @@ pub(super) fn draw_notification(frame: &mut Frame, app: &dyn TuiState, area: Rec
 /// access method, reasoning level, and context usage percentage, with a live
 /// `(overscroll x.x)` countdown pinned to the right so users can see the line
 /// is temporary and rebounds away on its own.
-pub(super) fn draw_overscroll_status(frame: &mut Frame, app: &dyn TuiState, area: Rect) {
+pub(super) fn draw_overscroll_status(
+    frame: &mut Frame,
+    app: &dyn TuiState,
+    area: Rect,
+    session_footer_visible: bool,
+) {
     if area.height == 0 || area.width == 0 {
         return;
     }
@@ -1931,6 +1951,19 @@ pub(super) fn draw_overscroll_status(frame: &mut Frame, app: &dyn TuiState, area
             Style::default().fg(rgb(150, 150, 165)).italic(),
         )
     });
+
+    // The pinned footer already owns session facts on roomy terminals. Keep
+    // the transient overscroll row as a small right-aligned countdown there,
+    // instead of duplicating model/repo/context and visually reflowing chrome.
+    if session_footer_visible {
+        if let Some(countdown) = countdown {
+            frame.render_widget(
+                Paragraph::new(Line::from(countdown)).alignment(Alignment::Right),
+                area,
+            );
+        }
+        return;
+    }
 
     let mut spans: Vec<Span> = Vec::new();
 
@@ -2277,6 +2310,187 @@ fn overscroll_context_bar(used: usize, limit: usize, cells: usize) -> Vec<Span<'
         Style::default().fg(fill_color).bold(),
     ));
     spans
+}
+
+/// Reserve a stable footer beneath the composer on normal-sized terminals.
+/// Tiny terminals keep the old collision-aware fact stack so transcript rows
+/// are not sacrificed when every row matters.
+pub(super) fn session_footer_height(area: Rect) -> u16 {
+    if area.width < 36 || area.height < 24 {
+        0
+    } else if area.width >= 56 && area.height >= 28 {
+        2
+    } else {
+        1
+    }
+}
+
+fn footer_context_spans(
+    data: &crate::tui::info_widget::InfoWidgetData,
+    cells: usize,
+) -> Vec<Span<'static>> {
+    let Some((used, limit)) = overscroll_context_usage(data) else {
+        return Vec::new();
+    };
+    let ratio = (used as f64 / limit.max(1) as f64).clamp(0.0, 1.0);
+    let left_pct = (100.0 - ratio * 100.0).round() as u16;
+    let filled = ((left_pct as f64 / 100.0) * cells as f64).round() as usize;
+    let filled = filled.min(cells);
+    let color = if left_pct <= 20 {
+        rgb(255, 100, 100)
+    } else if left_pct <= 50 {
+        rgb(255, 200, 100)
+    } else {
+        rgb(100, 210, 120)
+    };
+    vec![
+        Span::styled("▰".repeat(filled), Style::default().fg(color)),
+        Span::styled(
+            "▱".repeat(cells.saturating_sub(filled)),
+            Style::default().fg(rgb(55, 55, 65)),
+        ),
+        Span::styled(
+            format!(" {}% left", left_pct),
+            Style::default().fg(color).bold(),
+        ),
+    ]
+}
+
+fn footer_fact_spans(app: &dyn TuiState) -> Vec<Span<'static>> {
+    let data = app.info_widget_data();
+    let separator = || Span::styled("  │  ", Style::default().fg(rgb(72, 72, 82)));
+    let mut groups: Vec<Vec<Span<'static>>> = Vec::new();
+
+    if let Some(dir) = app
+        .working_dir()
+        .and_then(|path| session_facts::dir_label_short(&path))
+    {
+        groups.push(vec![Span::styled(
+            dir,
+            Style::default().fg(rgb(105, 205, 215)).bold(),
+        )]);
+    }
+
+    let branch = app.git_branch().or_else(|| {
+        data.git_info
+            .as_ref()
+            .map(|git| git.branch.trim().to_string())
+            .filter(|branch| !branch.is_empty())
+    });
+    if let Some(branch) = branch {
+        groups.push(vec![Span::styled(
+            branch,
+            Style::default().fg(rgb(230, 105, 115)),
+        )]);
+    }
+
+    let model = data
+        .model
+        .as_deref()
+        .filter(|model| !model.trim().is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| app.provider_model());
+    if !model.is_empty() && !overscroll_is_placeholder(&model) {
+        let mut model_spans = vec![Span::styled(
+            session_facts::pretty_model(&model),
+            Style::default().fg(rgb(170, 140, 245)).bold(),
+        )];
+        if let Some(effort) = data
+            .reasoning_effort
+            .as_deref()
+            .and_then(overscroll_short_reasoning)
+        {
+            model_spans.push(Span::styled(
+                format!("/{effort}"),
+                Style::default().fg(rgb(140, 125, 190)),
+            ));
+        }
+        groups.push(model_spans);
+    }
+
+    let mut spans = Vec::new();
+    for (index, group) in groups.into_iter().enumerate() {
+        if index > 0 {
+            spans.push(separator());
+        }
+        spans.extend(group);
+    }
+    spans
+}
+
+fn footer_hint_spans(app: &dyn TuiState) -> Vec<Span<'static>> {
+    let mode = composer_mode(app.input(), app.is_remote_mode());
+    let (label, color) = if mode.is_shell() {
+        ("shell mode", shell_mode_color())
+    } else if app.next_prompt_new_session_armed() {
+        ("new session", rgb(120, 200, 255))
+    } else if app.queue_mode() {
+        ("queue mode", queued_color())
+    } else if let Some(skill) = app.active_skill() {
+        return vec![
+            Span::styled(
+                format!("skill /{skill}"),
+                Style::default().fg(accent_color()).bold(),
+            ),
+            Span::styled(
+                "  ·  Enter send  ·  Shift+Enter newline  ·  / commands  ·  Ctrl+R history",
+                Style::default().fg(dim_color()),
+            ),
+        ];
+    } else {
+        ("chat mode", user_color())
+    };
+
+    vec![
+        Span::styled(label, Style::default().fg(color).bold()),
+        Span::styled(
+            "  ·  Enter send  ·  Shift+Enter newline  ·  / commands  ·  Ctrl+R history",
+            Style::default().fg(dim_color()),
+        ),
+    ]
+}
+
+/// Draw the stable bottom rail inspired by modern coding-agent TUIs. The first
+/// row keeps high-value session facts in one predictable place; the optional
+/// second row makes composer modes and keyboard affordances discoverable.
+pub(super) fn draw_session_footer(frame: &mut Frame, app: &dyn TuiState, area: Rect) {
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
+
+    let facts = footer_fact_spans(app);
+    let data = app.info_widget_data();
+    let context_cells = if area.width >= 90 { 10 } else { 6 };
+    let context = footer_context_spans(&data, context_cells);
+    let context_width = context.iter().map(|span| span.width()).sum::<usize>();
+    let gap = usize::from(!facts.is_empty() && !context.is_empty()) * 2;
+    let facts_width = (area.width as usize).saturating_sub(context_width + gap);
+
+    if facts_width > 0 && !facts.is_empty() {
+        let left_area = Rect::new(area.x, area.y, facts_width as u16, 1);
+        frame.render_widget(
+            Paragraph::new(Line::from(overscroll_truncate_spans(facts, facts_width))),
+            left_area,
+        );
+    }
+    if context_width > 0 && context_width <= area.width as usize {
+        let right_area = Rect::new(
+            area.right().saturating_sub(context_width as u16),
+            area.y,
+            context_width as u16,
+            1,
+        );
+        frame.render_widget(
+            Paragraph::new(Line::from(context)).alignment(Alignment::Right),
+            right_area,
+        );
+    }
+
+    if area.height >= 2 {
+        let hint_area = Rect::new(area.x, area.y + 1, area.width, 1);
+        let hints = overscroll_truncate_spans(footer_hint_spans(app), area.width as usize);
+        frame.render_widget(Paragraph::new(Line::from(hints)), hint_area);
+    }
 }
 
 const RIGHT_FACT_CONTEXT_CELLS: usize = 6;
