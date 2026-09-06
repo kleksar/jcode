@@ -292,6 +292,14 @@ impl App {
         if command.is_empty() {
             return;
         }
+        // `clear` normally emits screen-control sequences for a real terminal.
+        // This pane is rendered by ratatui inside Jcode, so applying those
+        // sequences to the outer terminal would be unsafe and printing them is
+        // useless. Clear the pane's own scrollback instead.
+        if command == "clear" {
+            self.worktree_pane.terminal_lines.clear();
+            return;
+        }
         let cwd = self
             .worktree_pane
             .terminal_cwd

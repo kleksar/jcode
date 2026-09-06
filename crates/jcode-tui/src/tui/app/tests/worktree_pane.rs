@@ -210,6 +210,22 @@ fn test_terminal_cd_persists_for_the_next_shell_command() {
 }
 
 #[test]
+fn test_terminal_clear_removes_pane_scrollback_without_running_shell() {
+    let mut app = create_test_app();
+    app.set_worktree_pane_tab(super::worktree_pane::WorktreePaneTab::Terminal);
+    app.set_diff_pane_focus(true);
+    app.worktree_pane.terminal_lines = vec!["old output".to_string(), "more output".to_string()];
+
+    for ch in "clear".chars() {
+        app.handle_diff_pane_focus_key(KeyCode::Char(ch), KeyModifiers::NONE);
+    }
+    app.handle_diff_pane_focus_key(KeyCode::Enter, KeyModifiers::NONE);
+
+    assert!(app.worktree_pane.terminal_lines.is_empty());
+    assert!(!app.worktree_pane.terminal_running);
+}
+
+#[test]
 fn test_terminal_output_preserves_sgr_but_strips_terminal_control_sequences() {
     let lines = super::worktree_pane::safe_terminal_output_lines(
         b"^D\x08\x08safe\x1b]0;owned\x07\x1b[31m red\x1b[0m\x1b[2J\x07\nnext\rline",
