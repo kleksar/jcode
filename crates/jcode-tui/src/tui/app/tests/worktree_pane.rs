@@ -170,6 +170,45 @@ fn test_terminal_command_launch_does_not_block_the_ui() {
     );
 }
 
+#[cfg(not(windows))]
+#[test]
+fn test_terminal_cd_persists_for_the_next_shell_command() {
+    let repo = init_worktree_pane_test_repo();
+    let subdir = repo.path().join("subdir");
+    std::fs::create_dir(&subdir).unwrap();
+    let mut app = create_test_app();
+    app.session.working_dir = Some(repo.path().to_string_lossy().into_owned());
+    app.set_worktree_pane_tab(super::worktree_pane::WorktreePaneTab::Terminal);
+    app.set_diff_pane_focus(true);
+
+    for ch in "cd subdir".chars() {
+        app.handle_diff_pane_focus_key(KeyCode::Char(ch), KeyModifiers::NONE);
+    }
+    app.handle_diff_pane_focus_key(KeyCode::Enter, KeyModifiers::NONE);
+    assert_eq!(
+        app.worktree_pane.terminal_cwd.as_deref(),
+        Some(subdir.to_string_lossy().as_ref())
+    );
+
+    for ch in "pwd".chars() {
+        app.handle_diff_pane_focus_key(KeyCode::Char(ch), KeyModifiers::NONE);
+    }
+    app.handle_diff_pane_focus_key(KeyCode::Enter, KeyModifiers::NONE);
+    for _ in 0..100 {
+        app.update_worktree_file_filter(Instant::now());
+        if !app.worktree_pane.terminal_running {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert!(
+        app.worktree_pane
+            .terminal_lines
+            .iter()
+            .any(|line| line == subdir.to_string_lossy().as_ref())
+    );
+}
+
 #[test]
 fn test_terminal_output_preserves_sgr_but_strips_terminal_control_sequences() {
     let lines = super::worktree_pane::safe_terminal_output_lines(
