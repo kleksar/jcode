@@ -983,6 +983,9 @@ pub struct App {
     /// Last session/todo/goal state challenged by the ownership gate. Repeating
     /// the same check cannot resolve an external blocker or stale assessment.
     last_todo_ownership_fingerprint: Option<String>,
+    /// Last task-relevant completed-todo state challenged by the completion
+    /// gate. A repeated failing snapshot cannot add validation evidence.
+    last_todo_completion_fingerprint: Option<String>,
     /// Whether the clean completion handoff has already requested a user-facing
     /// final response for the current todo cycle.
     todo_final_response_requested: bool,

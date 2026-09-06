@@ -1726,7 +1726,7 @@ impl App {
             let gate_budget_left =
                 self.todo_completion_gate_attempts < Self::TODO_COMPLETION_GATE_MAX_ATTEMPTS;
             let ownership_fingerprint =
-                serde_json::to_string(&(&todo_session_id, &todos, &goals)).ok();
+                Self::todo_ownership_gate_fingerprint(&todo_session_id, &todos, &goals);
             if ownership_needs_followup
                 && ownership_fingerprint.is_some()
                 && self.last_todo_ownership_fingerprint == ownership_fingerprint
@@ -1760,9 +1760,20 @@ impl App {
                 super::commands::format_todo_completion_confidence(confidence_summary);
             let needs_spike_challenge = confidence_summary.confidence_spike_detected
                 && !self.todo_confidence_spike_challenged;
+            let completion_fingerprint = Self::todo_completion_gate_fingerprint(&todos);
+            if (confidence_summary.completion_confidence_needs_validation || needs_spike_challenge)
+                && completion_fingerprint.is_some()
+                && self.last_todo_completion_fingerprint == completion_fingerprint
+            {
+                crate::logging::info(
+                    "AUTO_POKE_DECISION action=idle reason=unchanged_completion_assessment",
+                );
+                return false;
+            }
             if (confidence_summary.completion_confidence_needs_validation || needs_spike_challenge)
                 && gate_budget_left
             {
+                self.last_todo_completion_fingerprint = completion_fingerprint;
                 self.todo_completion_gate_attempts =
                     self.todo_completion_gate_attempts.saturating_add(1);
                 let notice = if confidence_summary.completion_confidence_needs_validation {
@@ -1803,6 +1814,7 @@ impl App {
                 self.auto_poke_incomplete_todos = false;
                 self.todo_confidence_spike_challenged = false;
                 self.todo_completion_gate_attempts = 0;
+                self.last_todo_completion_fingerprint = None;
                 self.todo_gate_digest_delivered = false;
                 self.pending_queued_dispatch = false;
                 return false;
@@ -1815,6 +1827,7 @@ impl App {
             // without this a session could only ever deliver one digest.
             self.todo_gate_digest_delivered = false;
             self.todo_completion_gate_attempts = 0;
+            self.last_todo_completion_fingerprint = None;
             if !self.todo_final_response_requested {
                 self.todo_final_response_requested = true;
                 self.push_display_message(DisplayMessage::system(format!(
@@ -1837,6 +1850,7 @@ impl App {
         // retrigger the same evidence gate against unchanged completed todos.
         self.todo_confidence_spike_challenged = false;
         self.last_todo_ownership_fingerprint = None;
+        self.last_todo_completion_fingerprint = None;
         let fingerprint =
             serde_json::to_string(&incomplete).unwrap_or_else(|_| poke_message.clone());
         if self.last_auto_poke_fingerprint.as_ref() == Some(&fingerprint) {
@@ -1870,6 +1884,89 @@ impl App {
         self.queued_messages.push(poke_message);
         self.pending_queued_dispatch = true;
         true
+    }
+
+    /// Serialize only the fields read by the completion-confidence validation.
+    /// Content, assignment, and blockers may change without adding validation
+    /// evidence, so they deliberately do not re-arm a failed gate.
+    fn todo_completion_gate_fingerprint(todos: &[crate::todo::TodoItem]) -> Option<String> {
+        let mut completed = todos
+            .iter()
+            .filter(|todo| todo.status == "completed")
+            .map(|todo| {
+                let spike_evidence = match todo.confidence_history.as_slice() {
+                    [] => ("empty", todo.confidence, None),
+                    [_] => ("one", None, None),
+                    history => (
+                        "many",
+                        None,
+                        Some((history[history.len() - 2], history[history.len() - 1])),
+                    ),
+                };
+                (
+                    todo.status.as_str(),
+                    todo.priority.as_str(),
+                    todo.completion_confidence,
+                    spike_evidence,
+                )
+            })
+            .collect::<Vec<_>>();
+        completed.sort_unstable();
+        serde_json::to_string(&completed).ok()
+    }
+
+    /// Serialize only the todo and goal fields consumed by the ownership
+    /// validation. This suppresses cosmetic writes while allowing one retry
+    /// after a real delivery, evidence, or completion-state change.
+    fn todo_ownership_gate_fingerprint(
+        session_id: &str,
+        todos: &[crate::todo::TodoItem],
+        goals: &[crate::todo::TodoGoal],
+    ) -> Option<String> {
+        let normalized_group = |group: Option<&str>| {
+            group
+                .map(str::trim)
+                .filter(|group| !group.is_empty())
+                .map(str::to_owned)
+        };
+        let mut todo_states = todos
+            .iter()
+            .map(|todo| {
+                (
+                    normalized_group(todo.group.as_deref()),
+                    todo.status.as_str(),
+                )
+            })
+            .collect::<Vec<_>>();
+        todo_states.sort_unstable();
+        let goal_states = goals
+            .iter()
+            .map(|goal| {
+                let stopping_evidence = goal
+                    .iteration_maturity
+                    .is_some_and(|state| {
+                        matches!(
+                            state,
+                            crate::todo::IterationMaturity::PlateauConfirmed
+                                | crate::todo::IterationMaturity::ConstraintsExhausted
+                                | crate::todo::IterationMaturity::BudgetExhausted
+                        )
+                    })
+                    .then(|| goal.stopping_evidence.as_deref());
+                (
+                    normalized_group(goal.group.as_deref()),
+                    goal.delivery_state,
+                    goal.autonomy,
+                    goal.iteration_maturity,
+                    stopping_evidence,
+                    goal.feedback_loop_relevance,
+                    goal.feedback_loop_coverage,
+                    goal.feedback_loop_traceability,
+                    goal.difficulty,
+                )
+            })
+            .collect::<Vec<_>>();
+        serde_json::to_string(&(session_id, todo_states, goal_states)).ok()
     }
 
     pub(super) fn schedule_queued_dispatch_after_interrupt(&mut self) {

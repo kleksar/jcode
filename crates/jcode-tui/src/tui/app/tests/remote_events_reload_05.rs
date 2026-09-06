@@ -172,6 +172,26 @@ fn test_reload_preserves_completed_confidence_spike_challenge() {
 }
 
 #[test]
+fn test_reload_preserves_completion_gate_fingerprint() {
+    with_temp_jcode_home(|| {
+        let mut app = create_test_app();
+        app.last_todo_completion_fingerprint = Some("completion-snapshot".to_string());
+        let reload_session_id =
+            format!("test-completion-fingerprint-reload-{}", std::process::id());
+        app.save_input_for_reload(&reload_session_id);
+
+        let restored = App::restore_input_for_reload(&reload_session_id)
+            .expect("completion fingerprint should survive reload");
+        let mut reloaded_app = create_test_app();
+        reloaded_app.apply_restored_reload_input(restored);
+        assert_eq!(
+            reloaded_app.last_todo_completion_fingerprint.as_deref(),
+            Some("completion-snapshot")
+        );
+    });
+}
+
+#[test]
 fn test_completion_gate_nudges_stop_after_budget_exhausted() {
     with_temp_jcode_home(|| {
         let mut app = create_test_app();
@@ -210,9 +230,17 @@ fn test_completion_gate_nudges_stop_after_budget_exhausted() {
         .expect("save passing ownership assessment");
 
         // Each scheduled nudge consumes budget. Simulate the dispatch loop by
-        // clearing the queued state between iterations (as if the turn ran and
-        // the model made no todo progress).
+        // clearing the queued state between iterations. Each simulated turn
+        // changes a field the completion gate actually reads, so the retry
+        // fingerprint correctly permits the next budgeted attempt.
         for attempt in 0..App::TODO_COMPLETION_GATE_MAX_ATTEMPTS {
+            let mut todos = crate::todo::load_todos(&app.session.id).unwrap();
+            todos[0].completion_confidence = Some(if attempt % 2 == 0 {
+                crate::todo::ConfidenceState::Speculative
+            } else {
+                crate::todo::ConfidenceState::Plausible
+            });
+            crate::todo::save_todos(&app.session.id, &todos).unwrap();
             assert!(
                 app.schedule_auto_poke_followup_if_needed(),
                 "attempt {attempt} should still schedule a gate nudge"
@@ -221,8 +249,12 @@ fn test_completion_gate_nudges_stop_after_budget_exhausted() {
             app.pending_queued_dispatch = false;
         }
 
-        // Budget exhausted: the gate must stop scheduling and disarm auto-poke
-        // instead of looping forever (observed live as one API call per ~5s).
+        // A further relevant change reaches the exhausted-gate branch. The
+        // gate must stop scheduling and disarm auto-poke instead of looping
+        // forever (observed live as one API call per ~5s).
+        let mut todos = crate::todo::load_todos(&app.session.id).unwrap();
+        todos[0].priority = "medium".to_string();
+        crate::todo::save_todos(&app.session.id, &todos).unwrap();
         assert!(
             !app.schedule_auto_poke_followup_if_needed(),
             "exhausted gate must not schedule another nudge"
@@ -232,6 +264,99 @@ fn test_completion_gate_nudges_stop_after_budget_exhausted() {
         assert!(app.queued_messages.is_empty());
         assert!(app.hidden_queued_system_messages.is_empty());
         assert_eq!(app.todo_completion_gate_attempts, 0);
+    });
+}
+
+fn save_low_completion_fixture(session_id: &str) {
+    crate::todo::save_todos(
+        session_id,
+        &[crate::todo::TodoItem {
+            id: "todo-1".to_string(),
+            content: "Ship the fix".to_string(),
+            status: "completed".to_string(),
+            priority: "high".to_string(),
+            confidence: Some(crate::todo::ConfidenceState::Speculative),
+            completion_confidence: Some(crate::todo::ConfidenceState::Speculative),
+            confidence_history: vec![crate::todo::ConfidenceState::Speculative],
+            ..Default::default()
+        }],
+    )
+    .unwrap();
+    crate::todo::save_goals(
+        session_id,
+        &[crate::todo::TodoGoal {
+            delivery_state: Some(crate::todo::DeliveryState::WorkflowValidated),
+            autonomy: Some(crate::todo::Autonomy::NecessaryFollowthrough),
+            iteration_maturity: Some(crate::todo::IterationMaturity::OutcomeReached),
+            feedback_loop_relevance: Some(crate::todo::FeedbackLoopRelevance::Representative),
+            feedback_loop_coverage: Some(crate::todo::FeedbackLoopCoverage::MainPaths),
+            feedback_loop_traceability: Some(crate::todo::FeedbackLoopTraceability::Complete),
+            ..Default::default()
+        }],
+    )
+    .unwrap();
+}
+
+fn dispatch_completion_followup(app: &mut App) {
+    assert!(app.schedule_auto_poke_followup_if_needed());
+    assert_eq!(app.queued_messages.len(), 1);
+    app.queued_messages.clear();
+    app.pending_queued_dispatch = false;
+}
+
+#[test]
+fn completion_gate_suppresses_unchanged_failing_snapshot() {
+    with_temp_jcode_home(|| {
+        let mut app = create_test_app();
+        app.auto_poke_incomplete_todos = true;
+        save_low_completion_fixture(&app.session.id);
+
+        dispatch_completion_followup(&mut app);
+        assert!(!app.schedule_auto_poke_followup_if_needed());
+        assert_eq!(app.todo_completion_gate_attempts, 1);
+        assert!(app.queued_messages.is_empty());
+    });
+}
+
+#[test]
+fn completion_gate_retries_once_after_relevant_evidence_change() {
+    with_temp_jcode_home(|| {
+        let mut app = create_test_app();
+        app.auto_poke_incomplete_todos = true;
+        save_low_completion_fixture(&app.session.id);
+
+        dispatch_completion_followup(&mut app);
+        let mut todos = crate::todo::load_todos(&app.session.id).unwrap();
+        todos[0].completion_confidence = Some(crate::todo::ConfidenceState::Plausible);
+        todos[0]
+            .confidence_history
+            .push(crate::todo::ConfidenceState::Plausible);
+        crate::todo::save_todos(&app.session.id, &todos).unwrap();
+        dispatch_completion_followup(&mut app);
+
+        assert!(!app.schedule_auto_poke_followup_if_needed());
+        assert_eq!(app.todo_completion_gate_attempts, 2);
+    });
+}
+
+#[test]
+fn completion_gate_suppresses_cosmetic_todo_change() {
+    with_temp_jcode_home(|| {
+        let mut app = create_test_app();
+        app.auto_poke_incomplete_todos = true;
+        save_low_completion_fixture(&app.session.id);
+
+        dispatch_completion_followup(&mut app);
+        let mut todos = crate::todo::load_todos(&app.session.id).unwrap();
+        todos[0].content = "Ship the renamed fix".to_string();
+        todos[0].assigned_to = Some("worker".to_string());
+        // A one-entry history makes the spike check independent of the current
+        // confidence field, so this update is cosmetic to the completion gate.
+        todos[0].confidence = Some(crate::todo::ConfidenceState::Plausible);
+        crate::todo::save_todos(&app.session.id, &todos).unwrap();
+
+        assert!(!app.schedule_auto_poke_followup_if_needed());
+        assert_eq!(app.todo_completion_gate_attempts, 1);
     });
 }
 
@@ -713,12 +838,18 @@ fn test_gate_digest_is_delivered_at_turn_end_and_rearms_next_cycle() {
                 .is_empty()
         );
 
-        // Simulate the turn running, then the cycle completing.
+        // Simulate the review turn running. With all gates now passing, the
+        // ordinary final-response handoff must still run and re-arm the digest
+        // for the next cycle.
         app.queued_messages.clear();
         app.pending_queued_dispatch = false;
         assert!(
-            !app.schedule_auto_poke_followup_if_needed(),
-            "with nothing left outstanding the cycle should finish"
+            app.schedule_auto_poke_followup_if_needed(),
+            "with nothing left outstanding the cycle should request the final response"
+        );
+        assert_eq!(
+            app.queued_messages,
+            vec![crate::todo::TODO_FINAL_RESPONSE_CONTINUATION_MESSAGE.to_string()]
         );
         assert!(
             !app.todo_gate_digest_delivered,
