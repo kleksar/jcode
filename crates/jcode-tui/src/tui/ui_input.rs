@@ -2318,8 +2318,6 @@ fn overscroll_context_bar(used: usize, limit: usize, cells: usize) -> Vec<Span<'
 pub(super) fn session_footer_height(area: Rect) -> u16 {
     if area.width < 36 || area.height < 24 {
         0
-    } else if area.width >= 56 && area.height >= 28 {
-        2
     } else {
         1
     }
@@ -2418,41 +2416,8 @@ fn footer_fact_spans(app: &dyn TuiState) -> Vec<Span<'static>> {
     spans
 }
 
-fn footer_hint_spans(app: &dyn TuiState) -> Vec<Span<'static>> {
-    let mode = composer_mode(app.input(), app.is_remote_mode());
-    let (label, color) = if mode.is_shell() {
-        ("shell mode", shell_mode_color())
-    } else if app.next_prompt_new_session_armed() {
-        ("new session", rgb(120, 200, 255))
-    } else if app.queue_mode() {
-        ("queue mode", queued_color())
-    } else if let Some(skill) = app.active_skill() {
-        return vec![
-            Span::styled(
-                format!("skill /{skill}"),
-                Style::default().fg(accent_color()).bold(),
-            ),
-            Span::styled(
-                "  ·  Enter send  ·  Shift+Enter newline  ·  / commands  ·  Ctrl+R history",
-                Style::default().fg(dim_color()),
-            ),
-        ];
-    } else {
-        ("chat mode", user_color())
-    };
-
-    vec![
-        Span::styled(label, Style::default().fg(color).bold()),
-        Span::styled(
-            "  ·  Enter send  ·  Shift+Enter newline  ·  / commands  ·  Ctrl+R history",
-            Style::default().fg(dim_color()),
-        ),
-    ]
-}
-
-/// Draw the stable bottom rail inspired by modern coding-agent TUIs. The first
-/// row keeps high-value session facts in one predictable place; the optional
-/// second row makes composer modes and keyboard affordances discoverable.
+/// Draw the stable bottom rail inspired by modern coding-agent TUIs. It keeps
+/// high-value session facts in one predictable place without persistent hints.
 pub(super) fn draw_session_footer(frame: &mut Frame, app: &dyn TuiState, area: Rect) {
     if area.width == 0 || area.height == 0 {
         return;
@@ -2484,12 +2449,6 @@ pub(super) fn draw_session_footer(frame: &mut Frame, app: &dyn TuiState, area: R
             Paragraph::new(Line::from(context)).alignment(Alignment::Right),
             right_area,
         );
-    }
-
-    if area.height >= 2 {
-        let hint_area = Rect::new(area.x, area.y + 1, area.width, 1);
-        let hints = overscroll_truncate_spans(footer_hint_spans(app), area.width as usize);
-        frame.render_widget(Paragraph::new(Line::from(hints)), hint_area);
     }
 }
 

@@ -1721,13 +1721,13 @@ pub(super) fn handle_session_command(app: &mut App, trimmed: &str) -> bool {
         return true;
     }
 
-    if trimmed == "/resume" || trimmed == "/sessions" || trimmed == "/session" {
+    if trimmed == "/resume" {
         app.open_session_picker();
         app.record_keybinding_slow(super::shortcut_hints::LearnableAction::Resume);
         return true;
     }
 
-    if trimmed == "/active" {
+    if trimmed == "/active" || trimmed == "/sessions" || trimmed == "/session" {
         app.open_active_sessions_picker();
         return true;
     }

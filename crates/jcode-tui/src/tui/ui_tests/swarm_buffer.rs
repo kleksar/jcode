@@ -281,7 +281,7 @@ fn right_fact_stack_hides_as_a_unit_when_streaming_chrome_cannot_fit_it() {
 }
 
 #[test]
-fn pinned_session_footer_keeps_facts_context_and_shortcuts_in_stable_rows() {
+fn pinned_session_footer_keeps_only_facts_and_context_in_one_stable_row() {
     let _lock = viewport_snapshot_test_lock();
     clear_flicker_frame_history_for_tests();
     let state = fact_test_state(String::new(), false);
@@ -292,14 +292,17 @@ fn pinned_session_footer_keeps_facts_context_and_shortcuts_in_stable_rows() {
         .expect("pinned session footer frame");
 
     let rows = buffer_rows(&terminal);
-    let facts = &rows[28];
-    let hints = &rows[29];
+    let facts = &rows[29];
     assert!(facts.contains("~/jcode"), "facts row: {facts}");
     assert!(facts.contains("GPT-5.6 Sol/high"), "facts row: {facts}");
     assert!(facts.contains("71% left"), "facts row: {facts}");
-    assert!(hints.contains("chat mode"), "hint row: {hints}");
-    assert!(hints.contains("Shift+Enter newline"), "hint row: {hints}");
-    assert!(hints.contains("Ctrl+R history"), "hint row: {hints}");
+    assert!(
+        rows.iter().all(|row| {
+            !row.contains("chat mode") && !row.contains("Enter send") && !row.contains("/ commands")
+        }),
+        "persistent shortcut hints should be absent:\n{}",
+        rows.join("\n")
+    );
     assert!(
         rows.iter().any(|row| row.contains("1❯")),
         "composer should use the stronger prompt glyph:\n{}",

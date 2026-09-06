@@ -43,6 +43,18 @@ fn test_disconnected_shift_enter_inserts_newline() {
 }
 
 #[test]
+fn test_disconnected_ctrl_j_inserts_newline() {
+    let mut app = create_test_app();
+
+    remote::handle_disconnected_key(&mut app, KeyCode::Char('h'), KeyModifiers::empty()).unwrap();
+    remote::handle_disconnected_key(&mut app, KeyCode::Char('j'), KeyModifiers::CONTROL).unwrap();
+    remote::handle_disconnected_key(&mut app, KeyCode::Char('i'), KeyModifiers::empty()).unwrap();
+
+    assert_eq!(app.input(), "h\ni");
+    assert!(app.queued_messages().is_empty());
+}
+
+#[test]
 fn test_disconnected_shift_slash_preserves_layout_translated_slash() {
     let mut app = create_test_app();
 
@@ -281,6 +293,24 @@ fn test_remote_shift_enter_inserts_newline() {
     rt.block_on(app.handle_remote_key(KeyCode::Char('h'), KeyModifiers::empty(), &mut remote))
         .unwrap();
     rt.block_on(app.handle_remote_key(KeyCode::Enter, KeyModifiers::SHIFT, &mut remote))
+        .unwrap();
+    rt.block_on(app.handle_remote_key(KeyCode::Char('i'), KeyModifiers::empty(), &mut remote))
+        .unwrap();
+
+    assert_eq!(app.input(), "h\ni");
+    assert!(app.queued_messages().is_empty());
+}
+
+#[test]
+fn test_remote_ctrl_j_inserts_newline() {
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let _guard = rt.enter();
+    let mut app = create_test_app();
+    let mut remote = crate::tui::backend::RemoteConnection::dummy();
+
+    rt.block_on(app.handle_remote_key(KeyCode::Char('h'), KeyModifiers::empty(), &mut remote))
+        .unwrap();
+    rt.block_on(app.handle_remote_key(KeyCode::Char('j'), KeyModifiers::CONTROL, &mut remote))
         .unwrap();
     rt.block_on(app.handle_remote_key(KeyCode::Char('i'), KeyModifiers::empty(), &mut remote))
         .unwrap();

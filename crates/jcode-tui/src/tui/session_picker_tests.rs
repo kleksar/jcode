@@ -912,7 +912,10 @@ fn test_active_filter_shows_only_live_sessions_ready_before_working() {
 
 #[test]
 fn test_active_rows_render_working_and_ready_badges() {
-    let live_working = make_session("session_working", "alpha", false, SessionStatus::Active);
+    let mut live_working = make_session("session_working", "alpha", false, SessionStatus::Active);
+    live_working.working_dir = Some("/tmp/worktrees/api-parser".to_string());
+    live_working.model = Some("gpt-5.6-sol".to_string());
+    live_working.first_user_prompt = Some("Open the MR after the parser tests pass".to_string());
     let live_ready = make_session("session_ready", "beta", false, SessionStatus::Closed);
     let mut picker = SessionPicker::new(vec![live_working, live_ready]);
     picker.activate_active_filter();
@@ -941,6 +944,31 @@ fn test_active_rows_render_working_and_ready_badges() {
     assert!(
         working_text.contains("working 1m"),
         "expected working badge with duration, got: {working_text}"
+    );
+    assert_eq!(working_lines.len(), 2, "active rows must stay compact");
+    assert!(
+        working_text.contains("api-parser"),
+        "worktree: {working_text}"
+    );
+    assert!(
+        working_text.contains("GPT-5.6 Sol"),
+        "model: {working_text}"
+    );
+    assert!(
+        working_text.contains("Open the MR after the parser tests pass"),
+        "task: {working_text}"
+    );
+    assert!(
+        !working_text.contains(" user"),
+        "no counters: {working_text}"
+    );
+    assert!(
+        !working_text.contains(" assistant"),
+        "no counters: {working_text}"
+    );
+    assert!(
+        !working_text.contains("created:"),
+        "no archive facts: {working_text}"
     );
 
     let first_frame = picker
@@ -975,6 +1003,7 @@ fn test_active_rows_render_working_and_ready_badges() {
         !ready_text.contains("closed"),
         "live session must not render as closed: {ready_text}"
     );
+    assert_eq!(ready_lines.len(), 2, "ready rows must stay compact");
 }
 
 fn make_claude_session(session_id: &str) -> SessionInfo {
@@ -1425,8 +1454,10 @@ fn onboarding_banner_renders_prompt_and_both_action_rows() {
         review_x < 50,
         "suggested prompt should span the visual center: {lines:#?}"
     );
+    let start_label_width = "Start in the current directory".chars().count();
     assert!(
-        start_y >= buffer.area.height as usize - 3 && start_x >= 95,
+        start_y >= buffer.area.height as usize - 3
+            && start_x + start_label_width >= buffer.area.width as usize - 4,
         "blank-session action should stay secondary in the bottom-right: {lines:#?}"
     );
 }

@@ -7,8 +7,9 @@
 //! fixes the cases that need configuration (tmux, WezTerm) and explains the ones
 //! that cannot be fixed (Terminal.app). See `docs/SHIFT_ENTER.md`.
 //!
-//! Option/Alt+Enter arrives as `ESC` + `CR`, which does not need the protocol,
-//! so it works on more terminals but depends on the Option-as-Meta setting.
+//! Ctrl+J is the terminal-independent fallback while a draft is non-empty. It
+//! produces LF directly, so it also works when Option is disabled or remapped.
+//! Option/Alt+Enter remains available when the terminal exposes Option as Meta.
 //!
 //! The trailing-backslash continuation is the universal fallback: it depends
 //! only on the draft text, so it works on every terminal and platform.
@@ -18,7 +19,7 @@ use crossterm::event::{KeyCode, KeyModifiers};
 use super::super::App;
 use super::insert_input_text;
 
-/// Handles every way an Enter press can insert a newline instead of sending.
+/// Handles every composer chord that inserts a newline instead of sending.
 ///
 /// Returns true when the key was consumed as a newline.
 pub(in crate::tui::app) fn enter_inserts_newline(
@@ -26,14 +27,19 @@ pub(in crate::tui::app) fn enter_inserts_newline(
     code: KeyCode,
     modifiers: KeyModifiers,
 ) -> bool {
-    if code != KeyCode::Enter {
-        return false;
-    }
-    if modifiers.intersects(KeyModifiers::SHIFT | KeyModifiers::ALT) {
+    // Ctrl+J is LF at the terminal byte level and does not rely on modified
+    // Enter support. Keep the empty-composer Ctrl+J prompt-navigation behavior,
+    // mirroring Ctrl+K which only edits when a draft exists.
+    if code == KeyCode::Char('j') && modifiers == KeyModifiers::CONTROL && !app.input.is_empty() {
         insert_input_text(app, "\n");
         return true;
     }
-    consume_backslash_continuation(app)
+
+    if code == KeyCode::Enter && modifiers.intersects(KeyModifiers::SHIFT | KeyModifiers::ALT) {
+        insert_input_text(app, "\n");
+        return true;
+    }
+    code == KeyCode::Enter && consume_backslash_continuation(app)
 }
 
 /// A trailing backslash at the cursor turns Enter into a newline.

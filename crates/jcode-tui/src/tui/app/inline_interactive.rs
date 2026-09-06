@@ -2377,8 +2377,9 @@ impl App {
 
     /// Open the active sessions manager: the session picker scoped to live
     /// (open) sessions, showing which are still working on a response and
-    /// which are ready for input. Reached via Left arrow on an empty input
-    /// (when `display.active_sessions_manager` is enabled) or `/active`.
+    /// which are ready for input. Reached via Left arrow on an empty input or
+    /// `/sessions` (`display.active_sessions_manager = false` disables only the
+    /// arrow gesture).
     pub(super) fn open_active_sessions_picker(&mut self) {
         let current_dir = self.session.working_dir.clone();
         let (mut picker, status) = if let Some((server_groups, orphan_sessions)) =
@@ -2400,10 +2401,8 @@ impl App {
         self.start_session_picker_load();
     }
 
-    /// Opt-in Left-arrow gesture: pressing Left on an empty input opens the
-    /// active sessions manager. Gated behind `display.active_sessions_manager`
-    /// so the default input behavior is unchanged. Returns true when the
-    /// gesture fired.
+    /// Left-arrow gesture: pressing Left on an empty input opens the active
+    /// sessions manager unless explicitly disabled. Returns true when it fires.
     pub(super) fn maybe_open_active_sessions_on_left(&mut self) -> bool {
         if !self.input.is_empty() || self.cursor_pos != 0 {
             return false;
