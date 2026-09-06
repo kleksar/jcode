@@ -99,185 +99,6 @@ fn test_files_command_opens_project_tree_with_inline_preview() {
 }
 
 #[test]
-fn test_terminal_tab_renders_and_runs_a_command() {
-    let _lock = scroll_render_test_lock();
-    let repo = init_worktree_pane_test_repo();
-    crate::tui::ui::prime_project_tree_for_tests(repo.path());
-    let mut app = create_test_app();
-    app.session.working_dir = Some(repo.path().to_string_lossy().into_owned());
-    app.diff_mode = crate::config::DiffDisplayMode::Inline;
-    app.set_worktree_pane_tab(super::worktree_pane::WorktreePaneTab::Terminal);
-    app.set_diff_pane_focus(true);
-
-    for ch in "echo terminal-ok".chars() {
-        assert!(app.handle_diff_pane_focus_key(KeyCode::Char(ch), KeyModifiers::NONE));
-    }
-    assert!(app.handle_diff_pane_focus_key(KeyCode::Enter, KeyModifiers::NONE));
-    assert!(app.worktree_pane.terminal_running);
-    for _ in 0..100 {
-        if app.update_worktree_file_filter(Instant::now()) && !app.worktree_pane.terminal_running {
-            break;
-        }
-        std::thread::sleep(Duration::from_millis(10));
-    }
-    assert!(!app.worktree_pane.terminal_running, "command should complete");
-
-    let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(140, 30)).unwrap();
-    let text = render_and_snap(&app, &mut terminal);
-    let layout = crate::tui::ui::worktree_pane_layout().expect("terminal pane layout");
-    assert!(layout.terminal_tab_active, "Terminal tab should be active: {text}");
-    let diff_pos = text.find("Diff").expect("Diff tab");
-    let files_pos = text.find("Files").expect("Files tab");
-    let terminal_pos = text.find("Terminal").expect("Terminal tab");
-    assert!(
-        diff_pos < files_pos && files_pos < terminal_pos,
-        "Terminal should render immediately after Files: {text}"
-    );
-    assert!(text.contains("terminal-ok"), "command output should render: {text}");
-}
-
-#[cfg(not(windows))]
-#[test]
-fn test_terminal_command_launch_does_not_block_the_ui() {
-    let repo = init_worktree_pane_test_repo();
-    let mut app = create_test_app();
-    app.session.working_dir = Some(repo.path().to_string_lossy().into_owned());
-    app.set_worktree_pane_tab(super::worktree_pane::WorktreePaneTab::Terminal);
-    app.set_diff_pane_focus(true);
-    for ch in "sleep 0.2; echo async-ok".chars() {
-        app.handle_diff_pane_focus_key(KeyCode::Char(ch), KeyModifiers::NONE);
-    }
-    let started = Instant::now();
-    app.handle_diff_pane_focus_key(KeyCode::Enter, KeyModifiers::NONE);
-    assert!(
-        started.elapsed() < Duration::from_millis(100),
-        "Enter should spawn the command without blocking the TUI"
-    );
-    assert!(app.worktree_pane.terminal_running);
-    for _ in 0..100 {
-        app.update_worktree_file_filter(Instant::now());
-        if !app.worktree_pane.terminal_running {
-            break;
-        }
-        std::thread::sleep(Duration::from_millis(10));
-    }
-    assert!(!app.worktree_pane.terminal_running);
-    assert!(
-        app.worktree_pane
-            .terminal_lines
-            .iter()
-            .any(|line| line.contains("async-ok"))
-    );
-}
-
-#[test]
-fn test_running_terminal_command_uses_fast_completion_polling() {
-    let mut app = create_test_app();
-    app.worktree_pane.terminal_running = true;
-
-    assert!(crate::tui::periodic_redraw_required(&app));
-    assert!(crate::tui::redraw_interval(&app) < crate::tui::REDRAW_IDLE);
-}
-
-#[test]
-fn test_terminal_prompt_is_relative_to_home() {
-    let home = dirs::home_dir().expect("test home directory");
-    assert_eq!(
-        super::worktree_pane::terminal_prompt_path(home.to_string_lossy().as_ref()),
-        "~"
-    );
-    assert_eq!(
-        super::worktree_pane::terminal_prompt_path(
-            home.join("project/subdir").to_string_lossy().as_ref()
-        ),
-        "~/project/subdir"
-    );
-}
-
-#[cfg(not(windows))]
-#[test]
-fn test_terminal_cd_persists_for_the_next_shell_command() {
-    let repo = init_worktree_pane_test_repo();
-    let subdir = repo.path().join("subdir");
-    std::fs::create_dir(&subdir).unwrap();
-    let mut app = create_test_app();
-    app.session.working_dir = Some(repo.path().to_string_lossy().into_owned());
-    app.set_worktree_pane_tab(super::worktree_pane::WorktreePaneTab::Terminal);
-    app.set_diff_pane_focus(true);
-
-    for ch in "cd subdir".chars() {
-        app.handle_diff_pane_focus_key(KeyCode::Char(ch), KeyModifiers::NONE);
-    }
-    app.handle_diff_pane_focus_key(KeyCode::Enter, KeyModifiers::NONE);
-    assert_eq!(
-        app.worktree_pane.terminal_cwd.as_deref(),
-        Some(subdir.to_string_lossy().as_ref())
-    );
-
-    for ch in "pwd".chars() {
-        app.handle_diff_pane_focus_key(KeyCode::Char(ch), KeyModifiers::NONE);
-    }
-    app.handle_diff_pane_focus_key(KeyCode::Enter, KeyModifiers::NONE);
-    for _ in 0..100 {
-        app.update_worktree_file_filter(Instant::now());
-        if !app.worktree_pane.terminal_running {
-            break;
-        }
-        std::thread::sleep(Duration::from_millis(10));
-    }
-    assert!(
-        app.worktree_pane
-            .terminal_lines
-            .iter()
-            .any(|line| line == subdir.to_string_lossy().as_ref())
-    );
-}
-
-#[test]
-fn test_terminal_clear_removes_pane_scrollback_without_running_shell() {
-    let mut app = create_test_app();
-    app.set_worktree_pane_tab(super::worktree_pane::WorktreePaneTab::Terminal);
-    app.set_diff_pane_focus(true);
-    app.worktree_pane.terminal_lines = vec!["old output".to_string(), "more output".to_string()];
-
-    for ch in "clear".chars() {
-        app.handle_diff_pane_focus_key(KeyCode::Char(ch), KeyModifiers::NONE);
-    }
-    app.handle_diff_pane_focus_key(KeyCode::Enter, KeyModifiers::NONE);
-
-    assert!(app.worktree_pane.terminal_lines.is_empty());
-    assert!(!app.worktree_pane.terminal_running);
-}
-
-#[test]
-fn test_terminal_output_preserves_sgr_but_strips_terminal_control_sequences() {
-    let lines = super::worktree_pane::safe_terminal_output_lines(
-        b"^D\x08\x08safe\x1b]0;owned\x07\x1b[31m red\x1b[0m\x1b[2J\x07\nnext\rline",
-    );
-    assert_eq!(lines, vec!["safe\x1b[31m red\x1b[0m", "nextline"]);
-    assert!(!lines.join("").contains("owned"));
-    assert!(!lines.join("").contains("\x1b[2J"));
-}
-
-#[test]
-fn test_terminal_slash_command_opens_terminal_tab() {
-    let _lock = scroll_render_test_lock();
-    let repo = init_worktree_pane_test_repo();
-    crate::tui::ui::prime_project_tree_for_tests(repo.path());
-    let mut app = create_test_app();
-    app.session.working_dir = Some(repo.path().to_string_lossy().into_owned());
-    assert!(super::commands::handle_files_command(&mut app, "/terminal"));
-    let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(140, 30)).unwrap();
-    let text = render_and_snap(&app, &mut terminal);
-    assert!(
-        crate::tui::ui::worktree_pane_layout()
-            .expect("terminal pane")
-            .terminal_tab_active,
-        "/terminal should activate the terminal: {text}"
-    );
-}
-
-#[test]
 fn test_files_pane_is_visible_and_active_by_default() {
     let _lock = scroll_render_test_lock();
     let repo = init_worktree_pane_test_repo();
@@ -298,7 +119,7 @@ fn test_files_pane_is_visible_and_active_by_default() {
 }
 
 #[test]
-fn test_files_tree_expands_and_tabs_cycle_through_terminal_and_diff() {
+fn test_files_tree_expands_and_tab_returns_to_diff() {
     let _lock = scroll_render_test_lock();
     let repo = init_worktree_pane_test_repo();
     std::fs::create_dir_all(repo.path().join("src/nested")).expect("create source tree");
@@ -326,32 +147,15 @@ fn test_files_tree_expands_and_tabs_cycle_through_terminal_and_diff() {
     assert!(expanded.contains("lib.rs"), "expanded child: {expanded}");
 
     assert!(app.handle_diff_pane_focus_key(KeyCode::Tab, KeyModifiers::NONE));
-    let terminal_text = render_and_snap(&app, &mut terminal);
-    let terminal_layout = crate::tui::ui::worktree_pane_layout().expect("terminal pane layout");
-    assert!(
-        terminal_layout.terminal_tab_active,
-        "Tab from Files should switch to Terminal: {terminal_text}"
-    );
-
-    assert!(app.handle_diff_pane_focus_key(KeyCode::Tab, KeyModifiers::NONE));
     let diff = render_and_snap(&app, &mut terminal);
     let layout = crate::tui::ui::worktree_pane_layout().expect("diff pane layout");
     assert!(
         !layout.files_tab_active,
-        "second Tab should switch to Diff: {diff}"
+        "Tab should switch to Diff: {diff}"
     );
     assert!(
         diff.contains("changes"),
         "dirty diff should render after switch: {diff}"
-    );
-
-    assert!(app.handle_diff_pane_focus_key(KeyCode::BackTab, KeyModifiers::NONE));
-    render_and_snap(&app, &mut terminal);
-    assert!(
-        crate::tui::ui::worktree_pane_layout()
-            .expect("terminal pane after BackTab")
-            .terminal_tab_active,
-        "BackTab from Diff should switch to Terminal"
     );
 }
 
@@ -380,17 +184,8 @@ fn test_files_header_tabs_switch_with_mouse() {
 
     assert!(app.handle_worktree_pane_mouse(worktree_test_mouse(
         MouseEventKind::Down(MouseButton::Left),
-        files_layout.terminal_tab_area.x + 1,
-        files_layout.terminal_tab_area.y,
-    )));
-    render_and_snap(&app, &mut terminal);
-    let terminal_layout = crate::tui::ui::worktree_pane_layout().expect("terminal pane");
-    assert!(terminal_layout.terminal_tab_active);
-
-    assert!(app.handle_worktree_pane_mouse(worktree_test_mouse(
-        MouseEventKind::Down(MouseButton::Left),
-        terminal_layout.diff_tab_area.x + 1,
-        terminal_layout.diff_tab_area.y,
+        files_layout.diff_tab_area.x + 1,
+        files_layout.diff_tab_area.y,
     )));
     render_and_snap(&app, &mut terminal);
     assert!(

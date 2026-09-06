@@ -521,8 +521,6 @@ impl App {
                 self.set_status_notice(
                     "Focus: Files (arrows navigate, Enter expands/previews, Tab switches)",
                 );
-            } else if self.worktree_terminal_tab_active() {
-                self.set_status_notice("Focus: Terminal (type commands, Enter runs, Tab switches)");
             } else {
                 self.set_status_notice("Focus: side pane (j/k scroll, Esc to return)");
             }
@@ -572,30 +570,29 @@ impl App {
         }
 
         self.note_worktree_pane_activity();
-        if self.worktree_terminal_tab_active()
-            && !matches!(code, KeyCode::Tab | KeyCode::BackTab)
-            && self.handle_project_terminal_focus_key(code)
-        {
-            return true;
-        }
         if let Some(layout) = crate::tui::ui::worktree_pane_layout() {
             match code {
                 KeyCode::Tab => {
-                    let next = self.worktree_pane_tab().next();
+                    let next = if layout.files_tab_active {
+                        super::worktree_pane::WorktreePaneTab::Diff
+                    } else {
+                        super::worktree_pane::WorktreePaneTab::Files
+                    };
                     self.set_worktree_pane_tab(next);
                     return true;
                 }
                 KeyCode::BackTab => {
-                    let next = self.worktree_pane_tab().previous();
+                    let next = if layout.files_tab_active {
+                        super::worktree_pane::WorktreePaneTab::Diff
+                    } else {
+                        super::worktree_pane::WorktreePaneTab::Files
+                    };
                     self.set_worktree_pane_tab(next);
                     return true;
                 }
                 _ => {}
             }
             if layout.files_tab_active && self.handle_project_files_focus_key(code) {
-                return true;
-            }
-            if layout.terminal_tab_active && self.handle_project_terminal_focus_key(code) {
                 return true;
             }
         }

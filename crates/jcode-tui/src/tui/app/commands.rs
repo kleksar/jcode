@@ -1003,42 +1003,39 @@ pub(super) fn handle_diff_command(app: &mut App, trimmed: &str) -> bool {
 }
 
 pub(super) fn handle_files_command(app: &mut App, trimmed: &str) -> bool {
-    let terminal_rest = slash_command_rest(trimmed, "/terminal");
-    let Some(rest) = terminal_rest
-        .or_else(|| slash_command_rest(trimmed, "/files"))
-        .or_else(|| slash_command_rest(trimmed, "/explorer"))
+    let Some(rest) =
+        slash_command_rest(trimmed, "/files").or_else(|| slash_command_rest(trimmed, "/explorer"))
     else {
         return false;
     };
-    if terminal_rest.is_some() && rest.trim().is_empty() {
-        app.set_worktree_pane_tab(super::worktree_pane::WorktreePaneTab::Terminal);
-        app.set_diff_pane_focus(true);
-        return true;
-    }
     match rest.trim().to_ascii_lowercase().as_str() {
         "" | "open" | "on" | "files" | "tree" => app.open_project_files_pane(),
         "diff" => {
             app.set_worktree_pane_tab(super::worktree_pane::WorktreePaneTab::Diff);
             app.set_diff_pane_focus(true);
         }
-        "terminal" | "term" | "shell" => {
-            app.set_worktree_pane_tab(super::worktree_pane::WorktreePaneTab::Terminal);
-            app.set_diff_pane_focus(true);
-        }
         "off" | "close" | "hide" => app.close_project_files_pane(),
         "toggle" | "next" => {
-            let next = app.worktree_pane_tab().next();
+            let next = if app.worktree_files_tab_active() {
+                super::worktree_pane::WorktreePaneTab::Diff
+            } else {
+                super::worktree_pane::WorktreePaneTab::Files
+            };
             app.set_worktree_pane_tab(next);
             app.set_diff_pane_focus(true);
         }
         "status" => {
-            let tab = app.worktree_pane_tab().label();
+            let tab = if app.worktree_files_tab_active() {
+                "Files"
+            } else {
+                "Diff"
+            };
             app.push_display_message(DisplayMessage::system(format!(
-                "Project pane: {tab}. Use /files, /files diff, /terminal, /files toggle, or /files off."
+                "Project pane: {tab}. Use /files, /files diff, /files toggle, or /files off."
             )));
         }
         _ => app.push_display_message(DisplayMessage::error(
-            "Usage: /files [open|diff|terminal|toggle|off|status]".to_string(),
+            "Usage: /files [open|diff|toggle|off|status]".to_string(),
         )),
     }
     true

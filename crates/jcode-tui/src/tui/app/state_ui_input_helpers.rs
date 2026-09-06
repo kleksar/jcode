@@ -172,7 +172,6 @@ const REGISTERED_COMMANDS: &[RegisteredCommand] = &[
         "Cycle or set diff display mode (off/inline/full/pinned/file)",
     ),
     RegisteredCommand::public("/files", "Browse the project tree in the right pane"),
-    RegisteredCommand::public("/terminal", "Open the project terminal in the right pane"),
     RegisteredCommand::hidden("/explorer", "Alias for /files"),
     RegisteredCommand::public(
         "/onboarding-preview",

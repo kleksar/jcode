@@ -1,170 +1,12 @@
 use super::*;
 
 const FILTER_IDLE_TIMEOUT: Duration = Duration::from_secs(60);
-const MAX_TERMINAL_LINES: usize = 2_000;
-
-type TerminalCommandResult = Result<std::process::Output, String>;
-
-pub(super) fn terminal_prompt_path(cwd: &str) -> String {
-    let path = std::path::Path::new(cwd);
-    if let Some(home) = dirs::home_dir() {
-        if path == home {
-            return "~".to_string();
-        }
-        if let Ok(relative) = path.strip_prefix(&home) {
-            return format!("~/{}", relative.display());
-        }
-    }
-    cwd.to_string()
-}
-
-pub(super) fn safe_terminal_output_lines(bytes: &[u8]) -> Vec<String> {
-    let text = String::from_utf8_lossy(bytes);
-    let mut lines = Vec::new();
-    let mut line = String::new();
-    let mut chars = text.chars().peekable();
-
-    while let Some(ch) = chars.next() {
-        match ch {
-            '\n' => lines.push(std::mem::take(&mut line)),
-            // PTY output normally uses CRLF. Ignoring CR also avoids turning
-            // every shell output row into two rows in the pane.
-            '\r' => {}
-            // macOS `script` closes its input with `^D\b\b`; interpreting
-            // backspace rather than printing it removes that harmless marker.
-            '\u{8}' => {
-                line.pop();
-            }
-            '\u{1b}' => match chars.peek().copied() {
-                Some('[') => {
-                    chars.next();
-                    let mut sequence = String::from("\u{1b}[");
-                    let mut final_byte = None;
-                    for next in chars.by_ref() {
-                        sequence.push(next);
-                        if ('@'..='~').contains(&next) {
-                            final_byte = Some(next);
-                            break;
-                        }
-                    }
-                    // Preserve only SGR styling. Cursor movement, screen
-                    // clearing, and other terminal control sequences must not
-                    // affect Jcode's outer terminal.
-                    if final_byte == Some('m') {
-                        line.push_str(&sequence);
-                    }
-                }
-                Some(']') => {
-                    chars.next();
-                    // Discard OSC sequences, including hyperlinks and title/
-                    // clipboard controls, through BEL or ST.
-                    let mut previous_escape = false;
-                    for next in chars.by_ref() {
-                        if next == '\u{7}' || (previous_escape && next == '\\') {
-                            break;
-                        }
-                        previous_escape = next == '\u{1b}';
-                    }
-                }
-                Some(_) => {
-                    chars.next();
-                }
-                None => {}
-            },
-            '\t' => line.push(ch),
-            ch if !ch.is_control() => line.push(ch),
-            _ => {}
-        }
-    }
-    if !line.is_empty() {
-        lines.push(line);
-    }
-    lines
-}
-
-fn run_interactive_shell_command(command: &str, cwd: &str) -> Result<std::process::Output, String> {
-    #[cfg(windows)]
-    {
-        let shell = std::env::var("COMSPEC").unwrap_or_else(|_| "cmd.exe".to_string());
-        return std::process::Command::new(shell)
-            .arg("/C")
-            .arg(command)
-            .current_dir(cwd)
-            .output()
-            .map_err(|error| error.to_string());
-    }
-
-    #[cfg(not(windows))]
-    {
-        let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string());
-        let mut process;
-
-        // `script` gives the child a real PTY on macOS. That matters for the
-        // user's normal shell setup: zsh loads ~/.zshrc in interactive mode,
-        // aliases such as `la` exist, and tools emit the same colours they do
-        // in iTerm. Other Unix platforms retain interactive rc loading and
-        // colour-forcing even when `script` syntax differs.
-        #[cfg(target_os = "macos")]
-        {
-            process = std::process::Command::new("/usr/bin/script");
-            process
-                .arg("-q")
-                .arg("/dev/null")
-                .arg(&shell)
-                .arg("-ic")
-                .arg(command);
-        }
-        #[cfg(not(target_os = "macos"))]
-        {
-            process = std::process::Command::new(&shell);
-            process.arg("-ic").arg(command);
-        }
-
-        process
-            .current_dir(cwd)
-            .env(
-                "TERM",
-                std::env::var("TERM").unwrap_or_else(|_| "xterm-256color".into()),
-            )
-            .env("CLICOLOR_FORCE", "1")
-            .env("FORCE_COLOR", "1")
-            .output()
-            .map_err(|error| error.to_string())
-    }
-}
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(super) enum WorktreePaneTab {
     Diff,
     #[default]
     Files,
-    Terminal,
-}
-
-impl WorktreePaneTab {
-    pub(super) fn next(self) -> Self {
-        match self {
-            Self::Diff => Self::Files,
-            Self::Files => Self::Terminal,
-            Self::Terminal => Self::Diff,
-        }
-    }
-
-    pub(super) fn previous(self) -> Self {
-        match self {
-            Self::Diff => Self::Terminal,
-            Self::Files => Self::Diff,
-            Self::Terminal => Self::Files,
-        }
-    }
-
-    pub(super) fn label(self) -> &'static str {
-        match self {
-            Self::Diff => "Diff",
-            Self::Files => "Files",
-            Self::Terminal => "Terminal",
-        }
-    }
 }
 
 pub(super) struct WorktreePaneState {
@@ -178,11 +20,6 @@ pub(super) struct WorktreePaneState {
     pub(super) tree_expanded_dirs: std::collections::HashSet<String>,
     pub(super) tree_preview_scroll: usize,
     pub(super) tree_preview_focused: bool,
-    pub(super) terminal_input: String,
-    pub(super) terminal_lines: Vec<String>,
-    pub(super) terminal_cwd: Option<String>,
-    pub(super) terminal_running: bool,
-    terminal_command_rx: Option<std::sync::mpsc::Receiver<TerminalCommandResult>>,
     session_id: String,
     working_dir: Option<String>,
 }
@@ -200,11 +37,6 @@ impl Default for WorktreePaneState {
             tree_expanded_dirs: std::collections::HashSet::new(),
             tree_preview_scroll: 0,
             tree_preview_focused: false,
-            terminal_input: String::new(),
-            terminal_lines: vec!["Jcode terminal. Type a command and press Enter.".to_string()],
-            terminal_cwd: None,
-            terminal_running: false,
-            terminal_command_rx: None,
             session_id: String::new(),
             working_dir: None,
         }
@@ -241,14 +73,6 @@ impl App {
         self.worktree_pane.tab == WorktreePaneTab::Files
     }
 
-    pub(super) fn worktree_terminal_tab_active(&self) -> bool {
-        self.worktree_pane.tab == WorktreePaneTab::Terminal
-    }
-
-    pub(super) fn worktree_pane_tab(&self) -> WorktreePaneTab {
-        self.worktree_pane.tab
-    }
-
     pub(super) fn worktree_pane_explicit_open(&self) -> bool {
         self.worktree_pane.explicit_open
     }
@@ -263,145 +87,11 @@ impl App {
         self.worktree_pane.tree_preview_focused = false;
         self.reset_worktree_diff_scroll();
         self.set_status_notice(match tab {
-            WorktreePaneTab::Diff => "Right pane: Diff (Tab switches tabs)",
+            WorktreePaneTab::Diff => "Right pane: Diff (Tab switches to Files)",
             WorktreePaneTab::Files => {
-                "Right pane: Files (arrows navigate, Enter expands/previews, Tab switches tabs)"
-            }
-            WorktreePaneTab::Terminal => {
-                "Right pane: Terminal (type commands, Enter runs, Tab switches tabs)"
+                "Right pane: Files (arrows navigate, Enter expands/previews, Tab switches)"
             }
         });
-    }
-
-    pub(super) fn handle_project_terminal_focus_key(&mut self, code: KeyCode) -> bool {
-        if !self.worktree_terminal_tab_active() {
-            return false;
-        }
-        self.prepare_worktree_pane_state();
-        if self.worktree_pane.terminal_running {
-            if code == KeyCode::Esc {
-                self.set_diff_pane_focus(false);
-            } else {
-                self.set_status_notice("Terminal command is still running");
-            }
-            return true;
-        }
-        match code {
-            KeyCode::Char(ch) => self.worktree_pane.terminal_input.push(ch),
-            KeyCode::Backspace => {
-                self.worktree_pane.terminal_input.pop();
-            }
-            KeyCode::Enter => self.run_project_terminal_command(),
-            KeyCode::Esc => self.set_diff_pane_focus(false),
-            KeyCode::Up | KeyCode::Down | KeyCode::Left | KeyCode::Right => {}
-            _ => {}
-        }
-        true
-    }
-
-    fn run_project_terminal_command(&mut self) {
-        let command = std::mem::take(&mut self.worktree_pane.terminal_input);
-        let command = command.trim().to_string();
-        if command.is_empty() {
-            return;
-        }
-        // `clear` normally emits screen-control sequences for a real terminal.
-        // This pane is rendered by ratatui inside Jcode, so applying those
-        // sequences to the outer terminal would be unsafe and printing them is
-        // useless. Clear the pane's own scrollback instead.
-        if command == "clear" {
-            self.worktree_pane.terminal_lines.clear();
-            return;
-        }
-        let cwd = self
-            .worktree_pane
-            .terminal_cwd
-            .clone()
-            .or_else(|| self.session.working_dir.clone())
-            .unwrap_or_else(|| ".".to_string());
-        self.worktree_pane.terminal_lines.push(format!(
-            "{} {}",
-            terminal_prompt_path(&cwd),
-            command
-        ));
-
-        let cd_target = (command == "cd")
-            .then_some("~")
-            .or_else(|| command.strip_prefix("cd ").map(str::trim));
-        if let Some(target) = cd_target {
-            let target = if target.is_empty() || target == "~" {
-                std::env::var("HOME").unwrap_or_else(|_| cwd.clone())
-            } else {
-                target.to_string()
-            };
-            let path = std::path::Path::new(&cwd).join(target);
-            match path.canonicalize() {
-                Ok(path) if path.is_dir() => {
-                    self.worktree_pane.terminal_cwd = Some(path.to_string_lossy().into_owned());
-                }
-                _ => self
-                    .worktree_pane
-                    .terminal_lines
-                    .push("cd: directory not found".to_string()),
-            }
-        } else {
-            let (tx, rx) = std::sync::mpsc::channel();
-            self.worktree_pane.terminal_command_rx = Some(rx);
-            self.worktree_pane.terminal_running = true;
-            std::thread::spawn(move || {
-                let _ = tx.send(run_interactive_shell_command(&command, &cwd));
-            });
-        }
-        self.trim_project_terminal_lines();
-    }
-
-    fn trim_project_terminal_lines(&mut self) {
-        if self.worktree_pane.terminal_lines.len() > MAX_TERMINAL_LINES {
-            let remove = self.worktree_pane.terminal_lines.len() - MAX_TERMINAL_LINES;
-            self.worktree_pane.terminal_lines.drain(..remove);
-        }
-    }
-
-    fn poll_project_terminal_command(&mut self) -> bool {
-        let result = match self
-            .worktree_pane
-            .terminal_command_rx
-            .as_ref()
-            .map(std::sync::mpsc::Receiver::try_recv)
-        {
-            Some(Ok(result)) => result,
-            Some(Err(std::sync::mpsc::TryRecvError::Empty)) | None => return false,
-            Some(Err(std::sync::mpsc::TryRecvError::Disconnected)) => {
-                Err("terminal command worker disconnected".to_string())
-            }
-        };
-        self.worktree_pane.terminal_command_rx = None;
-        self.worktree_pane.terminal_running = false;
-        match result {
-            Ok(output) => {
-                self.worktree_pane
-                    .terminal_lines
-                    .extend(safe_terminal_output_lines(&output.stdout));
-                self.worktree_pane
-                    .terminal_lines
-                    .extend(safe_terminal_output_lines(&output.stderr));
-                if !output.status.success() {
-                    self.worktree_pane.terminal_lines.push(format!(
-                        "command exited with {}",
-                        output
-                            .status
-                            .code()
-                            .map_or_else(|| "signal".to_string(), |code| code.to_string())
-                    ));
-                }
-            }
-            Err(error) => self
-                .worktree_pane
-                .terminal_lines
-                .push(format!("failed to run command: {error}")),
-        }
-        self.trim_project_terminal_lines();
-        true
     }
 
     pub(super) fn open_project_files_pane(&mut self) {
@@ -600,9 +290,8 @@ impl App {
 
     /// Called by both local and remote ticks, even when there are no input events.
     pub(super) fn update_worktree_file_filter(&mut self, now: Instant) -> bool {
-        let terminal_updated = self.poll_project_terminal_command();
         let Some(path) = self.worktree_pane.selected_file.as_deref() else {
-            return terminal_updated;
+            return false;
         };
         let expired = self
             .worktree_pane
@@ -612,7 +301,7 @@ impl App {
             || crate::tui::ui::worktree_file_is_present(self.session.working_dir.as_deref(), path)
                 == Some(false);
         if !expired && !stale {
-            return terminal_updated;
+            return false;
         }
         self.worktree_pane.selected_file = None;
         self.worktree_pane.last_activity = None;
@@ -652,15 +341,6 @@ impl App {
                 layout.files_tab_area,
             ) {
                 self.set_worktree_pane_tab(WorktreePaneTab::Files);
-                self.set_diff_pane_focus(true);
-                return true;
-            }
-            if crate::tui::layout_utils::point_in_rect(
-                mouse.column,
-                mouse.row,
-                layout.terminal_tab_area,
-            ) {
-                self.set_worktree_pane_tab(WorktreePaneTab::Terminal);
                 self.set_diff_pane_focus(true);
                 return true;
             }

@@ -23,9 +23,7 @@ pub(crate) struct WorktreePaneLayout {
     pub area: Rect,
     pub diff_tab_area: Rect,
     pub files_tab_area: Rect,
-    pub terminal_tab_area: Rect,
     pub files_tab_active: bool,
-    pub terminal_tab_active: bool,
     pub list_area: Rect,
     pub body_area: Rect,
     pub list_scroll: usize,
@@ -1020,7 +1018,6 @@ fn cached_render_lines(
 
 const DIFF_TAB_LABEL: &str = " Diff ";
 const FILES_TAB_LABEL: &str = " Files ";
-const TERMINAL_TAB_LABEL: &str = " Terminal ";
 
 fn project_pane_tab_style(active: bool) -> Style {
     if active {
@@ -1033,27 +1030,18 @@ fn project_pane_tab_style(active: bool) -> Style {
     }
 }
 
-fn project_pane_title(
-    files_active: bool,
-    terminal_active: bool,
-    mut suffix: Vec<Span<'static>>,
-) -> Line<'static> {
+fn project_pane_title(files_active: bool, mut suffix: Vec<Span<'static>>) -> Line<'static> {
     let mut spans = vec![
-        Span::styled(
-            DIFF_TAB_LABEL,
-            project_pane_tab_style(!files_active && !terminal_active),
-        ),
+        Span::styled(DIFF_TAB_LABEL, project_pane_tab_style(!files_active)),
         Span::raw(" "),
         Span::styled(FILES_TAB_LABEL, project_pane_tab_style(files_active)),
-        Span::raw(" "),
-        Span::styled(TERMINAL_TAB_LABEL, project_pane_tab_style(terminal_active)),
         Span::raw("  "),
     ];
     spans.append(&mut suffix);
     Line::from(spans)
 }
 
-fn project_pane_tab_areas(area: Rect) -> (Rect, Rect, Rect) {
+fn project_pane_tab_areas(area: Rect) -> (Rect, Rect) {
     let header_x = area.x.saturating_add(1);
     let diff = Rect::new(header_x, area.y, DIFF_TAB_LABEL.len() as u16, 1);
     let files = Rect::new(
@@ -1062,13 +1050,7 @@ fn project_pane_tab_areas(area: Rect) -> (Rect, Rect, Rect) {
         FILES_TAB_LABEL.len() as u16,
         1,
     );
-    let terminal = Rect::new(
-        files.right().saturating_add(1),
-        area.y,
-        TERMINAL_TAB_LABEL.len() as u16,
-        1,
-    );
-    (diff, files, terminal)
+    (diff, files)
 }
 
 fn flatten_project_nodes(
@@ -1392,13 +1374,13 @@ pub(super) fn draw_project_files(
     } else {
         vec![Span::styled("loading…", Style::default().fg(dim_color()))]
     };
-    let title = project_pane_title(true, false, suffix);
+    let title = project_pane_title(true, suffix);
     let border = Style::default().fg(if focused { tool_color() } else { dim_color() });
     let Some(inner) = super::draw_right_rail_chrome(frame, area, title, border) else {
         return;
     };
     super::clear_area(frame, inner);
-    let (diff_tab_area, files_tab_area, terminal_tab_area) = project_pane_tab_areas(area);
+    let (diff_tab_area, files_tab_area) = project_pane_tab_areas(area);
 
     let Some(snapshot) = snapshot else {
         frame.render_widget(
@@ -1416,9 +1398,7 @@ pub(super) fn draw_project_files(
                 area,
                 diff_tab_area,
                 files_tab_area,
-                terminal_tab_area,
                 files_tab_active: true,
-                terminal_tab_active: false,
                 list_area: inner,
                 body_area: inner,
                 list_scroll: 0,
@@ -1559,9 +1539,7 @@ pub(super) fn draw_project_files(
             area,
             diff_tab_area,
             files_tab_area,
-            terminal_tab_area,
             files_tab_active: true,
-            terminal_tab_active: false,
             list_area: tree_area,
             body_area: preview_area.unwrap_or(tree_area),
             list_scroll: tree_scroll,
@@ -1588,7 +1566,6 @@ pub(super) fn draw_empty_worktree_changes(
     }
     let title = project_pane_title(
         false,
-        false,
         vec![Span::styled(
             "working tree clean",
             Style::default().fg(dim_color()),
@@ -1608,15 +1585,13 @@ pub(super) fn draw_empty_worktree_changes(
     super::set_last_diff_pane_max_scroll(0);
     super::set_last_diff_pane_effective_scroll(0);
     super::record_side_pane_snapshot(std::slice::from_ref(&line), 0, 1, inner);
-    let (diff_tab_area, files_tab_area, terminal_tab_area) = project_pane_tab_areas(area);
+    let (diff_tab_area, files_tab_area) = project_pane_tab_areas(area);
     WORKTREE_PANE_LAYOUT.with(|layout| {
         *layout.borrow_mut() = Some(WorktreePaneLayout {
             area,
             diff_tab_area,
             files_tab_area,
-            terminal_tab_area,
             files_tab_active: false,
-            terminal_tab_active: false,
             list_area: inner,
             body_area: inner,
             list_scroll: 0,
@@ -1627,209 +1602,6 @@ pub(super) fn draw_empty_worktree_changes(
             tree_rows: Arc::new(Vec::new()),
             preview_total_lines: 0,
             preview_scroll: 0,
-            working_dir: app.working_dir(),
-        })
-    });
-}
-
-fn apply_terminal_sgr(style: &mut Style, parameters: &str) {
-    use ratatui::style::{Color, Modifier};
-
-    let values = if parameters.is_empty() {
-        vec![0]
-    } else {
-        parameters
-            .split(';')
-            .map(|value| value.parse::<u16>().unwrap_or(0))
-            .collect::<Vec<_>>()
-    };
-    let mut index = 0;
-    while index < values.len() {
-        let value = values[index];
-        match value {
-            0 => *style = Style::default(),
-            1 => *style = style.add_modifier(Modifier::BOLD),
-            2 => *style = style.add_modifier(Modifier::DIM),
-            3 => *style = style.add_modifier(Modifier::ITALIC),
-            4 => *style = style.add_modifier(Modifier::UNDERLINED),
-            7 => *style = style.add_modifier(Modifier::REVERSED),
-            22 => *style = style.remove_modifier(Modifier::BOLD | Modifier::DIM),
-            23 => *style = style.remove_modifier(Modifier::ITALIC),
-            24 => *style = style.remove_modifier(Modifier::UNDERLINED),
-            27 => *style = style.remove_modifier(Modifier::REVERSED),
-            30..=37 => *style = style.fg(Color::Indexed((value - 30) as u8)),
-            39 => *style = style.fg(Color::Reset),
-            40..=47 => *style = style.bg(Color::Indexed((value - 40) as u8)),
-            49 => *style = style.bg(Color::Reset),
-            90..=97 => *style = style.fg(Color::Indexed((value - 90 + 8) as u8)),
-            100..=107 => *style = style.bg(Color::Indexed((value - 100 + 8) as u8)),
-            38 | 48 if values.get(index + 1) == Some(&5) => {
-                if let Some(color) = values
-                    .get(index + 2)
-                    .and_then(|value| u8::try_from(*value).ok())
-                {
-                    if value == 38 {
-                        *style = style.fg(Color::Indexed(color));
-                    } else {
-                        *style = style.bg(Color::Indexed(color));
-                    }
-                    index += 2;
-                }
-            }
-            38 | 48 if values.get(index + 1) == Some(&2) => {
-                let rgb = values.get(index + 2..index + 5).and_then(|rgb| {
-                    Some((
-                        u8::try_from(*rgb.first()?).ok()?,
-                        u8::try_from(*rgb.get(1)?).ok()?,
-                        u8::try_from(*rgb.get(2)?).ok()?,
-                    ))
-                });
-                if let Some((red, green, blue)) = rgb {
-                    if value == 38 {
-                        *style = style.fg(Color::Rgb(red, green, blue));
-                    } else {
-                        *style = style.bg(Color::Rgb(red, green, blue));
-                    }
-                    index += 4;
-                }
-            }
-            _ => {}
-        }
-        index += 1;
-    }
-}
-
-pub(super) fn terminal_ansi_line(line: &str) -> Line<'static> {
-    let mut spans = Vec::new();
-    let mut style = Style::default();
-    let mut text = String::new();
-    let mut chars = line.chars().peekable();
-
-    while let Some(ch) = chars.next() {
-        if ch != '\u{1b}' || chars.peek() != Some(&'[') {
-            text.push(ch);
-            continue;
-        }
-        chars.next();
-        let mut parameters = String::new();
-        let mut is_sgr = false;
-        for next in chars.by_ref() {
-            if next == 'm' {
-                is_sgr = true;
-                break;
-            }
-            if ('@'..='~').contains(&next) {
-                break;
-            }
-            parameters.push(next);
-        }
-        if !text.is_empty() {
-            spans.push(Span::styled(std::mem::take(&mut text), style));
-        }
-        if is_sgr {
-            apply_terminal_sgr(&mut style, &parameters);
-        }
-    }
-    if !text.is_empty() || spans.is_empty() {
-        spans.push(Span::styled(text, style));
-    }
-    Line::from(spans)
-}
-
-#[cfg(test)]
-mod terminal_ansi_tests {
-    use super::*;
-    use ratatui::style::{Color, Modifier};
-
-    #[test]
-    fn terminal_ansi_line_maps_standard_indexed_and_rgb_colours() {
-        let line = terminal_ansi_line(
-            "plain \x1b[1;31mred\x1b[0m \x1b[38;5;42mindexed\x1b[38;2;1;2;3mrgb",
-        );
-        assert_eq!(line.spans.len(), 5);
-        assert_eq!(line.spans[0].content, "plain ");
-        assert_eq!(line.spans[1].content, "red");
-        assert_eq!(line.spans[1].style.fg, Some(Color::Indexed(1)));
-        assert!(line.spans[1].style.add_modifier.contains(Modifier::BOLD));
-        assert_eq!(line.spans[3].style.fg, Some(Color::Indexed(42)));
-        assert_eq!(line.spans[4].style.fg, Some(Color::Rgb(1, 2, 3)));
-    }
-}
-
-pub(super) fn draw_project_terminal(
-    frame: &mut Frame,
-    area: Rect,
-    app: &dyn TuiState,
-    focused: bool,
-) {
-    if area.width < 30 || area.height < 3 {
-        return;
-    }
-    let cwd = app.project_terminal_cwd().unwrap_or(".");
-    let title = project_pane_title(
-        false,
-        true,
-        vec![Span::styled(
-            cwd.to_string(),
-            Style::default().fg(dim_color()),
-        )],
-    );
-    let border = Style::default().fg(if focused { tool_color() } else { dim_color() });
-    let Some(inner) = super::draw_right_rail_chrome(frame, area, title, border) else {
-        return;
-    };
-    super::clear_area(frame, inner);
-
-    let output_height = inner.height.saturating_sub(1) as usize;
-    let lines = app.project_terminal_lines();
-    let start = lines.len().saturating_sub(output_height);
-    let mut rendered = lines[start..]
-        .iter()
-        .map(|line| terminal_ansi_line(line))
-        .collect::<Vec<_>>();
-    if app.project_terminal_running() {
-        rendered.push(Line::from(Span::styled(
-            "⠋ command running…",
-            Style::default().fg(tool_color()),
-        )));
-    } else {
-        rendered.push(Line::from(vec![
-            Span::styled(
-                format!("{} ", app.project_terminal_prompt()),
-                Style::default().fg(tool_color()),
-            ),
-            Span::raw(app.project_terminal_input().to_string()),
-            Span::styled(
-                if focused { "█" } else { "" },
-                Style::default().fg(file_link_color()),
-            ),
-        ]));
-    }
-    frame.render_widget(Paragraph::new(rendered.clone()), inner);
-    super::set_pinned_pane_total_lines(lines.len().saturating_add(1));
-    super::set_last_diff_pane_max_scroll(0);
-    super::set_last_diff_pane_effective_scroll(start);
-    super::record_side_pane_snapshot(&rendered, start, lines.len().saturating_add(1), inner);
-
-    let (diff_tab_area, files_tab_area, terminal_tab_area) = project_pane_tab_areas(area);
-    WORKTREE_PANE_LAYOUT.with(|layout| {
-        *layout.borrow_mut() = Some(WorktreePaneLayout {
-            area,
-            diff_tab_area,
-            files_tab_area,
-            terminal_tab_area,
-            files_tab_active: false,
-            terminal_tab_active: true,
-            list_area: inner,
-            body_area: inner,
-            list_scroll: 0,
-            paths: Arc::new(Vec::new()),
-            tree_area: None,
-            preview_area: None,
-            tree_scroll: 0,
-            tree_rows: Arc::new(Vec::new()),
-            preview_total_lines: lines.len().saturating_add(1),
-            preview_scroll: start,
             working_dir: app.working_dir(),
         })
     });
@@ -1847,7 +1619,6 @@ pub(super) fn draw_worktree_changes(
         return;
     }
     let title = project_pane_title(
-        false,
         false,
         vec![
             Span::styled("changes ", Style::default().fg(tool_color())),
@@ -1947,15 +1718,13 @@ pub(super) fn draw_worktree_changes(
         );
     }
     draw_padded_section_boundary(frame, boundary_area, true);
-    let (diff_tab_area, files_tab_area, terminal_tab_area) = project_pane_tab_areas(area);
+    let (diff_tab_area, files_tab_area) = project_pane_tab_areas(area);
     WORKTREE_PANE_LAYOUT.with(|layout| {
         *layout.borrow_mut() = Some(WorktreePaneLayout {
             area,
             diff_tab_area,
             files_tab_area,
-            terminal_tab_area,
             files_tab_active: false,
-            terminal_tab_active: false,
             list_area,
             body_area: body,
             list_scroll,

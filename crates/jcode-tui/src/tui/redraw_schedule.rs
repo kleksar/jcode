@@ -396,13 +396,6 @@ pub(crate) fn redraw_interval_with_policy_and_animation(
     let animation_interval = fps_to_duration(policy.animation_fps);
     let fast_interval = fps_to_duration(policy.redraw_fps);
 
-    // Terminal command completion arrives through a nonblocking channel polled
-    // by the regular tick. Leaving this on the 250ms idle cadence made even a
-    // command that had already finished appear to hang on `command running…`.
-    if state.project_terminal_running() {
-        return fast_interval;
-    }
-
     // A retained/collapsing reasoning trace used to need animation cadence here;
     // anchored traces are static transcript messages now. The tail-follow
     // catch-up slide still needs smooth frames and must skip the deep-idle
@@ -585,11 +578,6 @@ pub(crate) fn periodic_redraw_required_excluding_idle_animation(state: &dyn TuiS
 
 fn periodic_redraw_required_inner(state: &dyn TuiState, include_idle_animation: bool) -> bool {
     let policy = crate::perf::tui_policy();
-
-    if state.project_terminal_running() {
-        record_full_frame_redraw_reason("project_terminal_command");
-        return true;
-    }
 
     let deep_idle = deep_idle_dormant(state);
 
