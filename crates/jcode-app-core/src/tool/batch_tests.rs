@@ -122,45 +122,6 @@ async fn batch_fails_cleanly_after_registry_tool_map_is_dropped() {
     );
 }
 
-struct EchoPayloadTool;
-
-#[async_trait]
-impl Tool for EchoPayloadTool {
-    fn name(&self) -> &str {
-        "echo_payload"
-    }
-
-    fn description(&self) -> &str {
-        "Returns the requested test payload."
-    }
-
-    fn parameters_schema(&self) -> Value {
-        json!({
-            "type": "object",
-            "properties": { "payload": { "type": "string" } },
-            "required": ["payload"]
-        })
-    }
-
-    async fn execute(&self, input: Value, _ctx: ToolContext) -> Result<ToolOutput> {
-        Ok(ToolOutput::new(
-            input["payload"].as_str().unwrap_or_default().to_string(),
-        ))
-    }
-}
-
-fn test_context() -> ToolContext {
-    ToolContext {
-        session_id: "batch-acceptance-test".to_string(),
-        message_id: "test-message".to_string(),
-        tool_call_id: "test-batch".to_string(),
-        working_dir: Some(std::env::temp_dir()),
-        stdin_request_tx: None,
-        graceful_shutdown_signal: None,
-        execution_mode: jcode_tool_core::ToolExecutionMode::Direct,
-    }
-}
-
 #[test]
 fn description_includes_parallel_tool_call_example() {
     assert!(BATCH_DESCRIPTION.contains("Run independent tool calls in parallel"));
@@ -261,19 +222,7 @@ fn format_results_truncates_unicode_on_a_character_boundary() {
 
 #[tokio::test]
 async fn registry_execute_enforces_batch_budget_and_returns_recovery_instructions() {
-    let registry = Registry::empty();
-    registry
-        .register(
-            "echo_payload".to_string(),
-            std::sync::Arc::new(EchoPayloadTool),
-        )
-        .await;
-    registry
-        .register(
-            "batch".to_string(),
-            std::sync::Arc::new(BatchTool::new(registry.clone())),
-        )
-        .await;
+    let registry = registry_with_batch_and_echo().await;
 
     let output = registry
         .execute(
@@ -282,14 +231,14 @@ async fn registry_execute_enforces_batch_budget_and_returns_recovery_instruction
                 "intent": "Exercise the public batch execution path",
                 "tool_calls": [
                     {
-                        "tool": "echo_payload",
+                        "tool": "echo",
                         "intent": "Return alpha payload",
-                        "payload": "α".repeat(30_000)
+                        "parameters": { "text": "α".repeat(30_000) }
                     },
                     {
-                        "tool": "echo_payload",
+                        "tool": "echo",
                         "intent": "Return beta payload",
-                        "payload": "β".repeat(30_000)
+                        "parameters": { "text": "β".repeat(30_000) }
                     }
                 ]
             }),
@@ -304,6 +253,72 @@ async fn registry_execute_enforces_batch_budget_and_returns_recovery_instruction
     assert_eq!(payload_bytes, BATCH_OUTPUT_BUDGET_BYTES);
     assert_eq!(output.matches("rerun subcall").count(), 2);
     assert!(output.contains("Completed: 2 succeeded, 0 failed"));
+}
+
+#[tokio::test]
+async fn registry_execute_accepts_the_maximum_parallel_small_outputs() {
+    let registry = registry_with_batch_and_echo().await;
+    let calls: Vec<Value> = (0..MAX_PARALLEL)
+        .map(|index| {
+            json!({
+                "tool": "echo",
+                "intent": format!("Return payload {index}"),
+                "parameters": { "text": "θ".repeat(500) }
+            })
+        })
+        .collect();
+
+    let output = registry
+        .execute(
+            "batch",
+            json!({ "intent": "Exercise maximum fan-out", "tool_calls": calls }),
+            test_context(),
+        )
+        .await
+        .expect("maximum documented fan-out should succeed")
+        .output;
+
+    assert_eq!(output.matches('θ').count(), MAX_PARALLEL * 500);
+    assert!(!output.contains("truncated to the batch output budget"));
+    assert!(output.contains("Completed: 10 succeeded, 0 failed"));
+}
+
+#[tokio::test]
+async fn registry_execute_rejects_empty_and_over_limit_batches() {
+    let registry = registry_with_batch_and_echo().await;
+
+    let empty_error = registry
+        .execute(
+            "batch",
+            json!({ "intent": "Reject empty batch", "tool_calls": [] }),
+            test_context(),
+        )
+        .await
+        .expect_err("empty batch should be rejected");
+    assert!(empty_error.to_string().contains("No tool calls provided"));
+
+    let calls: Vec<Value> = (0..=MAX_PARALLEL)
+        .map(|index| {
+            json!({
+                "tool": "echo",
+                "intent": format!("Return payload {index}"),
+                "parameters": { "text": "small" }
+            })
+        })
+        .collect();
+    let over_limit_error = registry
+        .execute(
+            "batch",
+            json!({ "intent": "Reject excessive fan-out", "tool_calls": calls }),
+            test_context(),
+        )
+        .await
+        .expect_err("fan-out above the documented maximum should be rejected");
+    assert!(
+        over_limit_error
+            .to_string()
+            .contains("Maximum 10 parallel tool calls allowed")
+    );
 }
 
 #[test]
