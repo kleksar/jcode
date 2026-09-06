@@ -1,6 +1,21 @@
 use super::*;
 
 const FILTER_IDLE_TIMEOUT: Duration = Duration::from_secs(60);
+const MAX_TERMINAL_LINES: usize = 2_000;
+
+type TerminalCommandResult = Result<std::process::Output, String>;
+
+pub(super) fn safe_terminal_output_lines(bytes: &[u8]) -> Vec<String> {
+    crate::message::strip_ansi_escape_sequences(&String::from_utf8_lossy(bytes))
+        .replace('\r', "\n")
+        .lines()
+        .map(|line| {
+            line.chars()
+                .filter(|ch| !ch.is_control() || *ch == '\t')
+                .collect()
+        })
+        .collect()
+}
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(super) enum WorktreePaneTab {
@@ -8,6 +23,32 @@ pub(super) enum WorktreePaneTab {
     #[default]
     Files,
     Terminal,
+}
+
+impl WorktreePaneTab {
+    pub(super) fn next(self) -> Self {
+        match self {
+            Self::Diff => Self::Files,
+            Self::Files => Self::Terminal,
+            Self::Terminal => Self::Diff,
+        }
+    }
+
+    pub(super) fn previous(self) -> Self {
+        match self {
+            Self::Diff => Self::Terminal,
+            Self::Files => Self::Diff,
+            Self::Terminal => Self::Files,
+        }
+    }
+
+    pub(super) fn label(self) -> &'static str {
+        match self {
+            Self::Diff => "Diff",
+            Self::Files => "Files",
+            Self::Terminal => "Terminal",
+        }
+    }
 }
 
 pub(super) struct WorktreePaneState {
@@ -24,6 +65,8 @@ pub(super) struct WorktreePaneState {
     pub(super) terminal_input: String,
     pub(super) terminal_lines: Vec<String>,
     pub(super) terminal_cwd: Option<String>,
+    pub(super) terminal_running: bool,
+    terminal_command_rx: Option<std::sync::mpsc::Receiver<TerminalCommandResult>>,
     session_id: String,
     working_dir: Option<String>,
 }
@@ -44,6 +87,8 @@ impl Default for WorktreePaneState {
             terminal_input: String::new(),
             terminal_lines: vec!["Jcode terminal. Type a command and press Enter.".to_string()],
             terminal_cwd: None,
+            terminal_running: false,
+            terminal_command_rx: None,
             session_id: String::new(),
             working_dir: None,
         }
@@ -84,6 +129,10 @@ impl App {
         self.worktree_pane.tab == WorktreePaneTab::Terminal
     }
 
+    pub(super) fn worktree_pane_tab(&self) -> WorktreePaneTab {
+        self.worktree_pane.tab
+    }
+
     pub(super) fn worktree_pane_explicit_open(&self) -> bool {
         self.worktree_pane.explicit_open
     }
@@ -113,6 +162,14 @@ impl App {
             return false;
         }
         self.prepare_worktree_pane_state();
+        if self.worktree_pane.terminal_running {
+            if code == KeyCode::Esc {
+                self.set_diff_pane_focus(false);
+            } else {
+                self.set_status_notice("Terminal command is still running");
+            }
+            return true;
+        }
         match code {
             KeyCode::Char(ch) => self.worktree_pane.terminal_input.push(ch),
             KeyCode::Backspace => {
@@ -142,8 +199,11 @@ impl App {
             .terminal_lines
             .push(format!("{} $ {}", cwd, command));
 
-        if let Some(target) = command.strip_prefix("cd ").map(str::trim) {
-            let target = if target == "~" {
+        let cd_target = (command == "cd")
+            .then_some("~")
+            .or_else(|| command.strip_prefix("cd ").map(str::trim));
+        if let Some(target) = cd_target {
+            let target = if target.is_empty() || target == "~" {
                 std::env::var("HOME").unwrap_or_else(|_| cwd.clone())
             } else {
                 target.to_string()
@@ -159,45 +219,81 @@ impl App {
                     .push("cd: directory not found".to_string()),
             }
         } else {
-            let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string());
-            match std::process::Command::new(shell)
-                .arg("-lc")
-                .arg(&command)
-                .current_dir(&cwd)
-                .output()
-            {
-                Ok(output) => {
-                    self.worktree_pane.terminal_lines.extend(
-                        String::from_utf8_lossy(&output.stdout)
-                            .lines()
-                            .map(str::to_string),
-                    );
-                    self.worktree_pane.terminal_lines.extend(
-                        String::from_utf8_lossy(&output.stderr)
-                            .lines()
-                            .map(str::to_string),
-                    );
-                    if !output.status.success() {
-                        self.worktree_pane.terminal_lines.push(format!(
-                            "command exited with {}",
-                            output
-                                .status
-                                .code()
-                                .map_or_else(|| "signal".to_string(), |c| c.to_string())
-                        ));
-                    }
-                }
-                Err(error) => self
-                    .worktree_pane
-                    .terminal_lines
-                    .push(format!("failed to run command: {error}")),
-            }
+            let (tx, rx) = std::sync::mpsc::channel();
+            self.worktree_pane.terminal_command_rx = Some(rx);
+            self.worktree_pane.terminal_running = true;
+            std::thread::spawn(move || {
+                #[cfg(windows)]
+                let output = {
+                    let shell = std::env::var("COMSPEC").unwrap_or_else(|_| "cmd.exe".to_string());
+                    std::process::Command::new(shell)
+                        .arg("/C")
+                        .arg(&command)
+                        .current_dir(&cwd)
+                        .output()
+                };
+                #[cfg(not(windows))]
+                let output = {
+                    let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string());
+                    std::process::Command::new(shell)
+                        .arg("-lc")
+                        .arg(&command)
+                        .current_dir(&cwd)
+                        .output()
+                };
+                let _ = tx.send(output.map_err(|error| error.to_string()));
+            });
         }
-        const MAX_TERMINAL_LINES: usize = 2_000;
+        self.trim_project_terminal_lines();
+    }
+
+    fn trim_project_terminal_lines(&mut self) {
         if self.worktree_pane.terminal_lines.len() > MAX_TERMINAL_LINES {
             let remove = self.worktree_pane.terminal_lines.len() - MAX_TERMINAL_LINES;
             self.worktree_pane.terminal_lines.drain(..remove);
         }
+    }
+
+    fn poll_project_terminal_command(&mut self) -> bool {
+        let result = match self
+            .worktree_pane
+            .terminal_command_rx
+            .as_ref()
+            .map(std::sync::mpsc::Receiver::try_recv)
+        {
+            Some(Ok(result)) => result,
+            Some(Err(std::sync::mpsc::TryRecvError::Empty)) | None => return false,
+            Some(Err(std::sync::mpsc::TryRecvError::Disconnected)) => {
+                Err("terminal command worker disconnected".to_string())
+            }
+        };
+        self.worktree_pane.terminal_command_rx = None;
+        self.worktree_pane.terminal_running = false;
+        match result {
+            Ok(output) => {
+                self.worktree_pane
+                    .terminal_lines
+                    .extend(safe_terminal_output_lines(&output.stdout));
+                self.worktree_pane
+                    .terminal_lines
+                    .extend(safe_terminal_output_lines(&output.stderr));
+                if !output.status.success() {
+                    self.worktree_pane.terminal_lines.push(format!(
+                        "command exited with {}",
+                        output
+                            .status
+                            .code()
+                            .map_or_else(|| "signal".to_string(), |code| code.to_string())
+                    ));
+                }
+            }
+            Err(error) => self
+                .worktree_pane
+                .terminal_lines
+                .push(format!("failed to run command: {error}")),
+        }
+        self.trim_project_terminal_lines();
+        true
     }
 
     pub(super) fn open_project_files_pane(&mut self) {
@@ -396,8 +492,9 @@ impl App {
 
     /// Called by both local and remote ticks, even when there are no input events.
     pub(super) fn update_worktree_file_filter(&mut self, now: Instant) -> bool {
+        let terminal_updated = self.poll_project_terminal_command();
         let Some(path) = self.worktree_pane.selected_file.as_deref() else {
-            return false;
+            return terminal_updated;
         };
         let expired = self
             .worktree_pane
@@ -407,7 +504,7 @@ impl App {
             || crate::tui::ui::worktree_file_is_present(self.session.working_dir.as_deref(), path)
                 == Some(false);
         if !expired && !stale {
-            return false;
+            return terminal_updated;
         }
         self.worktree_pane.selected_file = None;
         self.worktree_pane.last_activity = None;

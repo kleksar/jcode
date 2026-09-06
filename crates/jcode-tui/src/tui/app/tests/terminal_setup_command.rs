@@ -245,7 +245,7 @@ fn terminal_setup_is_offered_in_the_command_palette() {
 fn unrelated_commands_are_not_swallowed_by_the_terminal_setup_handler() {
     // A too-eager prefix match here would shadow other commands.
     let mut app = create_test_app();
-    for command in ["/terminal", "/setup"] {
+    for command in ["/terminal-other", "/setup"] {
         app.set_input_for_test(command);
         app.submit_input();
         let last = app

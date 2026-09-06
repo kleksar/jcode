@@ -691,6 +691,9 @@ pub trait TuiState {
     fn project_terminal_cwd(&self) -> Option<&str> {
         None
     }
+    fn project_terminal_running(&self) -> bool {
+        false
+    }
     fn project_tree_selected_path(&self) -> Option<&str> {
         None
     }

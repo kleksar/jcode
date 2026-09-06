@@ -1663,14 +1663,21 @@ pub(super) fn draw_project_terminal(
         .iter()
         .map(|line| Line::from(Span::raw(line.clone())))
         .collect::<Vec<_>>();
-    rendered.push(Line::from(vec![
-        Span::styled("$ ", Style::default().fg(tool_color())),
-        Span::raw(app.project_terminal_input().to_string()),
-        Span::styled(
-            if focused { "█" } else { "" },
-            Style::default().fg(file_link_color()),
-        ),
-    ]));
+    if app.project_terminal_running() {
+        rendered.push(Line::from(Span::styled(
+            "⠋ command running…",
+            Style::default().fg(tool_color()),
+        )));
+    } else {
+        rendered.push(Line::from(vec![
+            Span::styled("$ ", Style::default().fg(tool_color())),
+            Span::raw(app.project_terminal_input().to_string()),
+            Span::styled(
+                if focused { "█" } else { "" },
+                Style::default().fg(file_link_color()),
+            ),
+        ]));
+    }
     frame.render_widget(Paragraph::new(rendered.clone()), inner);
     super::set_pinned_pane_total_lines(lines.len().saturating_add(1));
     super::set_last_diff_pane_max_scroll(0);

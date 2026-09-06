@@ -581,32 +581,12 @@ impl App {
         if let Some(layout) = crate::tui::ui::worktree_pane_layout() {
             match code {
                 KeyCode::Tab => {
-                    let next = match self.worktree_pane.tab {
-                        super::worktree_pane::WorktreePaneTab::Diff => {
-                            super::worktree_pane::WorktreePaneTab::Files
-                        }
-                        super::worktree_pane::WorktreePaneTab::Files => {
-                            super::worktree_pane::WorktreePaneTab::Terminal
-                        }
-                        super::worktree_pane::WorktreePaneTab::Terminal => {
-                            super::worktree_pane::WorktreePaneTab::Diff
-                        }
-                    };
+                    let next = self.worktree_pane_tab().next();
                     self.set_worktree_pane_tab(next);
                     return true;
                 }
                 KeyCode::BackTab => {
-                    let next = match self.worktree_pane.tab {
-                        super::worktree_pane::WorktreePaneTab::Diff => {
-                            super::worktree_pane::WorktreePaneTab::Terminal
-                        }
-                        super::worktree_pane::WorktreePaneTab::Files => {
-                            super::worktree_pane::WorktreePaneTab::Diff
-                        }
-                        super::worktree_pane::WorktreePaneTab::Terminal => {
-                            super::worktree_pane::WorktreePaneTab::Files
-                        }
-                    };
+                    let next = self.worktree_pane_tab().previous();
                     self.set_worktree_pane_tab(next);
                     return true;
                 }

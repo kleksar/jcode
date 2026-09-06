@@ -1882,6 +1882,9 @@ impl crate::tui::TuiState for App {
             .as_deref()
             .or(self.session.working_dir.as_deref())
     }
+    fn project_terminal_running(&self) -> bool {
+        self.worktree_pane.terminal_running
+    }
     fn project_tree_selected_path(&self) -> Option<&str> {
         self.worktree_pane_matches_session()
             .then_some(self.worktree_pane.tree_selected_path.as_deref())
