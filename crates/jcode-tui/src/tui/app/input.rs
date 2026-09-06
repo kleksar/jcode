@@ -1760,7 +1760,8 @@ impl App {
                 super::commands::format_todo_completion_confidence(confidence_summary);
             let needs_spike_challenge = confidence_summary.confidence_spike_detected
                 && !self.todo_confidence_spike_challenged;
-            let completion_fingerprint = Self::todo_completion_gate_fingerprint(&todos);
+            let completion_fingerprint =
+                Self::todo_completion_gate_fingerprint(&todo_session_id, &todos);
             if (confidence_summary.completion_confidence_needs_validation || needs_spike_challenge)
                 && completion_fingerprint.is_some()
                 && self.last_todo_completion_fingerprint == completion_fingerprint
@@ -1889,7 +1890,10 @@ impl App {
     /// Serialize only the fields read by the completion-confidence validation.
     /// Content, assignment, and blockers may change without adding validation
     /// evidence, so they deliberately do not re-arm a failed gate.
-    fn todo_completion_gate_fingerprint(todos: &[crate::todo::TodoItem]) -> Option<String> {
+    fn todo_completion_gate_fingerprint(
+        session_id: &str,
+        todos: &[crate::todo::TodoItem],
+    ) -> Option<String> {
         let mut completed = todos
             .iter()
             .filter(|todo| todo.status == "completed")
@@ -1904,6 +1908,7 @@ impl App {
                     ),
                 };
                 (
+                    todo.id.as_str(),
                     todo.status.as_str(),
                     todo.priority.as_str(),
                     todo.completion_confidence,
@@ -1912,7 +1917,7 @@ impl App {
             })
             .collect::<Vec<_>>();
         completed.sort_unstable();
-        serde_json::to_string(&completed).ok()
+        serde_json::to_string(&(session_id, completed)).ok()
     }
 
     /// Serialize only the todo and goal fields consumed by the ownership

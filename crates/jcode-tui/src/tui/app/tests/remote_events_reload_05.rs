@@ -361,6 +361,69 @@ fn completion_gate_suppresses_cosmetic_todo_change() {
 }
 
 #[test]
+fn completion_gate_retries_after_remote_session_switch_with_identical_assessment() {
+    with_temp_jcode_home(|| {
+        let mut app = create_test_app();
+        app.auto_poke_incomplete_todos = true;
+        app.is_remote = true;
+        let first_session = format!("completion-session-a-{}", std::process::id());
+        let second_session = format!("completion-session-b-{}", std::process::id());
+        app.remote_session_id = Some(first_session.clone());
+        save_low_completion_fixture(&first_session);
+
+        dispatch_completion_followup(&mut app);
+        app.remote_session_id = Some(second_session.clone());
+        save_low_completion_fixture(&second_session);
+
+        dispatch_completion_followup(&mut app);
+        assert_eq!(app.todo_completion_gate_attempts, 2);
+    });
+}
+
+#[test]
+fn completion_gate_retries_after_completed_todo_is_replaced() {
+    with_temp_jcode_home(|| {
+        let mut app = create_test_app();
+        app.auto_poke_incomplete_todos = true;
+        save_low_completion_fixture(&app.session.id);
+
+        dispatch_completion_followup(&mut app);
+        let mut replacement = crate::todo::load_todos(&app.session.id).unwrap();
+        replacement[0].id = "todo-2".to_string();
+        replacement[0].content = "Validate the replacement fix".to_string();
+        crate::todo::save_todos(&app.session.id, &replacement).unwrap();
+
+        dispatch_completion_followup(&mut app);
+        assert_eq!(app.todo_completion_gate_attempts, 2);
+    });
+}
+
+#[test]
+fn completion_gate_reload_preserves_same_session_snapshot_suppression() {
+    with_temp_jcode_home(|| {
+        let mut app = create_test_app();
+        app.auto_poke_incomplete_todos = true;
+        app.is_remote = true;
+        let todo_session_id = format!("completion-reload-{}", std::process::id());
+        app.remote_session_id = Some(todo_session_id.clone());
+        save_low_completion_fixture(&todo_session_id);
+        dispatch_completion_followup(&mut app);
+
+        let reload_session_id = format!("completion-reload-state-{}", std::process::id());
+        app.save_input_for_reload(&reload_session_id);
+        let restored = App::restore_input_for_reload(&reload_session_id).unwrap();
+        let mut reloaded_app = create_test_app();
+        reloaded_app.auto_poke_incomplete_todos = true;
+        reloaded_app.is_remote = true;
+        reloaded_app.remote_session_id = Some(todo_session_id);
+        reloaded_app.apply_restored_reload_input(restored);
+
+        assert!(!reloaded_app.schedule_auto_poke_followup_if_needed());
+        assert!(reloaded_app.queued_messages.is_empty());
+    });
+}
+
+#[test]
 fn low_ownership_is_gated_after_the_completed_todo_was_saved() {
     with_temp_jcode_home(|| {
         let mut app = create_test_app();
