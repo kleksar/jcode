@@ -2122,13 +2122,32 @@ fn overscroll_truncate_spans(spans: Vec<Span<'static>>, max_width: usize) -> Vec
 /// Compact git branch label for the status line and fact stack. Truncated so
 /// long branch names cannot crowd out the other facts.
 fn overscroll_git_branch(data: &crate::tui::info_widget::InfoWidgetData) -> Option<String> {
-    let branch = data.git_info.as_ref()?.branch.trim();
+    compact_git_status_label(data.git_info.as_ref()?)
+}
+
+pub(crate) fn compact_git_status_label(info: &crate::tui::info_widget::GitInfo) -> Option<String> {
+    let branch = info.branch.trim();
     if branch.is_empty() {
         return None;
     }
     let mut label: String = branch.chars().take(24).collect();
     if branch.chars().count() > 24 {
         label.push('…');
+    }
+    if info.modified > 0 {
+        label.push_str(&format!(" ~{}", info.modified));
+    }
+    if info.staged > 0 {
+        label.push_str(&format!(" +{}", info.staged));
+    }
+    if info.untracked > 0 {
+        label.push_str(&format!(" ?{}", info.untracked));
+    }
+    if info.ahead > 0 {
+        label.push_str(&format!(" ↑{}", info.ahead));
+    }
+    if info.behind > 0 {
+        label.push_str(&format!(" ↓{}", info.behind));
     }
     Some(label)
 }

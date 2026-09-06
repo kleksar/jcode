@@ -1453,3 +1453,30 @@ fn gather_git_info_inner(working_dir: &Path) -> Option<GitInfo> {
         dirty_files,
     })
 }
+
+/// Resolve the Git worktree containing a touched file or directory.
+///
+/// Agent tools may address an absolute path outside the session's original
+/// working directory. Treat a successful modification there as the session
+/// adopting that worktree, so subsequent tools and status widgets share the
+/// same repository context.
+pub(super) fn git_worktree_root_for_path(path: &Path) -> Option<PathBuf> {
+    use std::process::Command;
+
+    let probe_dir = if path.is_dir() { path } else { path.parent()? };
+    let output = Command::new("git")
+        .args(["rev-parse", "--show-toplevel"])
+        .current_dir(probe_dir)
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+
+    let root = PathBuf::from(String::from_utf8_lossy(&output.stdout).trim());
+    if root.as_os_str().is_empty() {
+        None
+    } else {
+        Some(std::fs::canonicalize(&root).unwrap_or(root))
+    }
+}

@@ -2012,3 +2012,114 @@ fn test_pending_startup_notice_survives_history_bootstrap_for_fresh_session() {
         "startup notice should be re-applied exactly once after bootstrap"
     );
 }
+
+#[test]
+fn modified_file_touch_adopts_its_worktree_for_the_current_session() {
+    fn git(repo: &std::path::Path, args: &[&str]) {
+        let output = std::process::Command::new("git")
+            .args(args)
+            .current_dir(repo)
+            .env("GIT_AUTHOR_NAME", "Jcode Test")
+            .env("GIT_AUTHOR_EMAIL", "jcode@example.invalid")
+            .env("GIT_COMMITTER_NAME", "Jcode Test")
+            .env("GIT_COMMITTER_EMAIL", "jcode@example.invalid")
+            .output()
+            .expect("run git command");
+        assert!(
+            output.status.success(),
+            "git {} failed: {}",
+            args.join(" "),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    let sandbox = tempfile::tempdir().expect("create temporary sandbox");
+    let main_repo = sandbox.path().join("main");
+    let worktree = sandbox.path().join("agent-worktree");
+    std::fs::create_dir(&main_repo).expect("create main repository directory");
+    git(&main_repo, &["init", "-b", "main"]);
+    std::fs::write(main_repo.join("tracked.txt"), "before\n").expect("write tracked file");
+    git(&main_repo, &["add", "tracked.txt"]);
+    git(&main_repo, &["commit", "-m", "initial"]);
+    git(
+        &main_repo,
+        &[
+            "worktree",
+            "add",
+            "-b",
+            "feat/agent-worktree",
+            worktree.to_str().expect("UTF-8 worktree path"),
+        ],
+    );
+    let touched_path = worktree.join("tracked.txt");
+    std::fs::write(&touched_path, "after\n").expect("modify worktree file");
+
+    let mut app = create_test_app();
+    app.session.working_dir = Some(main_repo.display().to_string());
+    let session_id = app.session.id.clone();
+    let handled = super::local::handle_bus_event(
+        &mut app,
+        Ok(crate::bus::BusEvent::FileTouch(crate::bus::FileTouch {
+            session_id,
+            path: touched_path,
+            op: crate::bus::FileOp::Edit,
+            intent: Some("Modify the session worktree".to_string()),
+            summary: None,
+            detail: None,
+        })),
+    );
+
+    assert!(handled);
+    assert_eq!(
+        app.session.working_dir.as_deref(),
+        Some(
+            std::fs::canonicalize(&worktree)
+                .expect("canonical worktree")
+                .to_str()
+                .expect("UTF-8 canonical worktree")
+        )
+    );
+}
+
+#[test]
+fn file_touch_does_not_adopt_reads_or_other_sessions() {
+    let sandbox = tempfile::tempdir().expect("create temporary sandbox");
+    let mut app = create_test_app();
+    let original = app.session.working_dir.clone();
+
+    for (session_id, op) in [
+        (app.session.id.clone(), crate::bus::FileOp::Read),
+        ("different-session".to_string(), crate::bus::FileOp::Edit),
+    ] {
+        let handled = super::local::handle_bus_event(
+            &mut app,
+            Ok(crate::bus::BusEvent::FileTouch(crate::bus::FileTouch {
+                session_id,
+                path: sandbox.path().join("file.txt"),
+                op,
+                intent: None,
+                summary: None,
+                detail: None,
+            })),
+        );
+        assert!(!handled);
+        assert_eq!(app.session.working_dir, original);
+    }
+}
+
+#[test]
+fn bottom_status_git_label_includes_branch_and_dirty_counts() {
+    let label = crate::tui::ui::input_ui::compact_git_status_label(
+        &crate::tui::info_widget::GitInfo {
+            branch: "feat/agent-worktree".to_string(),
+            modified: 2,
+            staged: 1,
+            untracked: 3,
+            ahead: 4,
+            behind: 5,
+            dirty_files: Vec::new(),
+        },
+    );
+
+    assert_eq!(label.as_deref(), Some("feat/agent-worktree ~2 +1 ?3 ↑4 ↓5"));
+}

@@ -187,6 +187,7 @@ pub(super) fn handle_bus_event(
             super::commands::handle_git_status_completed(app, result);
             true
         }
+        Ok(BusEvent::FileTouch(touch)) => handle_file_touch(app, touch),
         Ok(BusEvent::ProductivityReportReady(event)) => {
             app.handle_productivity_report_ready(event);
             true
@@ -303,6 +304,30 @@ pub(super) fn handle_bus_event(
         }
         _ => false,
     }
+}
+
+fn handle_file_touch(app: &mut App, touch: crate::bus::FileTouch) -> bool {
+    if touch.session_id != app.session.id || !touch.op.is_modification() {
+        return false;
+    }
+
+    let Some(worktree_root) = super::helpers::git_worktree_root_for_path(&touch.path) else {
+        return false;
+    };
+    let worktree_root = worktree_root.display().to_string();
+    let changed_worktree = app.session.working_dir.as_deref() != Some(worktree_root.as_str());
+
+    if changed_worktree {
+        app.session.working_dir = Some(worktree_root);
+        app.refresh_skills_snapshot();
+        app.update_terminal_title();
+        let _ = app.session.save();
+    }
+
+    // The file event is published after the write lands, so force the very next
+    // status-line render to probe the adopted worktree and expose dirty counts.
+    super::helpers::invalidate_git_info_cache();
+    true
 }
 
 pub(super) fn handle_ui_activity(app: &mut App, activity: UiActivity) -> bool {
