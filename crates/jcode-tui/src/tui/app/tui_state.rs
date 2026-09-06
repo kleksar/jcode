@@ -1819,6 +1819,16 @@ impl crate::tui::TuiState for App {
     fn diff_pane_scroll_x(&self) -> i32 {
         self.diff_pane_scroll_x
     }
+    fn worktree_selected_file(&self) -> Option<&str> {
+        self.current_worktree_selected_file()
+    }
+    fn worktree_file_list_scroll(&self) -> usize {
+        if self.worktree_pane_matches_session() {
+            self.worktree_pane.list_scroll
+        } else {
+            0
+        }
+    }
     fn side_panel_image_zoom_percent(&self) -> u8 {
         self.side_panel_image_zoom_percent
     }
