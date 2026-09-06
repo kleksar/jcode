@@ -31,6 +31,39 @@ fn worktree_filter_fixture() -> (
 }
 
 #[test]
+fn test_worktree_header_has_padded_heavy_boundary() {
+    let _lock = scroll_render_test_lock();
+    let repo = init_worktree_pane_test_repo();
+    crate::tui::ui::prime_worktree_changes_for_tests(repo.path());
+    let mut app = create_test_app();
+    app.session.working_dir = Some(repo.path().to_string_lossy().into_owned());
+    app.diff_mode = crate::config::DiffDisplayMode::Inline;
+    let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(140, 30)).unwrap();
+
+    render_and_snap(&app, &mut terminal);
+    let layout = crate::tui::ui::worktree_pane_layout().expect("worktree pane layout");
+    assert!(
+        layout.body_area.y >= layout.list_area.bottom().saturating_add(3),
+        "hint, heavy rule, and padding should precede diff body: list={:?} body={:?}",
+        layout.list_area,
+        layout.body_area
+    );
+
+    let rule_y = layout.body_area.y - 2;
+    let padding_y = layout.body_area.y - 1;
+    let buffer = terminal.backend().buffer();
+    assert!(
+        (layout.body_area.x..layout.body_area.right()).all(|x| buffer[(x, rule_y)].symbol() == "━"),
+        "heavy rule should span the diff body width"
+    );
+    assert!(
+        (layout.body_area.x..layout.body_area.right())
+            .all(|x| buffer[(x, padding_y)].symbol().trim().is_empty()),
+        "blank padding row should separate the rule from diff content"
+    );
+}
+
+#[test]
 fn test_worktree_filter_expires_at_exactly_sixty_idle_seconds() {
     let _lock = scroll_render_test_lock();
     let (_repo, mut app, mut terminal) = worktree_filter_fixture();

@@ -329,7 +329,7 @@ fn pinned_todos_hide_todo_tool_messages_from_the_transcript() {
 }
 
 #[test]
-fn pinned_todo_band_renders_below_sticky_prompt_without_separator() {
+fn pinned_todo_band_renders_above_padded_chat_separator() {
     let _env_lock = crate::storage::lock_test_env();
     let _render_lock = crate::tui::ui::render_state_test_lock();
     let _pin = PinTodosEnvGuard::enable();
@@ -375,7 +375,10 @@ fn pinned_todo_band_renders_below_sticky_prompt_without_separator() {
     app.auto_scroll_paused = true;
     let top_text = render_and_snap(&app, &mut terminal);
     assert!(
-        top_text.lines().take(6).any(|row| row.contains("pinned band item")),
+        top_text
+            .lines()
+            .take(6)
+            .any(|row| row.contains("pinned band item")),
         "pinned todo should remain visible at the top of scrollback, got:\n{}",
         top_text
     );
@@ -383,7 +386,8 @@ fn pinned_todo_band_renders_below_sticky_prompt_without_separator() {
     app.auto_scroll_paused = false;
     let text = render_and_snap(&app, &mut terminal);
 
-    let first_rows = text.lines().take(6).collect::<Vec<_>>();
+    let rows = text.lines().collect::<Vec<_>>();
+    let first_rows = rows.iter().take(8).copied().collect::<Vec<_>>();
     let prompt_row = first_rows
         .iter()
         .position(|row| row.contains("kick off the work"))
@@ -397,13 +401,49 @@ fn pinned_todo_band_renders_below_sticky_prompt_without_separator() {
         "pinned todo band should render below the sticky prompt, got:\n{}",
         text
     );
+    let separator_row = rows
+        .iter()
+        .enumerate()
+        .skip(todo_row + 1)
+        .find_map(|(idx, row)| {
+            let trimmed = row.trim();
+            (!trimmed.is_empty() && trimmed.chars().all(|ch| ch == '━')).then_some(idx)
+        })
+        .expect("heavy separator should render below pinned todo band");
+    assert!(todo_row < separator_row, "unexpected top band:\n{text}");
     assert!(
-        !first_rows.iter().any(|row| row.contains("────")),
-        "pinned todo band should not render a horizontal separator, got:\n{}",
-        text
+        rows.get(separator_row + 1)
+            .is_some_and(|row| row.trim().is_empty()),
+        "padding row should separate top rule from transcript, got:\n{text}"
     );
 
     let _ = crate::todo::save_todos(&session_id, &[]);
+}
+
+#[test]
+fn chat_body_has_padded_heavy_boundary_above_composer() {
+    let _render_lock = crate::tui::ui::render_state_test_lock();
+    let mut app = create_test_app();
+    app.session.short_name = Some("test".to_string());
+    app.push_display_message(DisplayMessage::assistant("central chat content"));
+
+    let backend = ratatui::backend::TestBackend::new(60, 16);
+    let mut terminal = ratatui::Terminal::new(backend).expect("failed to create test terminal");
+    let text = render_and_snap(&app, &mut terminal);
+    let rows = text.lines().collect::<Vec<_>>();
+    let status = crate::tui::ui::last_status_area().expect("status area recorded");
+    let status_row = status.y as usize;
+
+    assert!(status_row >= 2, "status must leave room for chat boundary");
+    let rule = rows[status_row - 1].trim();
+    assert!(
+        !rule.is_empty() && rule.chars().all(|ch| ch == '━'),
+        "heavy rule should sit directly above status/composer chrome, got:\n{text}"
+    );
+    assert!(
+        rows[status_row - 2].trim().is_empty(),
+        "padding row should separate transcript from lower rule, got:\n{text}"
+    );
 }
 
 #[test]
