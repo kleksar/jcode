@@ -673,6 +673,30 @@ pub trait TuiState {
     fn worktree_file_list_scroll(&self) -> usize {
         0
     }
+    fn worktree_pane_explicit_open(&self) -> bool {
+        false
+    }
+    fn worktree_files_tab_active(&self) -> bool {
+        false
+    }
+    fn project_tree_selected_path(&self) -> Option<&str> {
+        None
+    }
+    fn project_tree_scroll(&self) -> usize {
+        0
+    }
+    fn project_tree_dir_expanded(&self, _path: &str) -> bool {
+        false
+    }
+    fn project_tree_expansion_hash(&self) -> u64 {
+        0
+    }
+    fn project_tree_preview_scroll(&self) -> usize {
+        0
+    }
+    fn project_tree_preview_focused(&self) -> bool {
+        false
+    }
     /// Zoom percentage for image widgets rendered inside the side panel.
     fn side_panel_image_zoom_percent(&self) -> u8;
     /// Image shown in the dismissible full-screen panel preview.

@@ -196,10 +196,13 @@ pub(crate) use viewport::{
 pub(crate) use worktree_ui::has_explicit_side_pane_content;
 pub(crate) use worktree_ui::invalidate_worktree_changes_cache;
 pub(crate) use worktree_ui::poll_worktree_changes;
+pub(crate) use worktree_ui::{WorktreePaneLayout, worktree_file_is_present, worktree_pane_layout};
+use worktree_ui::{
+    draw_empty_worktree_changes, draw_project_files, draw_worktree_changes,
+    snapshot_for_project_tree, snapshot_for_worktree,
+};
 #[cfg(test)]
-pub(crate) use worktree_ui::prime_worktree_changes_for_tests;
-use worktree_ui::{draw_worktree_changes, snapshot_for_worktree};
-pub(crate) use worktree_ui::{worktree_file_is_present, worktree_pane_layout};
+pub(crate) use worktree_ui::{prime_project_tree_for_tests, prime_worktree_changes_for_tests};
 /// Last known max scroll value from the renderer. Updated each frame.
 /// Scroll handlers use this to clamp scroll_offset and prevent overshoot.
 #[cfg(not(test))]
@@ -2851,21 +2854,30 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
     let has_file_diff_edits =
         !swarm_page_active && diff_mode.is_file() && app.has_display_edit_tool_messages();
     const AUTO_WORKTREE_PANE_MIN_WIDTH: u16 = 110;
-    let worktree_changes = if !swarm_page_active
+    let worktree_surface_allowed = !swarm_page_active
         && area.width >= AUTO_WORKTREE_PANE_MIN_WIDTH
         && !has_side_panel_content
         && !has_pinned_content
         && !has_file_diff_edits
-        && !app.is_replay()
-    {
+        && !app.is_replay();
+    let worktree_changes = if worktree_surface_allowed {
         let working_dir = app.working_dir();
         snapshot_for_worktree(working_dir.as_deref())
     } else {
         None
     };
     let has_worktree_changes = worktree_changes.is_some();
+    let explicit_worktree_pane = worktree_surface_allowed && app.worktree_pane_explicit_open();
+    let files_tab_active = explicit_worktree_pane && app.worktree_files_tab_active();
+    let project_tree = if files_tab_active {
+        let working_dir = app.working_dir();
+        snapshot_for_project_tree(working_dir.as_deref())
+    } else {
+        None
+    };
+    let has_worktree_surface = has_worktree_changes || explicit_worktree_pane;
     let has_right_side_pane_content =
-        has_side_panel_content || has_pinned_content || has_file_diff_edits || has_worktree_changes;
+        has_side_panel_content || has_pinned_content || has_file_diff_edits || has_worktree_surface;
     // The side panel is itself a single right-hand auxiliary surface and can render
     // visual content such as Mermaid diagrams inline. Pinned image/file-diff content
     // also uses that same right-hand surface. Do not also open the global pinned
@@ -2979,7 +2991,7 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
 
     let (chat_area, diff_pane_area) = if needs_side_pane {
         const MIN_DIFF_WIDTH: u16 = 30;
-        let min_chat_width: u16 = if has_worktree_changes { 56 } else { 20 };
+        let min_chat_width: u16 = if has_worktree_surface { 56 } else { 20 };
         // Pinned images live in a tall narrow column, so a wide image fits to
         // the pane width and ends up small with empty space below it. When the
         // pane is showing image content (and the user has not manually resized
@@ -2994,7 +3006,7 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
         } else {
             base_ratio
         };
-        let min_diff_width = if has_worktree_changes {
+        let min_diff_width = if has_worktree_surface {
             42
         } else {
             MIN_DIFF_WIDTH
@@ -3550,6 +3562,17 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
                 app.diff_line_wrap(),
                 app.diff_pane_focus(),
             );
+        } else if has_worktree_surface && files_tab_active {
+            if let Some(ref mut capture) = debug_capture {
+                capture.render_order.push("draw_project_files".to_string());
+            }
+            draw_project_files(
+                frame,
+                diff_area,
+                app,
+                project_tree.as_deref(),
+                app.diff_pane_focus(),
+            );
         } else if let Some(snapshot) = worktree_changes.as_deref() {
             if let Some(ref mut capture) = debug_capture {
                 capture
@@ -3564,6 +3587,13 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
                 app.diff_pane_scroll(),
                 app.diff_pane_focus(),
             );
+        } else if explicit_worktree_pane {
+            if let Some(ref mut capture) = debug_capture {
+                capture
+                    .render_order
+                    .push("draw_empty_worktree_changes".to_string());
+            }
+            draw_empty_worktree_changes(frame, diff_area, app, app.diff_pane_focus());
         }
     }
 

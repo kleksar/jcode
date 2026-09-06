@@ -171,6 +171,8 @@ const REGISTERED_COMMANDS: &[RegisteredCommand] = &[
         "/diff",
         "Cycle or set diff display mode (off/inline/full/pinned/file)",
     ),
+    RegisteredCommand::public("/files", "Browse the project tree in the right pane"),
+    RegisteredCommand::hidden("/explorer", "Alias for /files"),
     RegisteredCommand::public(
         "/onboarding-preview",
         "Preview the first-run onboarding screen",

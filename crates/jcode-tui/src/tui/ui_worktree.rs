@@ -1,7 +1,10 @@
 use super::*;
 use std::collections::{HashMap, HashSet};
+use std::fs::File;
+use std::hash::{Hash, Hasher};
+use std::io::{BufRead, BufReader, Read};
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
@@ -18,11 +21,29 @@ const MAX_UNTRACKED_BYTES: u64 = 256 * 1024;
 #[derive(Clone)]
 pub(crate) struct WorktreePaneLayout {
     pub area: Rect,
+    pub diff_tab_area: Rect,
+    pub files_tab_area: Rect,
+    pub files_tab_active: bool,
     pub list_area: Rect,
     pub body_area: Rect,
     pub list_scroll: usize,
     pub paths: Arc<Vec<String>>,
+    pub tree_area: Option<Rect>,
+    pub preview_area: Option<Rect>,
+    pub tree_scroll: usize,
+    pub tree_rows: Arc<Vec<ProjectTreeRow>>,
+    pub preview_total_lines: usize,
+    pub preview_scroll: usize,
     pub working_dir: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct ProjectTreeRow {
+    pub path: String,
+    pub name: String,
+    pub depth: usize,
+    pub is_dir: bool,
+    pub expanded: bool,
 }
 
 thread_local! {
@@ -100,6 +121,60 @@ impl WorktreeChangesSnapshot {
     }
 }
 
+const MAX_PROJECT_TREE_FILES: usize = 20_000;
+const MAX_PROJECT_TREE_DEPTH: usize = 32;
+#[cfg(not(test))]
+const MAX_PROJECT_TREE_ROOTS: usize = 8;
+const MAX_PROJECT_PREVIEW_BYTES: u64 = 512 * 1024;
+const MAX_PROJECT_PREVIEW_LINES: usize = 5_000;
+
+#[derive(Clone, Debug, Default)]
+struct ProjectTreeNode {
+    name: String,
+    path: String,
+    is_dir: bool,
+    children: Vec<ProjectTreeNode>,
+}
+
+#[derive(Clone, Debug, Default)]
+pub(super) struct ProjectTreeSnapshot {
+    root: PathBuf,
+    root_label: String,
+    nodes: Vec<ProjectTreeNode>,
+    file_count: usize,
+    truncated: bool,
+    revision: u64,
+}
+
+#[derive(Default)]
+struct ProjectTreeCacheEntry {
+    fetched_at: Option<Instant>,
+    snapshot: Option<Arc<ProjectTreeSnapshot>>,
+    generation: u64,
+    #[cfg(not(test))]
+    refreshing: bool,
+}
+
+fn project_tree_cache() -> &'static Mutex<HashMap<PathBuf, ProjectTreeCacheEntry>> {
+    static CACHE: OnceLock<Mutex<HashMap<PathBuf, ProjectTreeCacheEntry>>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+#[cfg(not(test))]
+fn trim_project_tree_cache(cache: &mut HashMap<PathBuf, ProjectTreeCacheEntry>, keep: &Path) {
+    while cache.len() > MAX_PROJECT_TREE_ROOTS {
+        let Some(oldest) = cache
+            .iter()
+            .filter(|(path, _)| path.as_path() != keep)
+            .min_by_key(|(_, entry)| entry.fetched_at)
+            .map(|(path, _)| path.clone())
+        else {
+            break;
+        };
+        cache.remove(&oldest);
+    }
+}
+
 #[derive(Default)]
 struct WorktreeCacheEntry {
     fetched_at: Option<Instant>,
@@ -128,6 +203,14 @@ pub(crate) fn poll_worktree_changes(working_dir: Option<&str>) -> bool {
     // TTL expiry when an external editor changes a quiet worktree. The call is
     // cheap while the cache is fresh and collection remains off the UI thread.
     let _ = snapshot_for_worktree(working_dir);
+    if let Some(path) = working_dir.map(PathBuf::from) {
+        let already_requested = project_tree_cache()
+            .lock()
+            .is_ok_and(|cache| cache.contains_key(&path));
+        if already_requested {
+            let _ = snapshot_for_project_tree(working_dir);
+        }
+    }
     take_worktree_changes_redraw()
 }
 
@@ -169,6 +252,63 @@ pub(super) fn snapshot_for_worktree(
         .filter(|snapshot| !snapshot.is_empty())
 }
 
+#[cfg(not(test))]
+pub(super) fn snapshot_for_project_tree(
+    working_dir: Option<&str>,
+) -> Option<Arc<ProjectTreeSnapshot>> {
+    let working_dir = working_dir?.trim();
+    if working_dir.is_empty() {
+        return None;
+    }
+    let path = PathBuf::from(working_dir);
+    let mut cache = project_tree_cache().lock().ok()?;
+    if !cache.contains_key(&path) && cache.len() >= MAX_PROJECT_TREE_ROOTS {
+        let oldest = cache
+            .iter()
+            .min_by_key(|(_, entry)| entry.fetched_at)
+            .map(|(path, _)| path.clone());
+        if let Some(oldest) = oldest {
+            cache.remove(&oldest);
+        }
+    }
+    let entry = cache.entry(path.clone()).or_default();
+    let fresh = entry
+        .fetched_at
+        .is_some_and(|fetched| fetched.elapsed() < REFRESH_INTERVAL);
+    if !fresh && !entry.refreshing {
+        entry.refreshing = true;
+        let generation = entry.generation;
+        std::thread::spawn(move || {
+            let next = collect_project_tree(&path).map(Arc::new);
+            if let Ok(mut cache) = project_tree_cache().lock() {
+                let entry = cache.entry(path.clone()).or_default();
+                if entry.generation == generation {
+                    entry.snapshot = next;
+                    entry.fetched_at = Some(Instant::now());
+                } else {
+                    entry.fetched_at = None;
+                }
+                entry.refreshing = false;
+                trim_project_tree_cache(&mut cache, &path);
+            }
+            worktree_redraw_pending().store(true, Ordering::Release);
+        });
+    }
+    entry.snapshot.clone()
+}
+
+#[cfg(test)]
+pub(super) fn snapshot_for_project_tree(
+    working_dir: Option<&str>,
+) -> Option<Arc<ProjectTreeSnapshot>> {
+    let path = PathBuf::from(working_dir?);
+    project_tree_cache()
+        .lock()
+        .ok()?
+        .get(&path)
+        .and_then(|entry| entry.snapshot.clone())
+}
+
 #[cfg(test)]
 pub(super) fn snapshot_for_worktree(
     working_dir: Option<&str>,
@@ -188,6 +328,12 @@ pub(crate) fn invalidate_worktree_changes_cache() {
             entry.fetched_at = None;
         }
     }
+    if let Ok(mut cache) = project_tree_cache().lock() {
+        for entry in cache.values_mut() {
+            entry.fetched_at = None;
+            entry.generation = entry.generation.wrapping_add(1);
+        }
+    }
 }
 
 #[cfg(test)]
@@ -204,6 +350,21 @@ pub(crate) fn prime_worktree_changes_for_tests(working_dir: &Path) {
     }
 }
 
+#[cfg(test)]
+pub(crate) fn prime_project_tree_for_tests(working_dir: &Path) {
+    let snapshot = collect_project_tree(working_dir);
+    if let Ok(mut cache) = project_tree_cache().lock() {
+        cache.insert(
+            working_dir.to_path_buf(),
+            ProjectTreeCacheEntry {
+                fetched_at: Some(Instant::now()),
+                snapshot: snapshot.map(Arc::new),
+                generation: 0,
+            },
+        );
+    }
+}
+
 fn command_output(repo: &Path, args: &[&str]) -> Option<Vec<u8>> {
     let output = Command::new("git")
         .current_dir(repo)
@@ -213,12 +374,264 @@ fn command_output(repo: &Path, args: &[&str]) -> Option<Vec<u8>> {
     output.status.success().then_some(output.stdout)
 }
 
+fn read_nul_paths_limited(
+    reader: &mut impl BufRead,
+    limit: usize,
+) -> std::io::Result<(Vec<String>, bool)> {
+    let mut paths = Vec::with_capacity(limit.min(4096));
+    let mut buffer = Vec::new();
+    loop {
+        buffer.clear();
+        let read = reader.read_until(0, &mut buffer)?;
+        if read == 0 {
+            return Ok((paths, false));
+        }
+        if buffer.last() == Some(&0) {
+            buffer.pop();
+        }
+        if buffer.is_empty() {
+            continue;
+        }
+        if paths.len() == limit {
+            return Ok((paths, true));
+        }
+        paths.push(String::from_utf8_lossy(&buffer).into_owned());
+    }
+}
+
+fn git_project_paths(root: &Path) -> Option<(Vec<String>, bool)> {
+    let mut child = Command::new("git")
+        .current_dir(root)
+        .args([
+            "ls-files",
+            "-z",
+            "--cached",
+            "--others",
+            "--exclude-standard",
+            "--",
+            ".",
+        ])
+        .stdout(Stdio::piped())
+        .spawn()
+        .ok()?;
+    let stdout = child.stdout.take()?;
+    let mut reader = BufReader::new(stdout);
+    let result = read_nul_paths_limited(&mut reader, MAX_PROJECT_TREE_FILES);
+    drop(reader);
+    let (paths, truncated) = match result {
+        Ok(result) => result,
+        Err(_) => {
+            let _ = child.kill();
+            let _ = child.wait();
+            return None;
+        }
+    };
+    if truncated {
+        let _ = child.kill();
+    }
+    let status = child.wait().ok()?;
+    if !truncated && !status.success() {
+        return None;
+    }
+    Some((paths, truncated))
+}
+
 fn nul_paths(output: &[u8]) -> Vec<String> {
     output
         .split(|byte| *byte == 0)
         .filter(|path| !path.is_empty())
         .map(|path| String::from_utf8_lossy(path).into_owned())
         .collect()
+}
+
+fn normalized_relative_components(path: &str) -> Option<Vec<String>> {
+    let mut components = Vec::new();
+    for component in Path::new(path).components() {
+        match component {
+            std::path::Component::Normal(value) => {
+                components.push(value.to_string_lossy().into_owned())
+            }
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir
+            | std::path::Component::RootDir
+            | std::path::Component::Prefix(_) => return None,
+        }
+    }
+    (!components.is_empty() && components.len() <= MAX_PROJECT_TREE_DEPTH).then_some(components)
+}
+
+fn project_path_label(value: &str) -> String {
+    value
+        .chars()
+        .map(|character| match character {
+            '\n' => '␤',
+            '\r' => '␍',
+            '\t' => '⇥',
+            character if character.is_control() => '�',
+            character => character,
+        })
+        .collect()
+}
+
+#[derive(Default)]
+struct ProjectTreeArenaNode {
+    name: String,
+    path: String,
+    is_dir: bool,
+    children: Vec<usize>,
+}
+
+fn build_project_nodes(paths: Vec<String>) -> (Vec<ProjectTreeNode>, usize) {
+    let mut arena = vec![ProjectTreeArenaNode::default()];
+    let mut indices = HashMap::<String, usize>::new();
+    let mut file_count = 0;
+    for path in paths {
+        let Some(components) = normalized_relative_components(&path) else {
+            continue;
+        };
+        file_count += 1;
+        let mut parent = 0;
+        let mut prefix = String::new();
+        for (component_index, name) in components.iter().enumerate() {
+            if !prefix.is_empty() {
+                prefix.push('/');
+            }
+            prefix.push_str(name);
+            let is_dir = component_index + 1 < components.len();
+            let index = if let Some(index) = indices.get(&prefix).copied() {
+                if is_dir {
+                    arena[index].is_dir = true;
+                }
+                index
+            } else {
+                let index = arena.len();
+                arena.push(ProjectTreeArenaNode {
+                    name: project_path_label(name),
+                    path: prefix.clone(),
+                    is_dir,
+                    children: Vec::new(),
+                });
+                indices.insert(prefix.clone(), index);
+                arena[parent].children.push(index);
+                index
+            };
+            parent = index;
+        }
+    }
+
+    fn materialize(index: usize, arena: &[ProjectTreeArenaNode]) -> ProjectTreeNode {
+        let node = &arena[index];
+        ProjectTreeNode {
+            name: node.name.clone(),
+            path: node.path.clone(),
+            is_dir: node.is_dir,
+            children: node
+                .children
+                .iter()
+                .map(|child| materialize(*child, arena))
+                .collect(),
+        }
+    }
+    let mut nodes = arena[0]
+        .children
+        .iter()
+        .map(|index| materialize(*index, &arena))
+        .collect::<Vec<_>>();
+    sort_project_nodes(&mut nodes);
+    (nodes, file_count)
+}
+
+fn sort_project_nodes(nodes: &mut [ProjectTreeNode]) {
+    nodes.sort_by(|left, right| {
+        right
+            .is_dir
+            .cmp(&left.is_dir)
+            .then_with(|| left.name.to_lowercase().cmp(&right.name.to_lowercase()))
+            .then_with(|| left.name.cmp(&right.name))
+    });
+    for node in nodes {
+        sort_project_nodes(&mut node.children);
+    }
+}
+
+fn ignored_fallback_dir(name: &str) -> bool {
+    matches!(
+        name,
+        ".git"
+            | ".hg"
+            | ".svn"
+            | "target"
+            | "node_modules"
+            | "__pycache__"
+            | ".venv"
+            | "venv"
+            | "dist"
+            | "build"
+    )
+}
+
+fn collect_filesystem_paths(root: &Path, relative: &Path, paths: &mut Vec<String>, depth: usize) {
+    if paths.len() >= MAX_PROJECT_TREE_FILES || depth >= MAX_PROJECT_TREE_DEPTH {
+        return;
+    }
+    let directory = root.join(relative);
+    let Ok(entries) = std::fs::read_dir(directory) else {
+        return;
+    };
+    let mut entries = entries.filter_map(Result::ok).collect::<Vec<_>>();
+    entries.sort_by_key(|entry| entry.file_name().to_string_lossy().to_lowercase());
+    for entry in entries {
+        if paths.len() >= MAX_PROJECT_TREE_FILES {
+            break;
+        }
+        let name = entry.file_name();
+        let name_text = name.to_string_lossy();
+        let child_relative = relative.join(&name);
+        let Ok(file_type) = entry.file_type() else {
+            continue;
+        };
+        if file_type.is_dir() {
+            if ignored_fallback_dir(&name_text) {
+                continue;
+            }
+            collect_filesystem_paths(root, &child_relative, paths, depth + 1);
+        } else {
+            paths.push(child_relative.to_string_lossy().replace('\\', "/"));
+        }
+    }
+}
+
+fn collect_project_tree(working_dir: &Path) -> Option<ProjectTreeSnapshot> {
+    let root = working_dir.canonicalize().ok()?;
+    if !root.is_dir() {
+        return None;
+    }
+    let (mut paths, git_truncated) = git_project_paths(&root).unwrap_or_else(|| {
+        let mut paths = Vec::new();
+        collect_filesystem_paths(&root, Path::new(""), &mut paths, 0);
+        (paths, false)
+    });
+    paths.sort();
+    paths.dedup();
+    let truncated = git_truncated || paths.len() > MAX_PROJECT_TREE_FILES;
+    paths.truncate(MAX_PROJECT_TREE_FILES);
+    let mut revision = std::collections::hash_map::DefaultHasher::new();
+    paths.hash(&mut revision);
+    let revision = revision.finish();
+
+    let (nodes, file_count) = build_project_nodes(paths);
+    Some(ProjectTreeSnapshot {
+        root_label: root
+            .file_name()
+            .map(|name| project_path_label(&name.to_string_lossy()))
+            .filter(|name| !name.is_empty())
+            .unwrap_or_else(|| root.display().to_string()),
+        root,
+        nodes,
+        file_count,
+        truncated,
+        revision,
+    })
 }
 
 fn collect_worktree_changes(working_dir: &Path) -> Option<WorktreeChangesSnapshot> {
@@ -593,6 +1006,597 @@ fn cached_render_lines(
     lines
 }
 
+const DIFF_TAB_LABEL: &str = " Diff ";
+const FILES_TAB_LABEL: &str = " Files ";
+
+fn project_pane_tab_style(active: bool) -> Style {
+    if active {
+        Style::default()
+            .fg(rgb(235, 235, 245))
+            .bg(rgb(55, 55, 68))
+            .add_modifier(ratatui::style::Modifier::BOLD)
+    } else {
+        Style::default().fg(dim_color())
+    }
+}
+
+fn project_pane_title(files_active: bool, mut suffix: Vec<Span<'static>>) -> Line<'static> {
+    let mut spans = vec![
+        Span::styled(DIFF_TAB_LABEL, project_pane_tab_style(!files_active)),
+        Span::raw(" "),
+        Span::styled(FILES_TAB_LABEL, project_pane_tab_style(files_active)),
+        Span::raw("  "),
+    ];
+    spans.append(&mut suffix);
+    Line::from(spans)
+}
+
+fn project_pane_tab_areas(area: Rect) -> (Rect, Rect) {
+    let header_x = area.x.saturating_add(1);
+    let diff = Rect::new(header_x, area.y, DIFF_TAB_LABEL.len() as u16, 1);
+    let files = Rect::new(
+        diff.right().saturating_add(1),
+        area.y,
+        FILES_TAB_LABEL.len() as u16,
+        1,
+    );
+    (diff, files)
+}
+
+fn flatten_project_nodes(
+    nodes: &[ProjectTreeNode],
+    depth: usize,
+    app: &dyn TuiState,
+    rows: &mut Vec<ProjectTreeRow>,
+) {
+    for node in nodes {
+        let expanded = node.is_dir && app.project_tree_dir_expanded(&node.path);
+        rows.push(ProjectTreeRow {
+            path: node.path.clone(),
+            name: node.name.clone(),
+            depth,
+            is_dir: node.is_dir,
+            expanded,
+        });
+        if expanded {
+            flatten_project_nodes(&node.children, depth + 1, app, rows);
+        }
+    }
+}
+
+type ProjectFlattenCache = HashMap<(PathBuf, u64, u64), Arc<Vec<ProjectTreeRow>>>;
+
+fn project_flatten_cache() -> &'static Mutex<ProjectFlattenCache> {
+    static CACHE: OnceLock<Mutex<ProjectFlattenCache>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn cached_project_tree_rows(
+    snapshot: &ProjectTreeSnapshot,
+    app: &dyn TuiState,
+) -> Arc<Vec<ProjectTreeRow>> {
+    let key = (
+        snapshot.root.clone(),
+        snapshot.revision,
+        app.project_tree_expansion_hash(),
+    );
+    if let Ok(cache) = project_flatten_cache().lock()
+        && let Some(rows) = cache.get(&key)
+    {
+        return rows.clone();
+    }
+    let mut rows = Vec::new();
+    flatten_project_nodes(&snapshot.nodes, 0, app, &mut rows);
+    let rows = Arc::new(rows);
+    if let Ok(mut cache) = project_flatten_cache().lock() {
+        if cache.len() >= 16 {
+            cache.clear();
+        }
+        cache.insert(key, rows.clone());
+    }
+    rows
+}
+
+#[derive(Clone)]
+struct ProjectPreviewCacheEntry {
+    modified: Option<std::time::SystemTime>,
+    len: u64,
+    lines: Option<Arc<Vec<Line<'static>>>>,
+    #[cfg(not(test))]
+    refreshing: bool,
+}
+
+type ProjectPreviewCache = HashMap<(PathBuf, String), ProjectPreviewCacheEntry>;
+
+fn project_preview_cache() -> &'static Mutex<ProjectPreviewCache> {
+    static CACHE: OnceLock<Mutex<ProjectPreviewCache>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn preview_message(text: impl Into<String>) -> Arc<Vec<Line<'static>>> {
+    Arc::new(vec![Line::from(Span::styled(
+        text.into(),
+        Style::default().fg(dim_color()),
+    ))])
+}
+
+#[cfg(unix)]
+fn open_project_preview(root: &Path, relative: &str) -> Option<(PathBuf, File)> {
+    use std::ffi::CString;
+    use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+    use std::os::unix::ffi::OsStrExt;
+
+    let components = normalized_relative_components(relative)?;
+    let root_path = CString::new(root.as_os_str().as_bytes()).ok()?;
+    let root_fd = unsafe {
+        libc::open(
+            root_path.as_ptr(),
+            libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC | libc::O_NOFOLLOW,
+        )
+    };
+    if root_fd < 0 {
+        return None;
+    }
+    let mut directory = unsafe { OwnedFd::from_raw_fd(root_fd) };
+    for (index, component) in components.iter().enumerate() {
+        let component = CString::new(component.as_bytes()).ok()?;
+        let final_component = index + 1 == components.len();
+        let flags = libc::O_RDONLY
+            | libc::O_CLOEXEC
+            | libc::O_NOFOLLOW
+            | if final_component {
+                0
+            } else {
+                libc::O_DIRECTORY
+            };
+        let fd = unsafe { libc::openat(directory.as_raw_fd(), component.as_ptr(), flags) };
+        if fd < 0 {
+            return None;
+        }
+        let opened = unsafe { OwnedFd::from_raw_fd(fd) };
+        if final_component {
+            return Some((root.join(relative), File::from(opened)));
+        }
+        directory = opened;
+    }
+    None
+}
+
+#[cfg(not(unix))]
+fn open_project_preview(_root: &Path, _relative: &str) -> Option<(PathBuf, File)> {
+    // Keep previews disabled until this platform has a handle-relative,
+    // reparse-point-safe equivalent of the Unix openat traversal above.
+    None
+}
+
+fn read_project_preview(root: &Path, relative: &str) -> Arc<Vec<Line<'static>>> {
+    let Some((path, mut file)) = open_project_preview(root, relative) else {
+        return preview_message("Preview blocked outside the project root");
+    };
+    let Ok(metadata) = file.metadata() else {
+        return preview_message("Unable to read file metadata");
+    };
+    if metadata.len() > MAX_PROJECT_PREVIEW_BYTES {
+        return preview_message(format!(
+            "Preview limited to files under {} KiB",
+            MAX_PROJECT_PREVIEW_BYTES / 1024
+        ));
+    }
+    let mut bytes = Vec::with_capacity(metadata.len() as usize);
+    if file.read_to_end(&mut bytes).is_err() {
+        return preview_message("Unable to read file");
+    }
+    if bytes.iter().take(8192).any(|byte| *byte == 0) {
+        return preview_message("Binary file preview is not available");
+    }
+    let text = String::from_utf8_lossy(&bytes);
+    let extension = path
+        .extension()
+        .and_then(|value| value.to_str())
+        .unwrap_or("");
+    let line_count = text.lines().count().clamp(1, MAX_PROJECT_PREVIEW_LINES);
+    let gutter_width = line_count.to_string().len();
+    let mut lines = Vec::with_capacity(line_count.saturating_add(1));
+    for (index, content) in text.lines().take(MAX_PROJECT_PREVIEW_LINES).enumerate() {
+        let mut spans = vec![Span::styled(
+            format!("{:>width$}  ", index + 1, width = gutter_width),
+            Style::default().fg(dim_color()),
+        )];
+        spans.extend(markdown::highlight_line(
+            content,
+            (!extension.is_empty()).then_some(extension),
+        ));
+        lines.push(Line::from(spans));
+    }
+    if lines.is_empty() {
+        lines.push(Line::from(Span::styled(
+            "(empty file)",
+            Style::default().fg(dim_color()),
+        )));
+    }
+    if text.lines().count() > MAX_PROJECT_PREVIEW_LINES {
+        lines.push(Line::from(Span::styled(
+            format!("… preview truncated after {MAX_PROJECT_PREVIEW_LINES} lines"),
+            Style::default().fg(dim_color()),
+        )));
+    }
+    Arc::new(lines)
+}
+
+fn build_project_preview(root: &Path, relative: &str) -> Arc<Vec<Line<'static>>> {
+    let joined = root.join(relative);
+    let Ok(path) = joined.canonicalize() else {
+        return preview_message("File is no longer available");
+    };
+    if !path.starts_with(root) || !path.is_file() {
+        return preview_message("Preview blocked outside the project root");
+    }
+    let Ok(metadata) = path.metadata() else {
+        return preview_message("Unable to read file metadata");
+    };
+    if metadata.len() > MAX_PROJECT_PREVIEW_BYTES {
+        return preview_message(format!(
+            "Preview limited to files under {} KiB",
+            MAX_PROJECT_PREVIEW_BYTES / 1024
+        ));
+    }
+    let signature = (metadata.modified().ok(), metadata.len());
+    let key = (root.to_path_buf(), relative.to_string());
+    if let Ok(cache) = project_preview_cache().lock()
+        && let Some(entry) = cache.get(&key)
+        && (entry.modified, entry.len) == signature
+        && let Some(lines) = entry.lines.as_ref()
+    {
+        return lines.clone();
+    }
+
+    #[cfg(test)]
+    {
+        let lines = read_project_preview(root, relative);
+        if let Ok(mut cache) = project_preview_cache().lock() {
+            if cache.len() >= 32 {
+                cache.clear();
+            }
+            cache.insert(
+                key,
+                ProjectPreviewCacheEntry {
+                    modified: signature.0,
+                    len: signature.1,
+                    lines: Some(lines.clone()),
+                },
+            );
+        }
+        lines
+    }
+
+    #[cfg(not(test))]
+    {
+        if let Ok(mut cache) = project_preview_cache().lock() {
+            let already_refreshing = cache
+                .get(&key)
+                .is_some_and(|entry| (entry.modified, entry.len) == signature && entry.refreshing);
+            if !already_refreshing {
+                if cache.len() >= 32 {
+                    cache.clear();
+                }
+                cache.insert(
+                    key.clone(),
+                    ProjectPreviewCacheEntry {
+                        modified: signature.0,
+                        len: signature.1,
+                        lines: None,
+                        refreshing: true,
+                    },
+                );
+                let root = root.to_path_buf();
+                let relative = relative.to_string();
+                std::thread::spawn(move || {
+                    let lines = read_project_preview(&root, &relative);
+                    if let Ok(mut cache) = project_preview_cache().lock()
+                        && let Some(entry) = cache.get_mut(&key)
+                        && (entry.modified, entry.len) == signature
+                    {
+                        entry.lines = Some(lines);
+                        entry.refreshing = false;
+                    }
+                    worktree_redraw_pending().store(true, Ordering::Release);
+                });
+            }
+        }
+        preview_message("Loading preview…")
+    }
+}
+
+fn project_tree_line(row: &ProjectTreeRow, selected: bool, focused: bool) -> Line<'static> {
+    let marker = if selected { "› " } else { "  " };
+    let disclosure = if row.is_dir {
+        if row.expanded { "▾ " } else { "▸ " }
+    } else {
+        "  "
+    };
+    let mut style = if row.is_dir {
+        Style::default().fg(file_link_color())
+    } else {
+        Style::default().fg(rgb(190, 190, 205))
+    };
+    if selected {
+        style = style
+            .bg(if focused {
+                rgb(52, 52, 68)
+            } else {
+                rgb(42, 42, 50)
+            })
+            .add_modifier(ratatui::style::Modifier::BOLD);
+    }
+    Line::from(vec![
+        Span::styled(marker, style),
+        Span::styled("  ".repeat(row.depth), style),
+        Span::styled(disclosure, style),
+        Span::styled(row.name.clone(), style),
+    ])
+}
+
+pub(super) fn draw_project_files(
+    frame: &mut Frame,
+    area: Rect,
+    app: &dyn TuiState,
+    snapshot: Option<&ProjectTreeSnapshot>,
+    focused: bool,
+) {
+    if area.width < 30 || area.height < 3 {
+        return;
+    }
+    let suffix = if let Some(snapshot) = snapshot {
+        vec![
+            Span::styled(
+                snapshot.root_label.clone(),
+                Style::default().fg(tool_color()),
+            ),
+            Span::styled(
+                format!(
+                    "  {} files{}",
+                    snapshot.file_count,
+                    if snapshot.truncated { "+" } else { "" }
+                ),
+                Style::default().fg(dim_color()),
+            ),
+        ]
+    } else {
+        vec![Span::styled("loading…", Style::default().fg(dim_color()))]
+    };
+    let title = project_pane_title(true, suffix);
+    let border = Style::default().fg(if focused { tool_color() } else { dim_color() });
+    let Some(inner) = super::draw_right_rail_chrome(frame, area, title, border) else {
+        return;
+    };
+    super::clear_area(frame, inner);
+    let (diff_tab_area, files_tab_area) = project_pane_tab_areas(area);
+
+    let Some(snapshot) = snapshot else {
+        frame.render_widget(
+            Paragraph::new(Line::from(Span::styled(
+                "Indexing project files…",
+                Style::default().fg(dim_color()),
+            ))),
+            inner,
+        );
+        super::set_pinned_pane_total_lines(0);
+        super::set_last_diff_pane_max_scroll(0);
+        super::set_last_diff_pane_effective_scroll(0);
+        WORKTREE_PANE_LAYOUT.with(|layout| {
+            *layout.borrow_mut() = Some(WorktreePaneLayout {
+                area,
+                diff_tab_area,
+                files_tab_area,
+                files_tab_active: true,
+                list_area: inner,
+                body_area: inner,
+                list_scroll: 0,
+                paths: Arc::new(Vec::new()),
+                tree_area: Some(inner),
+                preview_area: None,
+                tree_scroll: 0,
+                tree_rows: Arc::new(Vec::new()),
+                preview_total_lines: 0,
+                preview_scroll: 0,
+                working_dir: app.working_dir(),
+            })
+        });
+        return;
+    };
+
+    let rows = cached_project_tree_rows(snapshot, app);
+    let selected_index = app
+        .project_tree_selected_path()
+        .and_then(|path| rows.iter().position(|row| row.path == path))
+        .unwrap_or(0)
+        .min(rows.len().saturating_sub(1));
+    let selected_file = rows
+        .get(selected_index)
+        .filter(|row| !row.is_dir)
+        .map(|row| row.path.clone());
+    let preview_lines = selected_file
+        .as_deref()
+        .map(|path| build_project_preview(&snapshot.root, path));
+    let show_preview = preview_lines.is_some() && inner.height >= 10;
+    let tree_height = if show_preview {
+        (inner.height / 2).clamp(4, inner.height.saturating_sub(5))
+    } else {
+        inner.height
+    };
+    let tree_area = Rect::new(inner.x, inner.y, inner.width, tree_height);
+    let tree_max_scroll = rows.len().saturating_sub(tree_area.height as usize);
+    let mut tree_scroll = app.project_tree_scroll().min(tree_max_scroll);
+    if selected_index < tree_scroll {
+        tree_scroll = selected_index;
+    } else if selected_index >= tree_scroll.saturating_add(tree_area.height as usize) {
+        tree_scroll = selected_index
+            .saturating_add(1)
+            .saturating_sub(tree_area.height as usize)
+            .min(tree_max_scroll);
+    }
+    let visible_tree_lines = rows
+        .iter()
+        .enumerate()
+        .skip(tree_scroll)
+        .take(tree_area.height as usize)
+        .map(|(index, row)| {
+            project_tree_line(
+                row,
+                index == selected_index,
+                focused && !app.project_tree_preview_focused(),
+            )
+        })
+        .collect::<Vec<_>>();
+    frame.render_widget(Paragraph::new(visible_tree_lines.clone()), tree_area);
+
+    let mut preview_area = None;
+    let mut preview_total_lines = 0;
+    let mut preview_scroll = 0;
+    if let (Some(path), Some(lines)) = (selected_file.as_deref(), preview_lines.as_ref())
+        && show_preview
+    {
+        let separator_y = tree_area.bottom();
+        frame.render_widget(
+            Paragraph::new(Span::styled(
+                "━".repeat(inner.width as usize),
+                Style::default().fg(border_color()),
+            )),
+            Rect::new(inner.x, separator_y, inner.width, 1),
+        );
+        let header_area = Rect::new(inner.x, separator_y.saturating_add(1), inner.width, 1);
+        frame.render_widget(
+            Paragraph::new(Line::from(vec![
+                Span::styled(
+                    format!(" {}", project_path_label(path)),
+                    Style::default()
+                        .fg(file_link_color())
+                        .add_modifier(ratatui::style::Modifier::BOLD),
+                ),
+                Span::styled(
+                    if app.project_tree_preview_focused() {
+                        "  preview focus"
+                    } else {
+                        "  Enter to scroll"
+                    },
+                    Style::default().fg(dim_color()),
+                ),
+            ])),
+            header_area,
+        );
+        let body = Rect::new(
+            inner.x,
+            header_area.bottom(),
+            inner.width,
+            inner.bottom().saturating_sub(header_area.bottom()),
+        );
+        preview_total_lines = lines.len();
+        let max_scroll = preview_total_lines.saturating_sub(body.height as usize);
+        preview_scroll = app.project_tree_preview_scroll().min(max_scroll);
+        let visible = lines
+            .iter()
+            .skip(preview_scroll)
+            .take(body.height as usize)
+            .cloned()
+            .collect::<Vec<_>>();
+        frame.render_widget(Paragraph::new(visible.clone()), body);
+        if app.project_tree_preview_focused() {
+            super::set_pinned_pane_total_lines(preview_total_lines);
+            super::set_last_diff_pane_max_scroll(max_scroll);
+            super::set_last_diff_pane_effective_scroll(preview_scroll);
+            super::record_side_pane_snapshot(
+                lines.as_slice(),
+                preview_scroll,
+                (preview_scroll + body.height as usize).min(preview_total_lines),
+                body,
+            );
+        }
+        preview_area = Some(body);
+    }
+    if !app.project_tree_preview_focused() {
+        super::set_pinned_pane_total_lines(rows.len());
+        super::set_last_diff_pane_max_scroll(tree_max_scroll);
+        super::set_last_diff_pane_effective_scroll(tree_scroll);
+        super::record_side_pane_snapshot(
+            &visible_tree_lines,
+            0,
+            visible_tree_lines.len(),
+            tree_area,
+        );
+    }
+    WORKTREE_PANE_LAYOUT.with(|layout| {
+        *layout.borrow_mut() = Some(WorktreePaneLayout {
+            area,
+            diff_tab_area,
+            files_tab_area,
+            files_tab_active: true,
+            list_area: tree_area,
+            body_area: preview_area.unwrap_or(tree_area),
+            list_scroll: tree_scroll,
+            paths: Arc::new(Vec::new()),
+            tree_area: Some(tree_area),
+            preview_area,
+            tree_scroll,
+            tree_rows: rows,
+            preview_total_lines,
+            preview_scroll,
+            working_dir: app.working_dir(),
+        })
+    });
+}
+
+pub(super) fn draw_empty_worktree_changes(
+    frame: &mut Frame,
+    area: Rect,
+    app: &dyn TuiState,
+    focused: bool,
+) {
+    if area.width < 30 || area.height < 3 {
+        return;
+    }
+    let title = project_pane_title(
+        false,
+        vec![Span::styled(
+            "working tree clean",
+            Style::default().fg(dim_color()),
+        )],
+    );
+    let border = Style::default().fg(if focused { tool_color() } else { dim_color() });
+    let Some(inner) = super::draw_right_rail_chrome(frame, area, title, border) else {
+        return;
+    };
+    super::clear_area(frame, inner);
+    let line = Line::from(Span::styled(
+        "No uncommitted changes. Switch to Files to browse the project.",
+        Style::default().fg(dim_color()),
+    ));
+    frame.render_widget(Paragraph::new(line.clone()), inner);
+    super::set_pinned_pane_total_lines(1);
+    super::set_last_diff_pane_max_scroll(0);
+    super::set_last_diff_pane_effective_scroll(0);
+    super::record_side_pane_snapshot(std::slice::from_ref(&line), 0, 1, inner);
+    let (diff_tab_area, files_tab_area) = project_pane_tab_areas(area);
+    WORKTREE_PANE_LAYOUT.with(|layout| {
+        *layout.borrow_mut() = Some(WorktreePaneLayout {
+            area,
+            diff_tab_area,
+            files_tab_area,
+            files_tab_active: false,
+            list_area: inner,
+            body_area: inner,
+            list_scroll: 0,
+            paths: Arc::new(Vec::new()),
+            tree_area: None,
+            preview_area: None,
+            tree_scroll: 0,
+            tree_rows: Arc::new(Vec::new()),
+            preview_total_lines: 0,
+            preview_scroll: 0,
+            working_dir: app.working_dir(),
+        })
+    });
+}
+
 pub(super) fn draw_worktree_changes(
     frame: &mut Frame,
     area: Rect,
@@ -604,25 +1608,28 @@ pub(super) fn draw_worktree_changes(
     if area.width < 30 || area.height < 3 || snapshot.is_empty() {
         return;
     }
-    let title = Line::from(vec![
-        Span::styled(" changes ", Style::default().fg(tool_color())),
-        Span::styled(
-            format!("{} files", snapshot.files.len()),
-            Style::default()
-                .fg(rgb(220, 225, 235))
-                .add_modifier(ratatui::style::Modifier::BOLD),
-        ),
-        Span::raw(" "),
-        Span::styled(
-            format!("+{}", snapshot.additions),
-            Style::default().fg(diff_add_color()),
-        ),
-        Span::raw(" "),
-        Span::styled(
-            format!("-{}", snapshot.deletions),
-            Style::default().fg(diff_del_color()),
-        ),
-    ]);
+    let title = project_pane_title(
+        false,
+        vec![
+            Span::styled("changes ", Style::default().fg(tool_color())),
+            Span::styled(
+                format!("{} files", snapshot.files.len()),
+                Style::default()
+                    .fg(rgb(220, 225, 235))
+                    .add_modifier(ratatui::style::Modifier::BOLD),
+            ),
+            Span::raw(" "),
+            Span::styled(
+                format!("+{}", snapshot.additions),
+                Style::default().fg(diff_add_color()),
+            ),
+            Span::raw(" "),
+            Span::styled(
+                format!("-{}", snapshot.deletions),
+                Style::default().fg(diff_del_color()),
+            ),
+        ],
+    );
     let border = Style::default().fg(if focused { tool_color() } else { dim_color() });
     let Some(inner) = super::draw_right_rail_chrome(frame, area, title, border) else {
         return;
@@ -701,9 +1708,13 @@ pub(super) fn draw_worktree_changes(
         );
     }
     draw_padded_section_boundary(frame, boundary_area, true);
+    let (diff_tab_area, files_tab_area) = project_pane_tab_areas(area);
     WORKTREE_PANE_LAYOUT.with(|layout| {
         *layout.borrow_mut() = Some(WorktreePaneLayout {
             area,
+            diff_tab_area,
+            files_tab_area,
+            files_tab_active: false,
             list_area,
             body_area: body,
             list_scroll,
@@ -714,6 +1725,12 @@ pub(super) fn draw_worktree_changes(
                     .map(|file| file.path.clone())
                     .collect(),
             ),
+            tree_area: None,
+            preview_area: None,
+            tree_scroll: 0,
+            tree_rows: Arc::new(Vec::new()),
+            preview_total_lines: 0,
+            preview_scroll: 0,
             working_dir: app.working_dir(),
         })
     });
@@ -749,6 +1766,16 @@ mod tests {
         worktree_redraw_pending().store(true, Ordering::Release);
         assert!(poll_worktree_changes(None));
         assert!(!poll_worktree_changes(None));
+    }
+
+    #[test]
+    fn nul_path_reader_stops_at_limit_and_marks_truncation() {
+        let input = b"one.rs\0two.rs\0three.rs\0four.rs\0";
+        let mut reader = BufReader::new(&input[..]);
+        let (paths, truncated) = read_nul_paths_limited(&mut reader, 3).unwrap();
+
+        assert_eq!(paths, ["one.rs", "two.rs", "three.rs"]);
+        assert!(truncated);
     }
 
     #[test]
@@ -790,5 +1817,142 @@ mod tests {
         assert_eq!(snapshot.files.len(), 1);
         assert_eq!(snapshot.additions, 2);
         assert_eq!(snapshot.files[0].path, "new.txt");
+    }
+
+    #[test]
+    fn project_tree_honors_gitignore_and_builds_nested_directories() {
+        let dir = tempfile::tempdir().unwrap();
+        Command::new("git")
+            .current_dir(dir.path())
+            .args(["init", "-q"])
+            .status()
+            .unwrap();
+        std::fs::create_dir_all(dir.path().join("src/nested")).unwrap();
+        std::fs::write(dir.path().join("src/lib.rs"), "pub fn lib() {}\n").unwrap();
+        std::fs::write(dir.path().join("src/nested/mod.rs"), "pub mod leaf;\n").unwrap();
+        std::fs::write(dir.path().join(".gitignore"), "ignored.log\n").unwrap();
+        std::fs::write(dir.path().join("ignored.log"), "hidden\n").unwrap();
+
+        let snapshot = collect_project_tree(dir.path()).expect("project tree");
+        fn collect(nodes: &[ProjectTreeNode], paths: &mut Vec<String>) {
+            for node in nodes {
+                paths.push(node.path.clone());
+                collect(&node.children, paths);
+            }
+        }
+        let mut paths = Vec::new();
+        collect(&snapshot.nodes, &mut paths);
+        assert!(paths.iter().any(|path| path == "src"));
+        assert!(paths.iter().any(|path| path == "src/nested"));
+        assert!(paths.iter().any(|path| path == "src/nested/mod.rs"));
+        assert!(!paths.iter().any(|path| path == "ignored.log"));
+    }
+
+    #[test]
+    fn project_tree_is_rooted_at_session_working_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        Command::new("git")
+            .current_dir(dir.path())
+            .args(["init", "-q"])
+            .status()
+            .unwrap();
+        std::fs::create_dir_all(dir.path().join("project/src")).unwrap();
+        std::fs::write(dir.path().join("outside.rs"), "fn outside() {}\n").unwrap();
+        std::fs::write(dir.path().join("project/src/lib.rs"), "fn inside() {}\n").unwrap();
+        Command::new("git")
+            .current_dir(dir.path())
+            .args(["add", "."])
+            .status()
+            .unwrap();
+
+        let snapshot = collect_project_tree(&dir.path().join("project")).expect("project tree");
+        assert_eq!(snapshot.root_label, "project");
+        assert!(snapshot.nodes.iter().any(|node| node.path == "src"));
+        assert!(!snapshot.nodes.iter().any(|node| node.path == "outside.rs"));
+    }
+
+    #[test]
+    fn project_tree_does_not_fallback_when_git_ignores_every_file() {
+        let dir = tempfile::tempdir().unwrap();
+        Command::new("git")
+            .current_dir(dir.path())
+            .args(["init", "-q"])
+            .status()
+            .unwrap();
+        std::fs::write(dir.path().join(".git/info/exclude"), "*.secret\n").unwrap();
+        std::fs::write(dir.path().join("hidden.secret"), "ignored\n").unwrap();
+
+        let snapshot = collect_project_tree(dir.path()).expect("project tree");
+        assert_eq!(snapshot.file_count, 0);
+        assert!(snapshot.nodes.is_empty());
+    }
+
+    #[test]
+    fn project_tree_labels_escape_terminal_control_characters() {
+        assert_eq!(project_path_label("bad\nname\tesc\u{1b}"), "bad␤name⇥esc�");
+    }
+
+    #[test]
+    fn project_preview_blocks_paths_outside_root() {
+        let root = tempfile::tempdir().unwrap();
+        let parent = root.path().parent().unwrap();
+        let outside = tempfile::tempdir_in(parent).unwrap();
+        std::fs::write(outside.path().join("secret.txt"), "secret\n").unwrap();
+        let relative = format!(
+            "../{}/secret.txt",
+            outside.path().file_name().unwrap().to_string_lossy()
+        );
+        assert!(normalized_relative_components(&relative).is_none());
+        let lines = build_project_preview(&root.path().canonicalize().unwrap(), &relative);
+        let text = lines
+            .iter()
+            .flat_map(|line| line.spans.iter())
+            .map(|span| span.content.as_ref())
+            .collect::<String>();
+        assert!(!text.contains("secret"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn project_preview_blocks_symlinks_that_escape_root() {
+        use std::os::unix::fs::symlink;
+
+        let root = tempfile::tempdir().unwrap();
+        let outside = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(outside.path(), "outside secret\n").unwrap();
+        symlink(outside.path(), root.path().join("escape.txt")).unwrap();
+
+        let lines = build_project_preview(&root.path().canonicalize().unwrap(), "escape.txt");
+        let text = lines
+            .iter()
+            .flat_map(|line| line.spans.iter())
+            .map(|span| span.content.as_ref())
+            .collect::<String>();
+        assert!(text.contains("blocked"));
+        assert!(!text.contains("outside secret"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn project_preview_blocks_symlinked_parent_directories() {
+        use std::os::unix::fs::symlink;
+
+        let root = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        std::fs::write(
+            outside.path().join("secret.rs"),
+            "const SECRET: &str = \"hidden\";\n",
+        )
+        .unwrap();
+        symlink(outside.path(), root.path().join("linked")).unwrap();
+
+        let lines = build_project_preview(&root.path().canonicalize().unwrap(), "linked/secret.rs");
+        let text = lines
+            .iter()
+            .flat_map(|line| line.spans.iter())
+            .map(|span| span.content.as_ref())
+            .collect::<String>();
+        assert!(text.contains("blocked"));
+        assert!(!text.contains("hidden"));
     }
 }

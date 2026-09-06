@@ -520,6 +520,10 @@ impl App {
                 self.set_status_notice(
                     "Focus: side pane (j/k scroll, h/l pan diagrams, Esc to return)",
                 );
+            } else if self.worktree_files_tab_active() {
+                self.set_status_notice(
+                    "Focus: Files (arrows navigate, Enter expands/previews, Tab switches)",
+                );
             } else {
                 self.set_status_notice("Focus: side pane (j/k scroll, Esc to return)");
             }
@@ -574,6 +578,32 @@ impl App {
         }
 
         self.note_worktree_pane_activity();
+        if let Some(layout) = crate::tui::ui::worktree_pane_layout() {
+            match code {
+                KeyCode::Tab => {
+                    let next = if layout.files_tab_active {
+                        super::worktree_pane::WorktreePaneTab::Diff
+                    } else {
+                        super::worktree_pane::WorktreePaneTab::Files
+                    };
+                    self.set_worktree_pane_tab(next);
+                    return true;
+                }
+                KeyCode::BackTab => {
+                    let next = if layout.files_tab_active {
+                        super::worktree_pane::WorktreePaneTab::Diff
+                    } else {
+                        super::worktree_pane::WorktreePaneTab::Files
+                    };
+                    self.set_worktree_pane_tab(next);
+                    return true;
+                }
+                _ => {}
+            }
+            if layout.files_tab_active && self.handle_project_files_focus_key(code) {
+                return true;
+            }
+        }
         let line_amount = self.side_pane_line_scroll_amount();
         let page_amount = self.side_pane_page_scroll_amount();
 
