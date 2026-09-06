@@ -78,6 +78,7 @@ mod local;
 mod misc_ui;
 mod model_context;
 mod navigation;
+mod worktree_pane;
 mod observe;
 pub(crate) mod onboarding_flow;
 mod onboarding_flow_control;
@@ -1327,6 +1328,7 @@ pub struct App {
     panel_image_preview: Option<u64>,
     diff_pane_focus: bool,
     diff_pane_auto_scroll: bool,
+    worktree_pane: worktree_pane::WorktreePaneState,
     side_panel: crate::side_panel::SidePanelSnapshot,
     observe_mode_enabled: bool,
     observe_page_markdown: String,

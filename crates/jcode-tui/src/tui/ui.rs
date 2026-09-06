@@ -170,6 +170,7 @@ pub(crate) use viewport::{
 };
 pub(crate) use worktree_ui::invalidate_worktree_changes_cache;
 pub(crate) use worktree_ui::poll_worktree_changes;
+pub(crate) use worktree_ui::{worktree_file_is_present, worktree_pane_layout};
 #[cfg(test)]
 pub(crate) use worktree_ui::prime_worktree_changes_for_tests;
 use worktree_ui::{draw_worktree_changes, snapshot_for_worktree};
@@ -2684,6 +2685,7 @@ pub fn draw(frame: &mut Frame, app: &dyn TuiState) {
 }
 fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
     panel_image_preview::clear_regions();
+    worktree_ui::clear_worktree_pane_layout();
     let area = frame.area().intersection(*frame.buffer_mut().area());
     if area.width == 0 || area.height == 0 {
         return;

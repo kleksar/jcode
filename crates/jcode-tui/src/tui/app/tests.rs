@@ -7,6 +7,7 @@ include!("tests/commands_accounts_02/part_01.rs");
 include!("tests/commands_accounts_02/part_02.rs");
 include!("tests/state_model_poke_01/part_01.rs");
 include!("tests/state_model_poke_01/part_02.rs");
+include!("tests/worktree_pane.rs");
 include!("tests/state_model_poke_02/part_01.rs");
 include!("tests/state_model_poke_02/part_02.rs");
 include!("tests/state_model_poke_03.rs");

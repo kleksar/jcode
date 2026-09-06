@@ -14,6 +14,39 @@ const MAX_FILES: usize = 50;
 const MAX_LINES_PER_FILE: usize = 500;
 const MAX_UNTRACKED_BYTES: u64 = 256 * 1024;
 
+/// Geometry from the last frame, not inferred from the scrolling diff rows.
+#[derive(Clone)]
+pub(crate) struct WorktreePaneLayout {
+    pub area: Rect,
+    pub list_area: Rect,
+    pub body_area: Rect,
+    pub list_scroll: usize,
+    pub paths: Arc<Vec<String>>,
+    pub working_dir: Option<String>,
+}
+
+thread_local! {
+    static WORKTREE_PANE_LAYOUT: std::cell::RefCell<Option<WorktreePaneLayout>> = const {
+        std::cell::RefCell::new(None)
+    };
+}
+
+pub(crate) fn worktree_pane_layout() -> Option<WorktreePaneLayout> {
+    WORKTREE_PANE_LAYOUT.with(|layout| layout.borrow().clone())
+}
+
+pub(super) fn clear_worktree_pane_layout() {
+    WORKTREE_PANE_LAYOUT.with(|layout| *layout.borrow_mut() = None);
+}
+
+/// Read only the cached snapshot. Input and ticks must never run git synchronously.
+pub(crate) fn worktree_file_is_present(working_dir: Option<&str>, path: &str) -> Option<bool> {
+    let cache = worktree_cache().lock().ok()?;
+    let entry = cache.get(Path::new(working_dir?))?;
+    let snapshot = entry.snapshot.as_ref()?;
+    Some(snapshot.files.iter().any(|file| file.path == path))
+}
+
 #[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
 enum WorktreeLineKind {
     Context,
@@ -412,11 +445,23 @@ fn line_number(value: Option<usize>) -> String {
     value.map(|value| value.to_string()).unwrap_or_default()
 }
 
-fn build_render_lines(snapshot: &WorktreeChangesSnapshot) -> Vec<Line<'static>> {
+fn build_file_index(
+    snapshot: &WorktreeChangesSnapshot,
+    selected: Option<&str>,
+) -> Vec<Line<'static>> {
     let mut rendered = Vec::new();
     for file in &snapshot.files {
         rendered.push(Line::from(vec![
-            Span::styled(file.path.clone(), Style::default().fg(dim_color())),
+            Span::styled(
+                file.path.clone(),
+                if selected == Some(file.path.as_str()) {
+                    Style::default().fg(tool_color()).add_modifier(
+                        ratatui::style::Modifier::BOLD | ratatui::style::Modifier::UNDERLINED,
+                    )
+                } else {
+                    Style::default().fg(dim_color())
+                },
+            ),
             Span::raw(" "),
             Span::styled(
                 format!("+{}", file.additions),
@@ -429,15 +474,19 @@ fn build_render_lines(snapshot: &WorktreeChangesSnapshot) -> Vec<Line<'static>> 
             ),
         ]));
     }
-    if snapshot.truncated {
-        rendered.push(Line::from(Span::styled(
-            format!("showing first {MAX_FILES} files"),
-            Style::default().fg(dim_color()),
-        )));
-    }
-    rendered.push(Line::from(""));
+    rendered
+}
 
-    for file in &snapshot.files {
+fn build_render_lines(
+    snapshot: &WorktreeChangesSnapshot,
+    selected: Option<&str>,
+) -> Vec<Line<'static>> {
+    let mut rendered = Vec::new();
+    for file in snapshot
+        .files
+        .iter()
+        .filter(|file| selected.is_none_or(|path| path == file.path))
+    {
         rendered.push(Line::from(Span::styled(
             file.path.clone(),
             Style::default()
@@ -499,26 +548,32 @@ fn build_render_lines(snapshot: &WorktreeChangesSnapshot) -> Vec<Line<'static>> 
     rendered
 }
 
-fn render_lines_cache() -> &'static Mutex<HashMap<u64, Arc<Vec<Line<'static>>>>> {
-    static CACHE: OnceLock<Mutex<HashMap<u64, Arc<Vec<Line<'static>>>>>> = OnceLock::new();
+type RenderLinesCache = HashMap<(u64, Option<String>), Arc<Vec<Line<'static>>>>;
+
+fn render_lines_cache() -> &'static Mutex<RenderLinesCache> {
+    static CACHE: OnceLock<Mutex<RenderLinesCache>> = OnceLock::new();
     CACHE.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
-fn cached_render_lines(snapshot: &WorktreeChangesSnapshot) -> Arc<Vec<Line<'static>>> {
+fn cached_render_lines(
+    snapshot: &WorktreeChangesSnapshot,
+    selected: Option<&str>,
+) -> Arc<Vec<Line<'static>>> {
+    let key = (snapshot.revision, selected.map(str::to_owned));
     if let Ok(cache) = render_lines_cache().lock()
-        && let Some(lines) = cache.get(&snapshot.revision)
+        && let Some(lines) = cache.get(&key)
     {
         return lines.clone();
     }
 
-    let lines = Arc::new(build_render_lines(snapshot));
+    let lines = Arc::new(build_render_lines(snapshot, selected));
     if let Ok(mut cache) = render_lines_cache().lock() {
         // A session only needs the current and a few recent snapshots. Keep the
         // renderer cache bounded even when external tools edit files rapidly.
         if cache.len() >= 8 {
             cache.clear();
         }
-        cache.insert(snapshot.revision, lines.clone());
+        cache.insert(key, lines.clone());
     }
     lines
 }
@@ -561,26 +616,101 @@ pub(super) fn draw_worktree_changes(
         return;
     }
 
-    let lines = cached_render_lines(snapshot);
+    // The index gets at most half the rail, leaving a usable body even for a
+    // worktree with many files. Its own wheel target exposes overflow files.
+    let selected = app
+        .worktree_selected_file()
+        .filter(|path| snapshot.files.iter().any(|file| file.path == *path));
+    let list_height =
+        (snapshot.files.len() as u16).min((inner.height.saturating_sub(2) / 2).max(1));
+    let list_area = Rect::new(inner.x, inner.y, inner.width, list_height);
+    let list_scroll = app
+        .worktree_file_list_scroll()
+        .min(snapshot.files.len().saturating_sub(list_height as usize));
+    let body_y = inner
+        .y
+        .saturating_add(list_height)
+        .saturating_add(1)
+        .min(inner.bottom());
+    let body = Rect::new(
+        inner.x,
+        body_y,
+        inner.width,
+        inner.bottom().saturating_sub(body_y),
+    );
+    super::clear_area(frame, inner);
+    frame.render_widget(
+        Paragraph::new(
+            build_file_index(snapshot, selected)
+                .into_iter()
+                .skip(list_scroll)
+                .take(list_height as usize)
+                .collect::<Vec<_>>(),
+        ),
+        list_area,
+    );
+    let mut hint = if selected.is_some() {
+        "1 file · click again: all · 60s idle".to_string()
+    } else {
+        "all files · click to filter".to_string()
+    };
+    if snapshot.files.len() > list_height as usize {
+        hint = format!(
+            "{}–{}/{} ↕ · {}",
+            list_scroll + 1,
+            list_scroll + list_height as usize,
+            snapshot.files.len(),
+            hint
+        );
+    }
+    if snapshot.truncated {
+        hint = format!("first {MAX_FILES} files · {hint}");
+    }
+    if body_y > list_area.bottom() {
+        frame.render_widget(
+            Paragraph::new(Line::from(Span::styled(
+                hint,
+                Style::default().fg(dim_color()),
+            ))),
+            Rect::new(inner.x, list_area.bottom(), inner.width, 1),
+        );
+    }
+    WORKTREE_PANE_LAYOUT.with(|layout| {
+        *layout.borrow_mut() = Some(WorktreePaneLayout {
+            area,
+            list_area,
+            body_area: body,
+            list_scroll,
+            paths: Arc::new(
+                snapshot
+                    .files
+                    .iter()
+                    .map(|file| file.path.clone())
+                    .collect(),
+            ),
+            working_dir: app.working_dir(),
+        })
+    });
+
+    let lines = cached_render_lines(snapshot, selected);
     let total_lines = lines.len();
     super::set_pinned_pane_total_lines(total_lines);
-    let max_scroll = total_lines.saturating_sub(inner.height as usize);
+    let max_scroll = total_lines.saturating_sub(body.height as usize);
     super::set_last_diff_pane_max_scroll(max_scroll);
     let scroll = scroll.min(max_scroll);
     super::set_last_diff_pane_effective_scroll(scroll);
-    let visible_end = (scroll + inner.height as usize).min(total_lines);
-    super::record_side_pane_snapshot(lines.as_slice(), scroll, visible_end, inner);
+    let visible_end = (scroll + body.height as usize).min(total_lines);
+    super::record_side_pane_snapshot(lines.as_slice(), scroll, visible_end, body);
 
     let visible: Vec<Line<'static>> = lines
         .iter()
         .skip(scroll)
-        .take(inner.height as usize)
+        .take(body.height as usize)
         .cloned()
         .collect();
-    super::clear_area(frame, inner);
     frame.render_widget(
         Paragraph::new(visible).scroll((0, app.diff_pane_scroll_x().max(0) as u16)),
-        inner,
+        body,
     );
 }
 

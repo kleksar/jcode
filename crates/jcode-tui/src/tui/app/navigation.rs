@@ -573,6 +573,7 @@ impl App {
             return false;
         }
 
+        self.note_worktree_pane_activity();
         let line_amount = self.side_pane_line_scroll_amount();
         let page_amount = self.side_pane_page_scroll_amount();
 
@@ -704,6 +705,7 @@ impl App {
     ///
     /// Returns `true` if the stored offset changed.
     pub(super) fn side_pane_scroll_by(&mut self, delta: isize) -> bool {
+        self.note_worktree_pane_activity();
         let rendered_max = super::super::ui::last_diff_pane_max_scroll();
         // A rendered frame exists when the pane reported any content lines,
         // even if everything fits (max scroll 0).
@@ -1464,6 +1466,9 @@ impl App {
         if let Some(ref picker_cell) = self.account_picker_overlay {
             picker_cell.borrow_mut().handle_overlay_mouse(mouse);
             finish_mouse_event!(false, "account_picker_overlay");
+        }
+        if self.handle_worktree_pane_mouse(mouse) {
+            finish_mouse_event!(false, "worktree_file_index");
         }
         self.normalize_diagram_state();
         let diagram_available = self.diagram_available();

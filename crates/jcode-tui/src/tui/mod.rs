@@ -623,6 +623,13 @@ pub trait TuiState {
     fn diff_pane_scroll(&self) -> usize;
     /// Horizontal pan offset for the shared right pane (side-panel diagrams)
     fn diff_pane_scroll_x(&self) -> i32;
+    /// Optional path filter and independent scroll offset for the sticky worktree index.
+    fn worktree_selected_file(&self) -> Option<&str> {
+        None
+    }
+    fn worktree_file_list_scroll(&self) -> usize {
+        0
+    }
     /// Zoom percentage for image widgets rendered inside the side panel.
     fn side_panel_image_zoom_percent(&self) -> u8;
     /// Image shown in the dismissible full-screen panel preview.

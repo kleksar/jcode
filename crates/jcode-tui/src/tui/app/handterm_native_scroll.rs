@@ -175,6 +175,9 @@ impl App {
             if self.side_panel_native_scrollbar
                 && let Some(area) = layout.diff_pane_area
             {
+                let area = crate::tui::ui::worktree_pane_layout()
+                    .map(|layout| layout.body_area)
+                    .unwrap_or(area);
                 let viewport = area.height as usize;
                 let content_length = crate::tui::ui::pinned_pane_total_lines().max(viewport);
                 panes.push(PaneState {
@@ -190,6 +193,11 @@ impl App {
             }
         }
         PaneSnapshot { panes }
+    }
+
+    #[cfg(test)]
+    pub(super) fn native_scroll_snapshot_for_test(&self) -> serde_json::Value {
+        serde_json::to_value(self.current_native_scroll_snapshot()).unwrap()
     }
 
     pub(super) fn apply_handterm_native_scroll(&mut self, command: HostToApp) {
