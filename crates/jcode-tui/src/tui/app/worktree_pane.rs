@@ -2,7 +2,6 @@ use super::*;
 
 const FILTER_IDLE_TIMEOUT: Duration = Duration::from_secs(60);
 const MAX_TERMINAL_LINES: usize = 2_000;
-const MIN_TERMINAL_RUNNING_TIME: Duration = Duration::from_millis(500);
 
 type TerminalCommandResult = Result<std::process::Output, String>;
 
@@ -183,7 +182,6 @@ pub(super) struct WorktreePaneState {
     pub(super) terminal_lines: Vec<String>,
     pub(super) terminal_cwd: Option<String>,
     pub(super) terminal_running: bool,
-    terminal_command_started_at: Option<Instant>,
     terminal_command_rx: Option<std::sync::mpsc::Receiver<TerminalCommandResult>>,
     session_id: String,
     working_dir: Option<String>,
@@ -206,7 +204,6 @@ impl Default for WorktreePaneState {
             terminal_lines: vec!["Jcode terminal. Type a command and press Enter.".to_string()],
             terminal_cwd: None,
             terminal_running: false,
-            terminal_command_started_at: None,
             terminal_command_rx: None,
             session_id: String::new(),
             working_dir: None,
@@ -351,7 +348,6 @@ impl App {
             let (tx, rx) = std::sync::mpsc::channel();
             self.worktree_pane.terminal_command_rx = Some(rx);
             self.worktree_pane.terminal_running = true;
-            self.worktree_pane.terminal_command_started_at = Some(Instant::now());
             std::thread::spawn(move || {
                 let _ = tx.send(run_interactive_shell_command(&command, &cwd));
             });
@@ -367,13 +363,6 @@ impl App {
     }
 
     fn poll_project_terminal_command(&mut self) -> bool {
-        if self
-            .worktree_pane
-            .terminal_command_started_at
-            .is_some_and(|started| started.elapsed() < MIN_TERMINAL_RUNNING_TIME)
-        {
-            return false;
-        }
         let result = match self
             .worktree_pane
             .terminal_command_rx
@@ -388,7 +377,6 @@ impl App {
         };
         self.worktree_pane.terminal_command_rx = None;
         self.worktree_pane.terminal_running = false;
-        self.worktree_pane.terminal_command_started_at = None;
         match result {
             Ok(output) => {
                 self.worktree_pane
