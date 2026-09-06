@@ -57,7 +57,11 @@ impl App {
 
     fn prepare_worktree_pane_state(&mut self) {
         if !self.worktree_pane_matches_session() {
+            let explicit_open = self.worktree_pane.explicit_open;
+            let tab = self.worktree_pane.tab;
             self.worktree_pane = WorktreePaneState {
+                explicit_open,
+                tab,
                 session_id: self.session.id.clone(),
                 working_dir: self.session.working_dir.clone(),
                 ..Default::default()
@@ -66,11 +70,11 @@ impl App {
     }
 
     pub(super) fn worktree_files_tab_active(&self) -> bool {
-        !self.worktree_pane_matches_session() || self.worktree_pane.tab == WorktreePaneTab::Files
+        self.worktree_pane.tab == WorktreePaneTab::Files
     }
 
     pub(super) fn worktree_pane_explicit_open(&self) -> bool {
-        !self.worktree_pane_matches_session() || self.worktree_pane.explicit_open
+        self.worktree_pane.explicit_open
     }
 
     pub(super) fn set_worktree_pane_tab(&mut self, tab: WorktreePaneTab) {
