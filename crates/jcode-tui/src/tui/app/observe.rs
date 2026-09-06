@@ -103,6 +103,7 @@ impl App {
         );
         if mutates_repo {
             super::helpers::invalidate_git_info_cache();
+            crate::tui::ui::invalidate_worktree_changes_cache();
         }
 
         // The todo tool rewrites the per-session todo list.

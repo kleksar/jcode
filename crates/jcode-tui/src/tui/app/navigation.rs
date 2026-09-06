@@ -494,7 +494,10 @@ impl App {
     }
 
     pub(super) fn diff_pane_visible(&self) -> bool {
-        self.diff_mode.has_side_pane() || self.side_panel.focused_page().is_some()
+        self.diff_mode.has_side_pane()
+            || self.side_panel.focused_page().is_some()
+            || crate::tui::ui::last_layout_snapshot()
+                .is_some_and(|layout| layout.diff_pane_area.is_some())
     }
 
     pub(super) fn set_diff_pane_focus(&mut self, focus: bool) {
