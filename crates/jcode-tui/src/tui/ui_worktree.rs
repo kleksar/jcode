@@ -642,10 +642,20 @@ pub(super) fn draw_worktree_changes(
     let list_scroll = app
         .worktree_file_list_scroll()
         .min(snapshot.files.len().saturating_sub(list_height as usize));
-    let body_y = inner
-        .y
-        .saturating_add(list_height)
-        .saturating_add(1)
+    let header_bottom = list_area.bottom().saturating_add(1).min(inner.bottom());
+    // Isolate the fixed file index + filter hint from the scrolling diff body.
+    // Preserve a small usable diff viewport first, then spend remaining rows on
+    // a heavy rule and one padding row. Tiny panes degrade without underflow.
+    const MIN_DIFF_BODY_HEIGHT: u16 = 3;
+    let boundary_height = PADDED_SECTION_BOUNDARY_HEIGHT.min(
+        inner
+            .bottom()
+            .saturating_sub(header_bottom)
+            .saturating_sub(MIN_DIFF_BODY_HEIGHT),
+    );
+    let boundary_area = Rect::new(inner.x, header_bottom, inner.width, boundary_height);
+    let body_y = header_bottom
+        .saturating_add(boundary_height)
         .min(inner.bottom());
     let body = Rect::new(
         inner.x,
@@ -690,6 +700,7 @@ pub(super) fn draw_worktree_changes(
             Rect::new(inner.x, list_area.bottom(), inner.width, 1),
         );
     }
+    draw_padded_section_boundary(frame, boundary_area, true);
     WORKTREE_PANE_LAYOUT.with(|layout| {
         *layout.borrow_mut() = Some(WorktreePaneLayout {
             area,

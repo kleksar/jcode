@@ -425,9 +425,24 @@ pub(super) fn draw_messages(
             height: 1,
         }
     }));
+    // A fixed top band gets the same visual isolation as the composer: heavy
+    // rule first, then a padding row before the scrollable transcript. On very
+    // short terminals, degrade to a rule-only boundary and preserve three content
+    // rows instead of starving the viewport.
+    let top_chrome_lines = pinned_todo_lines + prompt_preview_lines;
+    let top_boundary_lines = if top_chrome_lines > 0 {
+        super::PADDED_SECTION_BOUNDARY_HEIGHT.min(
+            render_area
+                .height
+                .saturating_sub(top_chrome_lines)
+                .saturating_sub(3),
+        )
+    } else {
+        0
+    };
     // Total synthetic rows reserved at the top of the viewport (previous-prompt
-    // preview first, then the todo band, then transcript content).
-    let top_band_lines = pinned_todo_lines + prompt_preview_lines;
+    // preview, todo band, heavy boundary + padding, then transcript content).
+    let top_band_lines = top_chrome_lines + top_boundary_lines;
 
     let content_area = Rect {
         x: text_render_area.x,
@@ -1221,6 +1236,19 @@ pub(super) fn draw_messages(
         frame.render_widget(Paragraph::new(pinned_todo_band), band_area);
     }
 
+    if top_boundary_lines > 0 {
+        let boundary_area = Rect {
+            x: content_area.x,
+            y: render_area
+                .y
+                .saturating_add(prompt_preview_lines)
+                .saturating_add(pinned_todo_lines),
+            width: content_area.width,
+            height: top_boundary_lines,
+        };
+        super::draw_padded_section_boundary(frame, boundary_area, true);
+    }
+
     if crate::config::config().display.prompt_preview && scroll > 0 {
         let last_offscreen_prompt_idx =
             lower_bound(wrapped_user_prompt_starts, scroll).checked_sub(1);
@@ -1293,23 +1321,6 @@ pub(super) fn draw_messages(
                 };
                 clear_area(frame, preview_area);
                 frame.render_widget(Paragraph::new(preview_lines), preview_area);
-
-                let divider_area = Rect {
-                    x: preview_area.x,
-                    y: preview_area.y.saturating_add(line_count),
-                    width: preview_area.width,
-                    height: 1,
-                };
-                if divider_area.width > 0 {
-                    clear_area(frame, divider_area);
-                    frame.render_widget(
-                        Paragraph::new(Span::styled(
-                            "─".repeat(divider_area.width as usize),
-                            Style::default().fg(border_color()),
-                        )),
-                        divider_area,
-                    );
-                }
             }
         }
     }
@@ -1553,9 +1564,7 @@ fn compute_prompt_preview_line_count(
     let content_width = area_width.saturating_sub(prefix_len as u16 + 2) as usize;
     let text_flat = prompt_text.replace('\n', " ");
     let display_width = UnicodeWidthStr::width(text_flat.as_str());
-    // Reserve one extra row for the themed boundary between the sticky prompt
-    // preview and the pinned/live action stream beneath it.
-    if display_width > content_width { 3 } else { 2 }
+    if display_width > content_width { 2 } else { 1 }
 }
 
 fn compute_max_scroll_with_prompt_preview(
@@ -1567,7 +1576,7 @@ fn compute_max_scroll_with_prompt_preview(
 ) -> usize {
     let mut max_scroll = total_lines.saturating_sub(area.height as usize);
     let preview_enabled = crate::config::config().display.prompt_preview;
-    if max_scroll == 0 || (!preview_enabled && pinned_todo_lines == 0) {
+    if pinned_todo_lines == 0 && (max_scroll == 0 || !preview_enabled) {
         return max_scroll;
     }
 
@@ -1582,9 +1591,19 @@ fn compute_max_scroll_with_prompt_preview(
         } else {
             0
         };
+        let top_chrome_lines = prompt_preview_lines + pinned_todo_lines;
+        let top_boundary_lines = if top_chrome_lines > 0 {
+            super::PADDED_SECTION_BOUNDARY_HEIGHT.min(
+                area.height
+                    .saturating_sub(top_chrome_lines)
+                    .saturating_sub(3),
+            )
+        } else {
+            0
+        };
         let content_height =
             area.height
-                .saturating_sub(prompt_preview_lines + pinned_todo_lines) as usize;
+                .saturating_sub(top_chrome_lines + top_boundary_lines) as usize;
         let adjusted = total_lines.saturating_sub(content_height);
         if adjusted == max_scroll {
             break;

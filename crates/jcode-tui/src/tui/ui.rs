@@ -35,6 +35,30 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 #[cfg(test)]
 use unicode_width::UnicodeWidthStr;
+
+/// A terminal cell cannot grow by a physical pixel, so use the heavy box-drawing
+/// rule to make the fixed-chat boundaries visibly thicker than transcript rules.
+pub(super) const PADDED_SECTION_BOUNDARY_HEIGHT: u16 = 2;
+
+pub(super) fn draw_padded_section_boundary(frame: &mut Frame, area: Rect, rule_on_first_row: bool) {
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
+
+    clear_area(frame, area);
+    let rule_y = if rule_on_first_row {
+        area.y
+    } else {
+        area.bottom().saturating_sub(1)
+    };
+    frame.render_widget(
+        Paragraph::new(Span::styled(
+            "━".repeat(area.width as usize),
+            Style::default().fg(border_color()),
+        )),
+        Rect::new(area.x, rule_y, area.width, 1),
+    );
+}
 #[path = "ui_animations.rs"]
 mod animations;
 pub(crate) use animations::{
@@ -3128,7 +3152,8 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
     // bottom of the transcript. Rendered directly below the input line.
     let overscroll_height: u16 = if app.chat_overscroll_active() { 1 } else { 0 };
     let session_footer_height = input_ui::session_footer_height(chat_area);
-    let fixed_height = 1
+    let available_height = chat_area.height;
+    let fixed_chrome_height = 1
         + queued_height
         + swarm_strip_height
         + notification_height
@@ -3137,8 +3162,17 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
         + input_height
         + overscroll_height
         + donut_height
-        + session_footer_height; // status + queued + swarm strip + notification + inline UI + gap + input + overscroll + donut + footer
-    let available_height = chat_area.height;
+        + session_footer_height;
+    // Keep enough message rows for a two-line sticky prompt, its compact rule,
+    // and at least three transcript rows. Full-size layouts get rule + padding;
+    // tiny terminals reduce or omit the lower boundary rather than hiding history.
+    const MIN_COMPACT_CHAT_VIEWPORT_HEIGHT: u16 = 6;
+    let chat_bottom_boundary_height = PADDED_SECTION_BOUNDARY_HEIGHT.min(
+        available_height
+            .saturating_sub(fixed_chrome_height)
+            .saturating_sub(MIN_COMPACT_CHAT_VIEWPORT_HEIGHT),
+    );
+    let fixed_height = fixed_chrome_height + chat_bottom_boundary_height;
     // Overflow decisions (native scrollbar, and thus the wrap width) must not
     // depend on the transient overscroll row. Otherwise revealing the line at
     // the fits/overflows boundary flips the scrollbar on, re-wraps the whole
@@ -3250,15 +3284,23 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
         .constraints(if use_packed {
             vec![
                 if terminal_clear_collapsed {
-                    Constraint::Length(0)
+                    Constraint::Length(chat_bottom_boundary_height)
                 } else if session_footer_height > 0 {
                     // Roomy terminals use a true bottom-pinned composer: the
                     // transcript owns all spare rows and the footer stays on
                     // the terminal edge instead of floating after short chat.
-                    Constraint::Min(content_height.max(1))
+                    Constraint::Min(
+                        content_height
+                            .max(1)
+                            .saturating_add(chat_bottom_boundary_height),
+                    )
                 } else {
-                    Constraint::Length(content_height.max(1))
-                }, // 0 Messages (elastic with polished footer; 0 when terminal-cleared)
+                    Constraint::Length(
+                        content_height
+                            .max(1)
+                            .saturating_add(chat_bottom_boundary_height),
+                    )
+                }, // 0 Messages + padded lower boundary
                 Constraint::Length(queued_height), // 1 Queued messages (above status)
                 Constraint::Length(swarm_strip_height), // 2 Swarm strip (above status)
                 Constraint::Length(1),             // 3 Status line
@@ -3272,16 +3314,16 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
             ]
         } else {
             vec![
-                Constraint::Min(3),                        // 0 Messages (scrollable)
-                Constraint::Length(queued_height),         // 1 Queued messages (above status)
-                Constraint::Length(swarm_strip_height),    // 2 Swarm strip (above status)
-                Constraint::Length(1),                     // 3 Status line
-                Constraint::Length(notification_height),   // 4 Notification line
-                Constraint::Length(inline_block_height),   // 5 Inline UI
-                Constraint::Length(inline_ui_gap_height),  // 6 Inline UI/input spacing
-                Constraint::Length(input_height),          // 7 Input
-                Constraint::Length(overscroll_height),     // 8 Overscroll status line
-                Constraint::Length(donut_height),          // 9 Donut animation
+                Constraint::Min(3 + chat_bottom_boundary_height), // 0 Messages + padded lower boundary
+                Constraint::Length(queued_height), // 1 Queued messages (above status)
+                Constraint::Length(swarm_strip_height), // 2 Swarm strip (above status)
+                Constraint::Length(1),             // 3 Status line
+                Constraint::Length(notification_height), // 4 Notification line
+                Constraint::Length(inline_block_height), // 5 Inline UI
+                Constraint::Length(inline_ui_gap_height), // 6 Inline UI/input spacing
+                Constraint::Length(input_height),  // 7 Input
+                Constraint::Length(overscroll_height), // 8 Overscroll status line
+                Constraint::Length(donut_height),  // 9 Donut animation
                 Constraint::Length(session_footer_height), // 10 Session footer
             ]
         })
@@ -3361,8 +3403,23 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
     }
     let draw_start = Instant::now();
 
-    // Messages area is chunks[0] within the chat column (already excludes diagram).
-    let messages_area = chunks[0];
+    // Keep the scrollable transcript isolated from the composer chrome. The
+    // boundary owns a padding row followed by a heavy rule, while the message
+    // viewport receives only the rows above it.
+    let messages_section = chunks[0];
+    let actual_boundary_height = chat_bottom_boundary_height.min(messages_section.height);
+    let messages_area = Rect {
+        height: messages_section
+            .height
+            .saturating_sub(actual_boundary_height),
+        ..messages_section
+    };
+    let chat_bottom_boundary_area = Rect {
+        x: messages_section.x,
+        y: messages_area.bottom(),
+        width: messages_section.width,
+        height: actual_boundary_height,
+    };
     let _ = swarm_strip_height;
     note_chat_layout(ChatLayoutMetrics {
         chat_area,
@@ -3529,7 +3586,7 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
     if let Some(ref mut capture) = debug_capture {
         capture.render_order.push("draw_status".to_string());
     }
-    input_ui::draw_status(frame, app, chunks[3], pending_count, true);
+    input_ui::draw_status(frame, app, chunks[3], pending_count, false);
     if notification_height > 0 {
         input_ui::draw_notification(frame, app, chunks[4]);
     }
@@ -3661,6 +3718,11 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
             input_cursor,
         );
     }
+
+    // Session facts intentionally search blank cells all the way down to the
+    // composer. Repaint the fixed boundary after that overlay so its padding
+    // row cannot be mistaken for spare fact-stack space.
+    draw_padded_section_boundary(frame, chat_bottom_boundary_area, false);
 
     // Command-suggestion popover: a late overlay pass so the palette floats
     // over existing rows (blank space, pinned footer, or the transcript tail)
