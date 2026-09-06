@@ -110,6 +110,7 @@ fn native_scrollbar_visibility_requires_overflow() {
 
 #[derive(Clone, Default)]
 struct TestState {
+    footer_quota: Option<crate::tui::FooterQuota>,
     input: String,
     cursor_pos: usize,
     provider_name: Option<String>,
@@ -152,6 +153,44 @@ struct TestState {
     swarm_panel_selected: usize,
     swarm_panel_focused: bool,
     swarm_panel_full_page: bool,
+}
+
+#[test]
+fn footer_quota_renders_beside_model_without_context_bar() {
+    let app = TestState {
+        provider_model: Some("gpt-6-astra".into()),
+        info_widget_data: info_widget::InfoWidgetData {
+            model: Some("gpt-6-astra".into()),
+            reasoning_effort: Some("high".into()),
+            ..Default::default()
+        },
+        footer_quota: Some(crate::tui::FooterQuota {
+            remaining_percent: 77,
+            reset_in: "6d 20h".into(),
+        }),
+        ..Default::default()
+    };
+    for width in [100, 40, 8] {
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(width, 1)).unwrap();
+        terminal
+            .draw(|frame| input_ui::draw_session_footer(frame, &app, frame.area()))
+            .unwrap();
+        let text = (0..width)
+            .map(|x| terminal.backend().buffer()[(x, 0)].symbol())
+            .collect::<String>();
+        assert!(!text.trim().is_empty(), "narrow footer must not disappear");
+        if width >= 40 {
+            assert!(
+                text.contains("/high") && text.contains("7-day 77%"),
+                "{text}"
+            );
+        }
+        if width == 100 {
+            assert!(text.contains("6d 20h"), "{text}");
+        }
+        assert!(!text.contains("▰") && !text.contains("Context"), "{text}");
+    }
 }
 
 impl crate::tui::TuiState for TestState {
@@ -372,6 +411,9 @@ impl crate::tui::TuiState for TestState {
     }
     fn info_widget_data(&self) -> info_widget::InfoWidgetData {
         self.info_widget_data.clone()
+    }
+    fn footer_quota(&self) -> Option<crate::tui::FooterQuota> {
+        self.footer_quota.clone()
     }
     fn render_streaming_markdown(&self, _width: usize) -> Vec<Line<'static>> {
         markdown::render_markdown_with_width(&self.streaming_text, Some(_width))

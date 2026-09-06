@@ -8,6 +8,38 @@ pub struct ContextSnapshot {
     pub fresh: bool,
 }
 
+/// Verified seven-day subscription quota for the compact session footer.
+///
+/// This deliberately contains only data that belongs beside the model. The
+/// broader provider, credential, context, and usage details do not belong in
+/// the persistent footer or floating auxiliary widgets.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FooterQuota {
+    pub remaining_percent: u8,
+    pub reset_in: String,
+}
+
+impl FooterQuota {
+    pub(crate) fn from_usage(usage: &info_widget::UsageInfo) -> Option<Self> {
+        if !usage.available
+            || !matches!(
+                usage.provider,
+                info_widget::UsageProvider::Anthropic | info_widget::UsageProvider::OpenAI
+            )
+            || !usage.seven_day.is_finite()
+            || !(0.0..=1.0).contains(&usage.seven_day)
+        {
+            return None;
+        }
+        let reset_at = usage.seven_day_resets_at.as_deref()?;
+        chrono::DateTime::parse_from_rfc3339(reset_at).ok()?;
+        Some(Self {
+            remaining_percent: 100u8.saturating_sub((usage.seven_day * 100.0).round() as u8),
+            reset_in: crate::usage::format_reset_time(reset_at),
+        })
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum BackgroundTaskRowStatus {
     Running,
@@ -544,6 +576,17 @@ pub trait TuiState {
     fn server_update_available(&self) -> Option<bool>;
     /// Get info widget data (todos, client count, etc.)
     fn info_widget_data(&self) -> info_widget::InfoWidgetData;
+    /// Data permitted in floating overlays, separate from footer/context views.
+    fn floating_info_widget_data(&self) -> info_widget::InfoWidgetData {
+        self.info_widget_data()
+    }
+    /// Verified seven-day quota for the persistent session footer.
+    ///
+    /// `None` means the provider did not report a usable seven-day quota, so
+    /// the footer must not invent a percentage or reset time.
+    fn footer_quota(&self) -> Option<FooterQuota> {
+        None
+    }
 
     /// Whether the inline swarm gallery band should be shown above the chat.
     /// Active when `agents.swarm_spawn_mode = inline` and the swarm has members.

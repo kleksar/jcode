@@ -3562,7 +3562,7 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
 
     // Draw info widget overlays (skip during idle animation - they look out of place)
     let widget_data_start = Instant::now();
-    let widget_data = app.info_widget_data();
+    let widget_data = app.floating_info_widget_data();
     let widget_data_elapsed = widget_data_start.elapsed();
     let mut widget_render_ms: Option<f32> = None;
     let mut placements: Vec<info_widget::WidgetPlacement> = Vec::new();

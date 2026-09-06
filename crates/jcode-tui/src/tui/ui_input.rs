@@ -1205,6 +1205,28 @@ mod tests {
     }
 
     #[test]
+    fn footer_quota_shows_only_remaining_seven_day_quota_and_reset() {
+        let spans = footer_quota_spans(Some(crate::tui::FooterQuota {
+            remaining_percent: 77,
+            reset_in: "6d 20h".to_string(),
+        }));
+        let text = spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect::<String>();
+
+        assert_eq!(text, "7-day 77% · 6d 20h");
+        assert!(!text.contains("OpenAI"));
+        assert!(!text.contains("Context"));
+        assert!(!text.contains("Spark"));
+    }
+
+    #[test]
+    fn footer_quota_is_absent_when_usage_is_unavailable() {
+        assert!(footer_quota_spans(None).is_empty());
+    }
+
+    #[test]
     fn visual_line_move_follows_soft_wrapped_rows() {
         // 20 chars, width 10 => two visual rows, no newline in the input.
         let input = "abcdefghijklmnopqrst";
@@ -2381,34 +2403,25 @@ pub(super) fn session_footer_height(area: Rect) -> u16 {
     }
 }
 
-fn footer_context_spans(
-    data: &crate::tui::info_widget::InfoWidgetData,
-    cells: usize,
-) -> Vec<Span<'static>> {
-    let Some((used, limit)) = overscroll_context_usage(data) else {
+fn footer_quota_spans(quota: Option<crate::tui::FooterQuota>) -> Vec<Span<'static>> {
+    let Some(quota) = quota else {
         return Vec::new();
     };
-    let ratio = (used as f64 / limit.max(1) as f64).clamp(0.0, 1.0);
-    let left_pct = (100.0 - ratio * 100.0).round() as u16;
-    let filled = ((left_pct as f64 / 100.0) * cells as f64).round() as usize;
-    let filled = filled.min(cells);
-    let color = if left_pct <= 20 {
+    let color = if quota.remaining_percent <= 20 {
         rgb(255, 100, 100)
-    } else if left_pct <= 50 {
+    } else if quota.remaining_percent <= 50 {
         rgb(255, 200, 100)
     } else {
         rgb(100, 210, 120)
     };
     vec![
-        Span::styled("▰".repeat(filled), Style::default().fg(color)),
+        Span::styled("7-day ", Style::default().fg(rgb(140, 140, 150))),
         Span::styled(
-            "▱".repeat(cells.saturating_sub(filled)),
-            Style::default().fg(rgb(55, 55, 65)),
-        ),
-        Span::styled(
-            format!(" {}% left", left_pct),
+            format!("{}%", quota.remaining_percent),
             Style::default().fg(color).bold(),
         ),
+        Span::styled(" · ", Style::default().fg(rgb(90, 90, 100))),
+        Span::styled(quota.reset_in, Style::default().fg(rgb(140, 140, 150))),
     ]
 }
 
@@ -2515,12 +2528,18 @@ pub(super) fn draw_session_footer(frame: &mut Frame, app: &dyn TuiState, area: R
     }
 
     let facts = footer_fact_spans(app);
-    let data = app.info_widget_data();
-    let context_cells = if area.width >= 90 { 10 } else { 6 };
-    let context = footer_context_spans(&data, context_cells);
-    let context_width = context.iter().map(|span| span.width()).sum::<usize>();
-    let gap = usize::from(!facts.is_empty() && !context.is_empty()) * 2;
-    let facts_width = (area.width as usize).saturating_sub(context_width + gap);
+    let mut quota = footer_quota_spans(app.footer_quota());
+    // Prefer the percentage over the reset clock on narrow terminals, without
+    // letting an over-wide quota erase the entire model/footer row.
+    if quota.iter().map(|span| span.width()).sum::<usize>() > area.width as usize / 2 {
+        quota.truncate(2);
+    }
+    if quota.iter().map(|span| span.width()).sum::<usize>() > area.width as usize {
+        quota.clear();
+    }
+    let quota_width = quota.iter().map(|span| span.width()).sum::<usize>();
+    let gap = usize::from(!facts.is_empty() && !quota.is_empty()) * 2;
+    let facts_width = (area.width as usize).saturating_sub(quota_width + gap);
 
     if facts_width > 0 && !facts.is_empty() {
         let left_area = Rect::new(area.x, area.y, facts_width as u16, 1);
@@ -2529,15 +2548,15 @@ pub(super) fn draw_session_footer(frame: &mut Frame, app: &dyn TuiState, area: R
             left_area,
         );
     }
-    if context_width > 0 && context_width <= area.width as usize {
+    if quota_width > 0 && quota_width <= area.width as usize {
         let right_area = Rect::new(
-            area.right().saturating_sub(context_width as u16),
+            area.right().saturating_sub(quota_width as u16),
             area.y,
-            context_width as u16,
+            quota_width as u16,
             1,
         );
         frame.render_widget(
-            Paragraph::new(Line::from(context)).alignment(Alignment::Right),
+            Paragraph::new(Line::from(quota)).alignment(Alignment::Right),
             right_area,
         );
     }
