@@ -777,6 +777,10 @@ fn prepare_messages_inner(app: &dyn TuiState, width: u16, height: u16) -> Prepar
     let body_start = Instant::now();
     let body_prepared = prepare_body_cached(app, width);
     let body_ms = body_start.elapsed().as_secs_f64() * 1000.0;
+    let body_ends_with_turn_divider = body_prepared
+        .wrapped_lines
+        .last()
+        .is_some_and(line_is_turn_divider);
 
     // Anchored images render inside the body at their producing message; only
     // images without a resolvable anchor target fall back to this trailing
@@ -787,7 +791,8 @@ fn prepare_messages_inner(app: &dyn TuiState, width: u16, height: u16) -> Prepar
         if items.is_empty() {
             Arc::new(empty_prepared_messages())
         } else {
-            let prefix_blank = !body_prepared.wrapped_lines.is_empty();
+            let prefix_blank =
+                !body_prepared.wrapped_lines.is_empty() && !body_ends_with_turn_divider;
             Arc::new(super::inline_image_ui::build_section(
                 &items,
                 width,
@@ -803,7 +808,10 @@ fn prepare_messages_inner(app: &dyn TuiState, width: u16, height: u16) -> Prepar
 
     let batch_start = Instant::now();
     let has_batch_progress = active_batch_progress(app).is_some();
-    let batch_prefix_blank = has_batch_progress && !body_prepared.wrapped_lines.is_empty();
+    let batch_prefix_blank = has_batch_progress
+        && (!body_prepared.wrapped_lines.is_empty()
+            || !inline_images_prepared.wrapped_lines.is_empty())
+        && !(body_ends_with_turn_divider && inline_images_prepared.wrapped_lines.is_empty());
     let batch_progress_prepared = if has_batch_progress {
         Arc::new(prepare_active_batch_progress(
             app,
@@ -820,10 +828,16 @@ fn prepare_messages_inner(app: &dyn TuiState, width: u16, height: u16) -> Prepar
     // the body now; no separate retained/collapsing trace section exists.
     let reasoning_prepared = Arc::new(empty_prepared_messages());
     let has_streaming = app.is_processing() && !app.streaming_text().is_empty();
+    let divider_immediately_before_streaming = body_ends_with_turn_divider
+        && inline_images_prepared.wrapped_lines.is_empty()
+        && batch_progress_prepared.wrapped_lines.is_empty()
+        && reasoning_prepared.wrapped_lines.is_empty();
     let stream_prefix_blank = has_streaming
         && (!body_prepared.wrapped_lines.is_empty()
+            || !inline_images_prepared.wrapped_lines.is_empty()
             || !batch_progress_prepared.wrapped_lines.is_empty()
-            || !reasoning_prepared.wrapped_lines.is_empty());
+            || !reasoning_prepared.wrapped_lines.is_empty())
+        && !divider_immediately_before_streaming;
     let streaming_prepared = if has_streaming {
         Arc::new(prepare_streaming_cached(app, width, stream_prefix_blank))
     } else {
@@ -1333,6 +1347,9 @@ struct BodyAcc {
     /// True when a prior (reused) body already has content, so the first message
     /// rendered here still gets its leading separator blank.
     body_has_content: bool,
+    /// True when the previous row is the rule beneath a user prompt. The first
+    /// response row consumes that rule instead of adding the old blank spacer.
+    ends_with_turn_divider: bool,
 }
 
 impl BodyAcc {
@@ -1362,6 +1379,25 @@ impl BodyAcc {
     fn push_blank(&mut self) {
         self.push_auto(Line::from(""));
     }
+
+    /// Draw a full-width, palette-aware rule beneath a user prompt. Keeping the
+    /// row in the message boundary makes full and incremental preparation agree.
+    fn push_turn_divider(&mut self, width: u16) {
+        let divider_width = width.saturating_sub(1) as usize;
+        if divider_width == 0 {
+            return;
+        }
+        self.push_auto(Line::from(Span::styled(
+            "─".repeat(divider_width),
+            Style::default().fg(border_color()),
+        )));
+        self.ends_with_turn_divider = true;
+    }
+}
+
+fn line_is_turn_divider(line: &Line<'_>) -> bool {
+    let text = ui::line_plain_text(line);
+    !text.is_empty() && text.chars().all(|ch| ch == '─')
 }
 
 /// Render a single transcript message into `acc`. This is the one canonical
@@ -1392,7 +1428,13 @@ fn render_message_into(
     }
     let align = default_message_alignment(role, centered);
 
-    if (acc.body_has_content || !acc.lines.is_empty())
+    let follows_turn_divider = acc.ends_with_turn_divider;
+    if follows_turn_divider {
+        acc.ends_with_turn_divider = false;
+    }
+
+    if !follows_turn_divider
+        && (acc.body_has_content || !acc.lines.is_empty())
         && role != "tool"
         && role != "meta"
         && role != "swarm"
@@ -1432,6 +1474,7 @@ fn render_message_into(
                     }
                 }
             }
+            acc.push_turn_divider(width);
         }
         "assistant" => {
             let content_width = width.saturating_sub(4);
@@ -1805,6 +1848,7 @@ pub(super) fn prepare_body_incremental(
         prompt_num: prev_prompt_count,
         anchor_prompt_ordinal,
         body_has_content: !prev.wrapped_lines.is_empty(),
+        ends_with_turn_divider: prev.wrapped_lines.last().is_some_and(line_is_turn_divider),
         ..BodyAcc::default()
     };
 

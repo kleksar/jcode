@@ -155,7 +155,16 @@ fn test_prompt_preview_reserves_rows_without_overwriting_visible_history() {
         "expected two-line preview truncation, got:\n{}",
         text
     );
-    let visible_history = text.lines().skip(2).collect::<Vec<_>>().join(" ");
+    let rows = text.lines().collect::<Vec<_>>();
+    assert!(
+        rows.get(2).is_some_and(|line| {
+            let line = line.trim();
+            !line.is_empty() && line.chars().all(|ch| ch == '─')
+        }),
+        "expected divider below sticky prompt preview, got:\n{}",
+        text
+    );
+    let visible_history = rows.iter().skip(3).copied().collect::<Vec<_>>().join(" ");
     let normalized_history = visible_history.split_whitespace().collect::<Vec<_>>().join(" ");
     assert!(
         normalized_history.contains("Intro line 20 - quick brown fox jumps over the lazy dog."),
