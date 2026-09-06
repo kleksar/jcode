@@ -6,15 +6,118 @@ const MAX_TERMINAL_LINES: usize = 2_000;
 type TerminalCommandResult = Result<std::process::Output, String>;
 
 pub(super) fn safe_terminal_output_lines(bytes: &[u8]) -> Vec<String> {
-    crate::message::strip_ansi_escape_sequences(&String::from_utf8_lossy(bytes))
-        .replace('\r', "\n")
-        .lines()
-        .map(|line| {
-            line.chars()
-                .filter(|ch| !ch.is_control() || *ch == '\t')
-                .collect()
-        })
-        .collect()
+    let text = String::from_utf8_lossy(bytes);
+    let mut lines = Vec::new();
+    let mut line = String::new();
+    let mut chars = text.chars().peekable();
+
+    while let Some(ch) = chars.next() {
+        match ch {
+            '\n' => lines.push(std::mem::take(&mut line)),
+            // PTY output normally uses CRLF. Ignoring CR also avoids turning
+            // every shell output row into two rows in the pane.
+            '\r' => {}
+            // macOS `script` closes its input with `^D\b\b`; interpreting
+            // backspace rather than printing it removes that harmless marker.
+            '\u{8}' => {
+                line.pop();
+            }
+            '\u{1b}' => match chars.peek().copied() {
+                Some('[') => {
+                    chars.next();
+                    let mut sequence = String::from("\u{1b}[");
+                    let mut final_byte = None;
+                    for next in chars.by_ref() {
+                        sequence.push(next);
+                        if ('@'..='~').contains(&next) {
+                            final_byte = Some(next);
+                            break;
+                        }
+                    }
+                    // Preserve only SGR styling. Cursor movement, screen
+                    // clearing, and other terminal control sequences must not
+                    // affect Jcode's outer terminal.
+                    if final_byte == Some('m') {
+                        line.push_str(&sequence);
+                    }
+                }
+                Some(']') => {
+                    chars.next();
+                    // Discard OSC sequences, including hyperlinks and title/
+                    // clipboard controls, through BEL or ST.
+                    let mut previous_escape = false;
+                    for next in chars.by_ref() {
+                        if next == '\u{7}' || (previous_escape && next == '\\') {
+                            break;
+                        }
+                        previous_escape = next == '\u{1b}';
+                    }
+                }
+                Some(_) => {
+                    chars.next();
+                }
+                None => {}
+            },
+            '\t' => line.push(ch),
+            ch if !ch.is_control() => line.push(ch),
+            _ => {}
+        }
+    }
+    if !line.is_empty() {
+        lines.push(line);
+    }
+    lines
+}
+
+fn run_interactive_shell_command(command: &str, cwd: &str) -> Result<std::process::Output, String> {
+    #[cfg(windows)]
+    {
+        let shell = std::env::var("COMSPEC").unwrap_or_else(|_| "cmd.exe".to_string());
+        return std::process::Command::new(shell)
+            .arg("/C")
+            .arg(command)
+            .current_dir(cwd)
+            .output()
+            .map_err(|error| error.to_string());
+    }
+
+    #[cfg(not(windows))]
+    {
+        let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string());
+        let mut process;
+
+        // `script` gives the child a real PTY on macOS. That matters for the
+        // user's normal shell setup: zsh loads ~/.zshrc in interactive mode,
+        // aliases such as `la` exist, and tools emit the same colours they do
+        // in iTerm. Other Unix platforms retain interactive rc loading and
+        // colour-forcing even when `script` syntax differs.
+        #[cfg(target_os = "macos")]
+        {
+            process = std::process::Command::new("/usr/bin/script");
+            process
+                .arg("-q")
+                .arg("/dev/null")
+                .arg(&shell)
+                .arg("-ic")
+                .arg(command);
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            process = std::process::Command::new(&shell);
+            process.arg("-ic").arg(command);
+        }
+
+        process
+            .current_dir(cwd)
+            .env(
+                "TERM",
+                std::env::var("TERM").unwrap_or_else(|_| "xterm-256color".into()),
+            )
+            .env("CLICOLOR_FORCE", "1")
+            .env("FORCE_COLOR", "1")
+            .output()
+            .map_err(|error| error.to_string())
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -223,25 +326,7 @@ impl App {
             self.worktree_pane.terminal_command_rx = Some(rx);
             self.worktree_pane.terminal_running = true;
             std::thread::spawn(move || {
-                #[cfg(windows)]
-                let output = {
-                    let shell = std::env::var("COMSPEC").unwrap_or_else(|_| "cmd.exe".to_string());
-                    std::process::Command::new(shell)
-                        .arg("/C")
-                        .arg(&command)
-                        .current_dir(&cwd)
-                        .output()
-                };
-                #[cfg(not(windows))]
-                let output = {
-                    let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string());
-                    std::process::Command::new(shell)
-                        .arg("-lc")
-                        .arg(&command)
-                        .current_dir(&cwd)
-                        .output()
-                };
-                let _ = tx.send(output.map_err(|error| error.to_string()));
+                let _ = tx.send(run_interactive_shell_command(&command, &cwd));
             });
         }
         self.trim_project_terminal_lines();

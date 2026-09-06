@@ -1632,6 +1632,130 @@ pub(super) fn draw_empty_worktree_changes(
     });
 }
 
+fn apply_terminal_sgr(style: &mut Style, parameters: &str) {
+    use ratatui::style::{Color, Modifier};
+
+    let values = if parameters.is_empty() {
+        vec![0]
+    } else {
+        parameters
+            .split(';')
+            .map(|value| value.parse::<u16>().unwrap_or(0))
+            .collect::<Vec<_>>()
+    };
+    let mut index = 0;
+    while index < values.len() {
+        let value = values[index];
+        match value {
+            0 => *style = Style::default(),
+            1 => *style = style.add_modifier(Modifier::BOLD),
+            2 => *style = style.add_modifier(Modifier::DIM),
+            3 => *style = style.add_modifier(Modifier::ITALIC),
+            4 => *style = style.add_modifier(Modifier::UNDERLINED),
+            7 => *style = style.add_modifier(Modifier::REVERSED),
+            22 => *style = style.remove_modifier(Modifier::BOLD | Modifier::DIM),
+            23 => *style = style.remove_modifier(Modifier::ITALIC),
+            24 => *style = style.remove_modifier(Modifier::UNDERLINED),
+            27 => *style = style.remove_modifier(Modifier::REVERSED),
+            30..=37 => *style = style.fg(Color::Indexed((value - 30) as u8)),
+            39 => *style = style.fg(Color::Reset),
+            40..=47 => *style = style.bg(Color::Indexed((value - 40) as u8)),
+            49 => *style = style.bg(Color::Reset),
+            90..=97 => *style = style.fg(Color::Indexed((value - 90 + 8) as u8)),
+            100..=107 => *style = style.bg(Color::Indexed((value - 100 + 8) as u8)),
+            38 | 48 if values.get(index + 1) == Some(&5) => {
+                if let Some(color) = values
+                    .get(index + 2)
+                    .and_then(|value| u8::try_from(*value).ok())
+                {
+                    if value == 38 {
+                        *style = style.fg(Color::Indexed(color));
+                    } else {
+                        *style = style.bg(Color::Indexed(color));
+                    }
+                    index += 2;
+                }
+            }
+            38 | 48 if values.get(index + 1) == Some(&2) => {
+                let rgb = values.get(index + 2..index + 5).and_then(|rgb| {
+                    Some((
+                        u8::try_from(*rgb.first()?).ok()?,
+                        u8::try_from(*rgb.get(1)?).ok()?,
+                        u8::try_from(*rgb.get(2)?).ok()?,
+                    ))
+                });
+                if let Some((red, green, blue)) = rgb {
+                    if value == 38 {
+                        *style = style.fg(Color::Rgb(red, green, blue));
+                    } else {
+                        *style = style.bg(Color::Rgb(red, green, blue));
+                    }
+                    index += 4;
+                }
+            }
+            _ => {}
+        }
+        index += 1;
+    }
+}
+
+pub(super) fn terminal_ansi_line(line: &str) -> Line<'static> {
+    let mut spans = Vec::new();
+    let mut style = Style::default();
+    let mut text = String::new();
+    let mut chars = line.chars().peekable();
+
+    while let Some(ch) = chars.next() {
+        if ch != '\u{1b}' || chars.peek() != Some(&'[') {
+            text.push(ch);
+            continue;
+        }
+        chars.next();
+        let mut parameters = String::new();
+        let mut is_sgr = false;
+        for next in chars.by_ref() {
+            if next == 'm' {
+                is_sgr = true;
+                break;
+            }
+            if ('@'..='~').contains(&next) {
+                break;
+            }
+            parameters.push(next);
+        }
+        if !text.is_empty() {
+            spans.push(Span::styled(std::mem::take(&mut text), style));
+        }
+        if is_sgr {
+            apply_terminal_sgr(&mut style, &parameters);
+        }
+    }
+    if !text.is_empty() || spans.is_empty() {
+        spans.push(Span::styled(text, style));
+    }
+    Line::from(spans)
+}
+
+#[cfg(test)]
+mod terminal_ansi_tests {
+    use super::*;
+    use ratatui::style::{Color, Modifier};
+
+    #[test]
+    fn terminal_ansi_line_maps_standard_indexed_and_rgb_colours() {
+        let line = terminal_ansi_line(
+            "plain \x1b[1;31mred\x1b[0m \x1b[38;5;42mindexed\x1b[38;2;1;2;3mrgb",
+        );
+        assert_eq!(line.spans.len(), 5);
+        assert_eq!(line.spans[0].content, "plain ");
+        assert_eq!(line.spans[1].content, "red");
+        assert_eq!(line.spans[1].style.fg, Some(Color::Indexed(1)));
+        assert!(line.spans[1].style.add_modifier.contains(Modifier::BOLD));
+        assert_eq!(line.spans[3].style.fg, Some(Color::Indexed(42)));
+        assert_eq!(line.spans[4].style.fg, Some(Color::Rgb(1, 2, 3)));
+    }
+}
+
 pub(super) fn draw_project_terminal(
     frame: &mut Frame,
     area: Rect,
@@ -1661,7 +1785,7 @@ pub(super) fn draw_project_terminal(
     let start = lines.len().saturating_sub(output_height);
     let mut rendered = lines[start..]
         .iter()
-        .map(|line| Line::from(Span::raw(line.clone())))
+        .map(|line| terminal_ansi_line(line))
         .collect::<Vec<_>>();
     if app.project_terminal_running() {
         rendered.push(Line::from(Span::styled(

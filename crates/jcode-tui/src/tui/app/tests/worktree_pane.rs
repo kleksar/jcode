@@ -171,17 +171,13 @@ fn test_terminal_command_launch_does_not_block_the_ui() {
 }
 
 #[test]
-fn test_terminal_output_strips_terminal_control_sequences() {
+fn test_terminal_output_preserves_sgr_but_strips_terminal_control_sequences() {
     let lines = super::worktree_pane::safe_terminal_output_lines(
-        b"safe\x1b]0;owned\x07\x1b[31m red\x1b[0m\x07\nnext\rline",
+        b"^D\x08\x08safe\x1b]0;owned\x07\x1b[31m red\x1b[0m\x1b[2J\x07\nnext\rline",
     );
-    assert_eq!(lines, vec!["safe red", "next", "line"]);
-    assert!(
-        lines
-            .iter()
-            .flat_map(|line| line.chars())
-            .all(|ch| !ch.is_control() || ch == '\t')
-    );
+    assert_eq!(lines, vec!["safe\x1b[31m red\x1b[0m", "nextline"]);
+    assert!(!lines.join("").contains("owned"));
+    assert!(!lines.join("").contains("\x1b[2J"));
 }
 
 #[test]
