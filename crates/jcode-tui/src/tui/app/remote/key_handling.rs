@@ -655,6 +655,12 @@ async fn handle_remote_key_internal(
         return Ok(());
     }
 
+    // A non-empty composer reserves Ctrl+J for a terminal-independent newline
+    // before transcript navigation has a chance to claim that chord.
+    if crate::tui::app::input::newline::enter_inserts_newline(app, code, modifiers) {
+        return Ok(());
+    }
+
     if handle_ctrl_kill_to_end(app, code, modifiers) {
         return Ok(());
     }
@@ -867,10 +873,6 @@ async fn handle_remote_key_internal(
         return Ok(());
     }
 
-    if crate::tui::app::input::newline::enter_inserts_newline(app, code, modifiers) {
-        return Ok(());
-    }
-
     if input::handle_multiline_input_navigation(app, code, modifiers)
         || input::handle_prompt_history_navigation(app, code, modifiers)
     {
@@ -935,7 +937,7 @@ async fn handle_remote_key_internal(
                 app.cursor_pos = core::prev_char_boundary(&app.input, app.cursor_pos);
             } else {
                 // Opt-in: Left on an empty input opens the active sessions
-                // manager (no-op unless display.active_sessions_manager).
+                // manager (unless display.active_sessions_manager is disabled).
                 app.maybe_open_active_sessions_on_left();
             }
         }
@@ -1860,7 +1862,7 @@ async fn handle_remote_key_internal(
                     return Ok(());
                 }
 
-                if trimmed == "/resume" || trimmed == "/sessions" || trimmed == "/session" {
+                if trimmed == "/resume" {
                     app.open_session_picker();
                     app.record_keybinding_slow(
                         crate::tui::app::shortcut_hints::LearnableAction::Resume,
@@ -1868,7 +1870,7 @@ async fn handle_remote_key_internal(
                     return Ok(());
                 }
 
-                if trimmed == "/active" {
+                if trimmed == "/active" || trimmed == "/sessions" || trimmed == "/session" {
                     app.open_active_sessions_picker();
                     return Ok(());
                 }

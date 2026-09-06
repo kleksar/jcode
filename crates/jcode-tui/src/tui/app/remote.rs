@@ -1931,6 +1931,10 @@ fn handle_disconnected_key_internal(
         return Ok(());
     }
 
+    if crate::tui::app::input::newline::enter_inserts_newline(app, code, modifiers) {
+        return Ok(());
+    }
+
     if handle_ctrl_kill_to_end(app, code, modifiers) {
         return Ok(());
     }
@@ -2016,10 +2020,6 @@ fn handle_disconnected_key_internal(
 
     if app.open_resume_key_matches(code, modifiers) {
         app.open_session_picker();
-        return Ok(());
-    }
-
-    if crate::tui::app::input::newline::enter_inserts_newline(app, code, modifiers) {
         return Ok(());
     }
 

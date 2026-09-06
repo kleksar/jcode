@@ -2803,7 +2803,7 @@ pub(super) fn handle_basic_key(app: &mut App, code: KeyCode) -> bool {
                 app.cursor_pos = crate::tui::core::prev_char_boundary(&app.input, app.cursor_pos);
             } else {
                 // Opt-in: Left on an empty input opens the active sessions
-                // manager (no-op unless display.active_sessions_manager).
+                // manager (unless display.active_sessions_manager is disabled).
                 app.maybe_open_active_sessions_on_left();
             }
             true
@@ -3078,6 +3078,13 @@ impl App {
             return Ok(());
         }
 
+        // Run composer newline handling before configurable Ctrl+J transcript
+        // navigation. With a draft present, Ctrl+J is the protocol-independent
+        // newline fallback for terminals that cannot report Shift+Enter.
+        if newline::enter_inserts_newline(self, code, modifiers) {
+            return Ok(());
+        }
+
         if handle_pre_control_shortcuts(self, code, modifiers) {
             return Ok(());
         }
@@ -3116,12 +3123,6 @@ impl App {
         // Terminals may encode Command as either Super or Meta.
         if is_alternate_enter(code, modifiers) {
             handle_alternate_enter(self);
-            return Ok(());
-        }
-
-        // Shift+Enter, Alt/Option+Enter, and the trailing-backslash fallback all
-        // insert a newline in the input box.
-        if newline::enter_inserts_newline(self, code, modifiers) {
             return Ok(());
         }
 

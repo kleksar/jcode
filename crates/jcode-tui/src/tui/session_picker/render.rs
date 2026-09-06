@@ -257,6 +257,94 @@ impl SessionPicker {
             },
         };
 
+        if self.filter_mode == jcode_tui_session_picker::SessionFilterMode::Active {
+            let primary_title = Self::primary_title_display(session);
+            let mut line1_spans = vec![
+                Span::styled(
+                    if is_selected { "❯ " } else { "  " },
+                    Style::default().fg(rgb(140, 220, 160)).bold(),
+                ),
+                Span::styled(format!("{status_icon} "), Style::default().fg(status_color)),
+                Span::styled(
+                    format!("{time_label:<12}"),
+                    Style::default().fg(status_color).bold(),
+                ),
+                Span::styled(
+                    format!("{} ", session.icon),
+                    Style::default().fg(rgb(110, 210, 255)),
+                ),
+            ];
+            line1_spans.extend(Self::highlight_spans(
+                &primary_title,
+                &highlight_tokens,
+                name_style,
+            ));
+            if is_current {
+                line1_spans.push(Span::styled(
+                    "  ◀ current",
+                    Style::default().fg(rgb(110, 210, 255)).bold(),
+                ));
+            } else if same_dir {
+                line1_spans.push(Span::styled(
+                    "  ▸ here",
+                    Style::default().fg(same_dir_clr).bold(),
+                ));
+            }
+
+            let mut line2_spans = vec![Span::raw("                 ")];
+            let mut has_fact = false;
+            if let Some(dir) = session.working_dir.as_deref() {
+                let worktree = std::path::Path::new(dir)
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .filter(|name| !name.is_empty())
+                    .unwrap_or(dir);
+                line2_spans.push(Span::styled(
+                    worktree.to_string(),
+                    Style::default().fg(if same_dir {
+                        same_dir_clr
+                    } else {
+                        rgb(105, 205, 215)
+                    }),
+                ));
+                has_fact = true;
+            }
+            if let Some(model) = session
+                .model
+                .as_deref()
+                .filter(|model| !model.trim().is_empty())
+            {
+                if has_fact {
+                    line2_spans.push(Span::styled("  ·  ", Style::default().fg(dimmer)));
+                }
+                line2_spans.push(Span::styled(
+                    crate::tui::session_facts::pretty_model(model),
+                    Style::default().fg(rgb(170, 140, 245)),
+                ));
+                has_fact = true;
+            }
+            if let Some(prompt) = session.first_user_prompt.as_deref().map(str::trim)
+                && !prompt.is_empty()
+            {
+                if has_fact {
+                    line2_spans.push(Span::styled("  ·  ", Style::default().fg(dimmer)));
+                }
+                let prompt = prompt.replace('\n', " ");
+                let prompt = if prompt.chars().count() > 48 {
+                    format!("{}...", safe_truncate(&prompt, 45))
+                } else {
+                    prompt
+                };
+                line2_spans.extend(Self::highlight_spans(
+                    &prompt,
+                    &highlight_tokens,
+                    Style::default().fg(rgb(150, 150, 165)),
+                ));
+            }
+
+            return vec![Line::from(line1_spans), Line::from(line2_spans)];
+        }
+
         let primary_title = Self::primary_title_display(session);
         let mut line1_spans = vec![
             Span::styled(selection_marker, selection_style),
@@ -644,6 +732,8 @@ impl SessionPicker {
             " Esc cancel ".to_string()
         } else if self.search_active {
             " type to filter · Ctrl+J/K or ↑↓ nav · Ctrl+W word-del · Esc cancel ".to_string()
+        } else if self.filter_mode == jcode_tui_session_picker::SessionFilterMode::Active {
+            " ↑↓ select · Enter switch · / search · Esc close ".to_string()
         } else {
             match crate::config::config().keybindings.session_picker_enter {
                 crate::config::SessionPickerResumeAction::CurrentTerminal => {

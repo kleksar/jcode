@@ -40,7 +40,11 @@ followed by `CSI c`).
 
 ## Fallbacks
 
-These work on every terminal because they do not depend on modifier reporting:
+The first two work on every terminal because they do not depend on modified
+Enter reporting:
+
+- **Ctrl+J while a draft is non-empty** inserts a newline. On an empty composer
+  it keeps its existing prompt-navigation behavior.
 
 - **Trailing backslash then Enter** inserts a newline, matching shell line
   continuation. The first time you use it, jcode points you at
@@ -61,5 +65,7 @@ achievable. A fallback is a safety net, not a substitute for the chord working.
   sequence the app actually understands.
 - `tui::app::tests::bare_carriage_return_decodes_without_shift` pins the
   underlying problem so the reason setup exists stays documented in code.
+- `tui::app::tests::bare_ctrl_j_decodes_to_control_j` feeds a literal LF through
+  a real PTY and pins the protocol-independent Ctrl+J fallback.
 - `tui::terminal_setup::tests::*` cover config generation, idempotency, and not
   clobbering user config.

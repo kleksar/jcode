@@ -69,6 +69,7 @@ fn decode_key_event_via_pty(bytes: &[u8]) -> Option<(crossterm::event::KeyCode, 
                 Ok(crossterm::event::Event::Key(key)) => {
                     let tag = match key.code {
                         crossterm::event::KeyCode::Enter => 1u8,
+                        crossterm::event::KeyCode::Char('j') => 2u8,
                         _ => 0u8,
                     };
                     format!("{tag},{}", key.modifiers.bits())
@@ -110,6 +111,7 @@ fn decode_key_event_via_pty(bytes: &[u8]) -> Option<(crossterm::event::KeyCode, 
     let (tag, bits) = payload.split_once(',')?;
     let code = match tag.trim() {
         "1" => crossterm::event::KeyCode::Enter,
+        "2" => crossterm::event::KeyCode::Char('j'),
         _ => return None,
     };
     Some((code, bits.trim().parse().ok()?))
@@ -153,6 +155,23 @@ fn bare_carriage_return_decodes_without_shift() {
     assert!(
         !KeyModifiers::from_bits_truncate(bits).contains(KeyModifiers::SHIFT),
         "a bare CR cannot carry Shift, which is exactly the problem"
+    );
+}
+
+#[test]
+#[cfg(unix)]
+fn bare_ctrl_j_decodes_to_control_j() {
+    use crossterm::event::{KeyCode, KeyModifiers};
+
+    let Some((code, bits)) = decode_key_event_via_pty(b"\n") else {
+        eprintln!("skipping: pty decode unavailable in this environment");
+        return;
+    };
+
+    assert_eq!(code, KeyCode::Char('j'));
+    assert!(
+        KeyModifiers::from_bits_truncate(bits).contains(KeyModifiers::CONTROL),
+        "bare LF must retain the Ctrl+J identity for the universal newline fallback"
     );
 }
 

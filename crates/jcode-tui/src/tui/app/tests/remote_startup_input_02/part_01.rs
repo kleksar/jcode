@@ -1363,6 +1363,21 @@ fn test_alt_enter_inserts_newline() {
     assert_eq!(app.queued_count(), 0);
     assert_eq!(app.interleave_message.as_deref(), None);
 }
+
+#[test]
+fn test_ctrl_j_inserts_newline_in_non_empty_draft() {
+    let mut app = create_test_app();
+
+    app.handle_key(KeyCode::Char('h'), KeyModifiers::empty())
+        .unwrap();
+    app.handle_key(KeyCode::Char('j'), KeyModifiers::CONTROL)
+        .unwrap();
+    app.handle_key(KeyCode::Char('i'), KeyModifiers::empty())
+        .unwrap();
+
+    assert_eq!(app.input(), "h\ni");
+}
+
 #[test]
 fn test_ctrl_enter_opposite_send_mode() {
     let mut app = create_test_app();
