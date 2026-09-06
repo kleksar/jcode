@@ -172,6 +172,41 @@ fn test_handle_server_event_session_renamed_updates_remote_title() {
 }
 
 #[test]
+fn test_handle_server_event_working_dir_changed_updates_only_active_remote_session() {
+    let mut app = create_test_app();
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let _guard = rt.enter();
+    let mut remote = crate::tui::backend::RemoteConnection::dummy();
+    app.is_remote = true;
+    app.remote_session_id = Some("session_remote_worktree".to_string());
+    let original = app.session.working_dir.clone();
+
+    let ignored = app.handle_server_event(
+        crate::protocol::ServerEvent::WorkingDirChanged {
+            session_id: "session_other".to_string(),
+            working_dir: "/repo/worktrees/other".to_string(),
+        },
+        &mut remote,
+    );
+    assert!(!ignored);
+    assert_eq!(app.session.working_dir, original);
+
+    let redraw = app.handle_server_event(
+        crate::protocol::ServerEvent::WorkingDirChanged {
+            session_id: "session_remote_worktree".to_string(),
+            working_dir: "/repo/worktrees/feature".to_string(),
+        },
+        &mut remote,
+    );
+
+    assert!(redraw);
+    assert_eq!(
+        app.session.working_dir.as_deref(),
+        Some("/repo/worktrees/feature")
+    );
+}
+
+#[test]
 fn test_handle_server_event_history_clears_connection_type_on_session_change_when_missing() {
     let mut app = create_test_app();
     let rt = tokio::runtime::Runtime::new().unwrap();

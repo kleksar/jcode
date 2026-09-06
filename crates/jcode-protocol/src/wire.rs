@@ -1202,6 +1202,14 @@ pub enum ServerEvent {
         working_dir: String,
     },
 
+    /// The agent modified a file in another Git worktree and adopted that
+    /// worktree as the active working directory for this session.
+    #[serde(rename = "working_dir_changed")]
+    WorkingDirChanged {
+        session_id: String,
+        working_dir: String,
+    },
+
     /// Full conversation history (response to GetHistory)
     #[serde(rename = "history")]
     History {

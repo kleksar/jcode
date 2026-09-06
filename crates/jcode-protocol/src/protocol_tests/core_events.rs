@@ -286,6 +286,27 @@ fn test_session_renamed_event_roundtrip() -> Result<()> {
 }
 
 #[test]
+fn test_working_dir_changed_event_roundtrip() -> Result<()> {
+    let event = ServerEvent::WorkingDirChanged {
+        session_id: "session-1".to_string(),
+        working_dir: "/repo/worktrees/feature".to_string(),
+    };
+    let json = serde_json::to_string(&event)?;
+    assert!(json.contains("\"type\":\"working_dir_changed\""));
+    let decoded: ServerEvent = serde_json::from_str(&json)?;
+    let ServerEvent::WorkingDirChanged {
+        session_id,
+        working_dir,
+    } = decoded
+    else {
+        panic!("wrong event variant");
+    };
+    assert_eq!(session_id, "session-1");
+    assert_eq!(working_dir, "/repo/worktrees/feature");
+    Ok(())
+}
+
+#[test]
 fn test_interrupted_event_decodes_from_json() -> Result<()> {
     let json = r#"{"type":"interrupted"}"#;
     let decoded = parse_event_json(json)?;

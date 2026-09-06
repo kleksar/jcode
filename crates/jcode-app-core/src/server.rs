@@ -1991,6 +1991,18 @@ impl Server {
                     let path = touch.path.clone();
                     let session_id = touch.session_id.clone();
 
+                    if touch.op.is_modification()
+                        && let Some(worktree_root) = git_worktree_root_for_path(&path).await
+                    {
+                        Self::adopt_session_worktree(
+                            &sessions,
+                            &swarm_members,
+                            &session_id,
+                            worktree_root,
+                        )
+                        .await;
+                    }
+
                     // Record this touch
                     file_touch
                         .record_touch(
@@ -2429,6 +2441,90 @@ impl Server {
             let _ = listener_runtime.spawn_gateway_accept_loop(client_rx).await;
         }
     }
+
+    async fn adopt_session_worktree(
+        sessions: &Arc<RwLock<HashMap<String, Arc<Mutex<Agent>>>>>,
+        swarm_members: &Arc<RwLock<HashMap<String, SwarmMember>>>,
+        session_id: &str,
+        worktree_root: String,
+    ) {
+        let changed = {
+            let mut members = swarm_members.write().await;
+            match members.get_mut(session_id) {
+                Some(member)
+                    if member.working_dir.as_deref()
+                        != Some(std::path::Path::new(&worktree_root)) =>
+                {
+                    member.working_dir = Some(worktree_root.clone().into());
+                    true
+                }
+                Some(_) => false,
+                None => true,
+            }
+        };
+
+        if !changed {
+            return;
+        }
+
+        let agent = sessions.read().await.get(session_id).cloned();
+        if let Some(agent) = agent {
+            if let Ok(mut agent) = agent.try_lock() {
+                agent.set_working_dir(&worktree_root);
+                if let Err(error) = agent.persist_session() {
+                    crate::logging::warn(&format!(
+                        "Failed to persist adopted worktree for session {session_id}: {error}"
+                    ));
+                }
+            } else {
+                let session_id = session_id.to_string();
+                let worktree_for_agent = worktree_root.clone();
+                tokio::spawn(async move {
+                    let mut agent = agent.lock().await;
+                    agent.set_working_dir(&worktree_for_agent);
+                    if let Err(error) = agent.persist_session() {
+                        crate::logging::warn(&format!(
+                            "Failed to persist adopted worktree for session {session_id}: {error}"
+                        ));
+                    }
+                });
+            }
+        }
+
+        let _ = fanout_session_event(
+            swarm_members,
+            session_id,
+            ServerEvent::WorkingDirChanged {
+                session_id: session_id.to_string(),
+                working_dir: worktree_root,
+            },
+        )
+        .await;
+    }
+}
+
+async fn git_worktree_root_for_path(path: &std::path::Path) -> Option<String> {
+    let path = path.to_path_buf();
+    tokio::task::spawn_blocking(move || {
+        let start_dir = if path.is_dir() {
+            path
+        } else {
+            path.parent()?.to_path_buf()
+        };
+        let output = std::process::Command::new("git")
+            .args(["rev-parse", "--show-toplevel"])
+            .current_dir(start_dir)
+            .output()
+            .ok()?;
+        if !output.status.success() {
+            return None;
+        }
+        let root = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        (!root.is_empty()).then_some(root)
+    })
+    .await
+    .ok()
+    .flatten()
 }
 
 pub use self::client_api::Client;

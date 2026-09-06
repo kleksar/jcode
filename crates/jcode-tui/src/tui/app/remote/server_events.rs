@@ -1669,6 +1669,27 @@ pub(in crate::tui::app) fn handle_server_event(
                 false
             }
         }
+        ServerEvent::WorkingDirChanged {
+            session_id,
+            working_dir,
+        } => {
+            let active_session_id = app
+                .remote_session_id
+                .as_deref()
+                .or(app.resume_session_id.as_deref())
+                .unwrap_or(app.session.id.as_str());
+            if active_session_id != session_id
+                || app.session.working_dir.as_deref() == Some(working_dir.as_str())
+            {
+                return false;
+            }
+
+            app.session.working_dir = Some(working_dir);
+            app.refresh_skills_snapshot();
+            app.update_terminal_title();
+            crate::tui::app::helpers::invalidate_git_info_cache();
+            true
+        }
         ServerEvent::Reloading { .. } => {
             app.append_reload_message("🔄 Server reload initiated...");
             // In-process server reloads (self-dev build-reload) keep the same
