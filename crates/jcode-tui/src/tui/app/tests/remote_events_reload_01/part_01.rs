@@ -2052,22 +2052,47 @@ fn modified_file_touch_adopts_its_worktree_for_the_current_session() {
         ],
     );
     let touched_path = worktree.join("tracked.txt");
-    std::fs::write(&touched_path, "after\n").expect("modify worktree file");
 
     let mut app = create_test_app();
     app.session.working_dir = Some(main_repo.display().to_string());
     let session_id = app.session.id.clone();
-    let handled = super::local::handle_bus_event(
-        &mut app,
-        Ok(crate::bus::BusEvent::FileTouch(crate::bus::FileTouch {
-            session_id,
-            path: touched_path,
-            op: crate::bus::FileOp::Edit,
-            intent: Some("Modify the session worktree".to_string()),
-            summary: None,
-            detail: None,
-        })),
-    );
+    let mut bus = crate::bus::Bus::global().subscribe();
+    let rt = tokio::runtime::Runtime::new().expect("runtime");
+    rt.block_on(
+        app.registry
+            .execute(
+                "write",
+                serde_json::json!({
+                    "file_path": touched_path,
+                    "content": "after\n",
+                    "intent": "Modify the session worktree"
+                }),
+                crate::tool::ToolContext {
+                    session_id: session_id.clone(),
+                    message_id: "message-worktree-adoption".to_string(),
+                    tool_call_id: "tool-worktree-adoption".to_string(),
+                    working_dir: Some(main_repo.clone()),
+                    stdin_request_tx: None,
+                    graceful_shutdown_signal: None,
+                    execution_mode: crate::tool::ToolExecutionMode::AgentTurn,
+                },
+            ),
+    )
+    .expect("execute write tool");
+
+    let touch_event = rt.block_on(async {
+        loop {
+            let event = tokio::time::timeout(std::time::Duration::from_secs(2), bus.recv())
+                .await
+                .expect("file touch timeout")
+                .expect("receive file touch");
+            if matches!(&event, crate::bus::BusEvent::FileTouch(touch) if touch.session_id == session_id)
+            {
+                break event;
+            }
+        }
+    });
+    let handled = super::local::handle_bus_event(&mut app, Ok(touch_event));
 
     assert!(handled);
     assert_eq!(
