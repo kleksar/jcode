@@ -1633,6 +1633,38 @@ impl crate::tui::TuiState for App {
         }
     }
 
+    fn floating_info_widget_data(&self) -> crate::tui::info_widget::InfoWidgetData {
+        let mut data = self.info_widget_data();
+        // Hide only the floating diagnostics. Keep the shared data intact for
+        // footer model/effort, notifications, and on-demand context views.
+        data.model = None;
+        data.reasoning_effort = None;
+        data.service_tier = None;
+        data.native_compaction_mode = None;
+        data.native_compaction_threshold_tokens = None;
+        data.context_info = None;
+        data.context_info_stale = false;
+        data.context_limit = None;
+        data.observed_context_tokens = None;
+        data.cache_hit_info = None;
+        data.usage_info = None;
+        data.provider_name = None;
+        data.auth_method = crate::tui::info_widget::AuthMethod::Unknown;
+        data.upstream_provider = None;
+        data.connection_type = None;
+        data.tokens_per_second = None;
+        data.git_info = None;
+        data
+    }
+
+    fn footer_quota(&self) -> Option<crate::tui::FooterQuota> {
+        let model = self.effective_remote_provider_model();
+        let route = self.widget_route_info(model.as_deref());
+        let auth_method = self.widget_auth_method(route);
+        let usage = self.widget_usage_info(route, auth_method)?;
+        crate::tui::FooterQuota::from_usage(&usage)
+    }
+
     fn workspace_mode_enabled(&self) -> bool {
         self.workspace_client.is_enabled()
     }
