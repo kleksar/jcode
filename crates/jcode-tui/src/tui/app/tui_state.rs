@@ -1882,6 +1882,9 @@ impl crate::tui::TuiState for App {
             .as_deref()
             .or(self.session.working_dir.as_deref())
     }
+    fn project_terminal_prompt(&self) -> String {
+        super::worktree_pane::terminal_prompt_path(self.project_terminal_cwd().unwrap_or("."))
+    }
     fn project_terminal_running(&self) -> bool {
         self.worktree_pane.terminal_running
     }

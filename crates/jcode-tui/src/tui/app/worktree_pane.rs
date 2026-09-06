@@ -2,8 +2,22 @@ use super::*;
 
 const FILTER_IDLE_TIMEOUT: Duration = Duration::from_secs(60);
 const MAX_TERMINAL_LINES: usize = 2_000;
+const MIN_TERMINAL_RUNNING_TIME: Duration = Duration::from_millis(500);
 
 type TerminalCommandResult = Result<std::process::Output, String>;
+
+pub(super) fn terminal_prompt_path(cwd: &str) -> String {
+    let path = std::path::Path::new(cwd);
+    if let Some(home) = dirs::home_dir() {
+        if path == home {
+            return "~".to_string();
+        }
+        if let Ok(relative) = path.strip_prefix(&home) {
+            return format!("~/{}", relative.display());
+        }
+    }
+    cwd.to_string()
+}
 
 pub(super) fn safe_terminal_output_lines(bytes: &[u8]) -> Vec<String> {
     let text = String::from_utf8_lossy(bytes);
@@ -169,6 +183,7 @@ pub(super) struct WorktreePaneState {
     pub(super) terminal_lines: Vec<String>,
     pub(super) terminal_cwd: Option<String>,
     pub(super) terminal_running: bool,
+    terminal_command_started_at: Option<Instant>,
     terminal_command_rx: Option<std::sync::mpsc::Receiver<TerminalCommandResult>>,
     session_id: String,
     working_dir: Option<String>,
@@ -191,6 +206,7 @@ impl Default for WorktreePaneState {
             terminal_lines: vec!["Jcode terminal. Type a command and press Enter.".to_string()],
             terminal_cwd: None,
             terminal_running: false,
+            terminal_command_started_at: None,
             terminal_command_rx: None,
             session_id: String::new(),
             working_dir: None,
@@ -306,9 +322,11 @@ impl App {
             .clone()
             .or_else(|| self.session.working_dir.clone())
             .unwrap_or_else(|| ".".to_string());
-        self.worktree_pane
-            .terminal_lines
-            .push(format!("{} $ {}", cwd, command));
+        self.worktree_pane.terminal_lines.push(format!(
+            "{} {}",
+            terminal_prompt_path(&cwd),
+            command
+        ));
 
         let cd_target = (command == "cd")
             .then_some("~")
@@ -333,6 +351,7 @@ impl App {
             let (tx, rx) = std::sync::mpsc::channel();
             self.worktree_pane.terminal_command_rx = Some(rx);
             self.worktree_pane.terminal_running = true;
+            self.worktree_pane.terminal_command_started_at = Some(Instant::now());
             std::thread::spawn(move || {
                 let _ = tx.send(run_interactive_shell_command(&command, &cwd));
             });
@@ -348,6 +367,13 @@ impl App {
     }
 
     fn poll_project_terminal_command(&mut self) -> bool {
+        if self
+            .worktree_pane
+            .terminal_command_started_at
+            .is_some_and(|started| started.elapsed() < MIN_TERMINAL_RUNNING_TIME)
+        {
+            return false;
+        }
         let result = match self
             .worktree_pane
             .terminal_command_rx
@@ -362,6 +388,7 @@ impl App {
         };
         self.worktree_pane.terminal_command_rx = None;
         self.worktree_pane.terminal_running = false;
+        self.worktree_pane.terminal_command_started_at = None;
         match result {
             Ok(output) => {
                 self.worktree_pane

@@ -1794,7 +1794,10 @@ pub(super) fn draw_project_terminal(
         )));
     } else {
         rendered.push(Line::from(vec![
-            Span::styled("$ ", Style::default().fg(tool_color())),
+            Span::styled(
+                format!("{} ", app.project_terminal_prompt()),
+                Style::default().fg(tool_color()),
+            ),
             Span::raw(app.project_terminal_input().to_string()),
             Span::styled(
                 if focused { "█" } else { "" },

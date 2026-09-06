@@ -172,6 +172,55 @@ fn test_terminal_command_launch_does_not_block_the_ui() {
 
 #[cfg(not(windows))]
 #[test]
+fn test_terminal_running_indicator_stays_visible_for_at_least_500ms() {
+    let repo = init_worktree_pane_test_repo();
+    let mut app = create_test_app();
+    app.session.working_dir = Some(repo.path().to_string_lossy().into_owned());
+    app.set_worktree_pane_tab(super::worktree_pane::WorktreePaneTab::Terminal);
+    app.set_diff_pane_focus(true);
+    for ch in "true".chars() {
+        app.handle_diff_pane_focus_key(KeyCode::Char(ch), KeyModifiers::NONE);
+    }
+
+    let started = Instant::now();
+    app.handle_diff_pane_focus_key(KeyCode::Enter, KeyModifiers::NONE);
+    while started.elapsed() < Duration::from_millis(450) {
+        app.update_worktree_file_filter(Instant::now());
+        assert!(
+            app.worktree_pane.terminal_running,
+            "fast command indicator disappeared after {:?}",
+            started.elapsed()
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    for _ in 0..100 {
+        app.update_worktree_file_filter(Instant::now());
+        if !app.worktree_pane.terminal_running {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert!(!app.worktree_pane.terminal_running);
+    assert!(started.elapsed() >= Duration::from_millis(500));
+}
+
+#[test]
+fn test_terminal_prompt_is_relative_to_home() {
+    let home = dirs::home_dir().expect("test home directory");
+    assert_eq!(
+        super::worktree_pane::terminal_prompt_path(home.to_string_lossy().as_ref()),
+        "~"
+    );
+    assert_eq!(
+        super::worktree_pane::terminal_prompt_path(
+            home.join("project/subdir").to_string_lossy().as_ref()
+        ),
+        "~/project/subdir"
+    );
+}
+
+#[cfg(not(windows))]
+#[test]
 fn test_terminal_cd_persists_for_the_next_shell_command() {
     let repo = init_worktree_pane_test_repo();
     let subdir = repo.path().join("subdir");

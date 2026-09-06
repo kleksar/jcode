@@ -691,6 +691,9 @@ pub trait TuiState {
     fn project_terminal_cwd(&self) -> Option<&str> {
         None
     }
+    fn project_terminal_prompt(&self) -> String {
+        self.project_terminal_cwd().unwrap_or(".").to_string()
+    }
     fn project_terminal_running(&self) -> bool {
         false
     }
