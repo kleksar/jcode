@@ -180,10 +180,7 @@ fn footer_quota_renders_beside_model_without_context_bar() {
             .collect::<String>();
         assert!(!text.trim().is_empty(), "narrow footer must not disappear");
         if width >= 40 {
-            assert!(
-                text.contains("/high") && text.contains("7-day 77%"),
-                "{text}"
-            );
+            assert!(text.contains("/high  7-day 77%"), "{text}");
         }
         if width == 100 {
             assert!(text.contains("6d 20h"), "{text}");
