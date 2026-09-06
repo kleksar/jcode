@@ -76,7 +76,7 @@ impl App {
         self.worktree_pane.last_activity = None;
         // Do not move an explicit markdown/image pane that replaced the diff.
         if crate::tui::ui::worktree_pane_layout().is_some()
-            || (self.side_panel.focused_page().is_none() && !self.diff_mode.has_side_pane())
+            || !crate::tui::ui::has_explicit_side_pane_content(self)
         {
             self.reset_worktree_diff_scroll();
         }

@@ -39,6 +39,18 @@ pub(super) fn clear_worktree_pane_layout() {
     WORKTREE_PANE_LAYOUT.with(|layout| *layout.borrow_mut() = None);
 }
 
+/// A configured File/Pinned mode can still be showing the worktree fallback.
+/// Use the same content predicates as draw_inner before preserving its scroll.
+pub(crate) fn has_explicit_side_pane_content(app: &dyn TuiState) -> bool {
+    app.side_panel().focused_page().is_some()
+        || (app.diff_mode().is_file() && app.has_display_edit_tool_messages())
+        || (app.diff_mode().is_pinned()
+            && super::collect_pinned_diffs_cached(
+                app.display_messages(),
+                app.display_messages_version(),
+            ))
+}
+
 /// Read only the cached snapshot. Input and ticks must never run git synchronously.
 pub(crate) fn worktree_file_is_present(working_dir: Option<&str>, path: &str) -> Option<bool> {
     let cache = worktree_cache().lock().ok()?;

@@ -169,12 +169,13 @@ pub(crate) use viewport::{
     reserve_copy_badge_margins, truncate_line_for_copy_badge,
     truncate_line_in_place_to_width as truncate_copy_badge_line_to_width,
 };
+pub(crate) use worktree_ui::has_explicit_side_pane_content;
 pub(crate) use worktree_ui::invalidate_worktree_changes_cache;
 pub(crate) use worktree_ui::poll_worktree_changes;
-pub(crate) use worktree_ui::{worktree_file_is_present, worktree_pane_layout};
 #[cfg(test)]
 pub(crate) use worktree_ui::prime_worktree_changes_for_tests;
 use worktree_ui::{draw_worktree_changes, snapshot_for_worktree};
+pub(crate) use worktree_ui::{worktree_file_is_present, worktree_pane_layout};
 /// Last known max scroll value from the renderer. Updated each frame.
 /// Scroll handlers use this to clamp scroll_offset and prevent overshoot.
 #[cfg(not(test))]

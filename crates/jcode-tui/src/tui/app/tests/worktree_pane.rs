@@ -375,6 +375,31 @@ fn test_worktree_filter_hidden_idle_expiry_restores_all_files_at_top() {
 }
 
 #[test]
+fn test_worktree_fallback_modes_reset_hidden_filter_scroll() {
+    let _lock = scroll_render_test_lock();
+    for mode in [
+        crate::config::DiffDisplayMode::File,
+        crate::config::DiffDisplayMode::Pinned,
+    ] {
+        let (_repo, mut app, mut wide) = worktree_filter_fixture();
+        app.diff_mode = mode;
+        render_and_snap(&app, &mut wide);
+        assert!(crate::tui::ui::worktree_pane_layout().is_some());
+        app.diff_pane_scroll = 90;
+        let mut narrow =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(90, 24)).unwrap();
+        render_and_snap(&app, &mut narrow);
+        assert!(crate::tui::ui::worktree_pane_layout().is_none());
+        let last = app.worktree_pane.last_activity.unwrap();
+        assert!(app.update_worktree_file_filter(last + Duration::from_secs(60)));
+        assert_eq!(
+            app.diff_pane_scroll, 0,
+            "hidden worktree fallback in {mode:?}"
+        );
+    }
+}
+
+#[test]
 fn test_worktree_file_click_filters_and_second_click_shows_all() {
     let _lock = scroll_render_test_lock();
     let repo = init_worktree_pane_test_repo();
