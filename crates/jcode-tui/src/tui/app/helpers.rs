@@ -18,7 +18,7 @@ static AMBIENT_INFO_CACHE: Mutex<Option<AmbientInfoCacheEntry>> = Mutex::new(Non
 /// Stale-while-revalidate cache for the git status widget. Module-level so the
 /// app can force a refresh the moment it mutates the repo (commit, shell, file
 /// edits) instead of waiting out the TTL with a stale branch/dirty count.
-type GitInfoCacheEntry = (std::time::Instant, Option<GitInfo>, bool);
+type GitInfoCacheEntry = (PathBuf, std::time::Instant, Option<GitInfo>, bool);
 static GIT_INFO_CACHE: Mutex<Option<GitInfoCacheEntry>> = Mutex::new(None);
 
 /// Stale-while-revalidate cache for per-session todos plus their goal-level
@@ -65,7 +65,7 @@ pub(crate) fn backdated_now(amount: Duration) -> std::time::Instant {
 /// applies: the next read returns the last value and kicks a background refresh.
 pub(crate) fn invalidate_git_info_cache() {
     if let Ok(mut guard) = GIT_INFO_CACHE.lock()
-        && let Some((ts, _cached, refreshing)) = guard.as_mut()
+        && let Some((_working_dir, ts, _cached, refreshing)) = guard.as_mut()
     {
         // Backdate the timestamp past the TTL so the next `gather_git_info`
         // treats the entry as expired and spawns a refresh, while still
@@ -84,7 +84,7 @@ pub(crate) fn invalidate_git_info_cache() {
 #[cfg(test)]
 pub(crate) fn seed_git_info_cache_for_tests(info: Option<GitInfo>) {
     if let Ok(mut guard) = GIT_INFO_CACHE.lock() {
-        *guard = Some((std::time::Instant::now(), info, true));
+        *guard = Some((PathBuf::new(), std::time::Instant::now(), info, true));
     }
 }
 
@@ -1073,27 +1073,32 @@ pub(super) fn encode_rgba_as_png(width: usize, height: usize, rgba: &[u8]) -> Op
 }
 
 #[cfg(test)]
-pub(super) fn gather_git_info() -> Option<GitInfo> {
+pub(super) fn gather_git_info(_working_dir: Option<&Path>) -> Option<GitInfo> {
     if crate::tui::is_ssh_remote() {
         return None;
     }
     GIT_INFO_CACHE
         .lock()
         .ok()
-        .and_then(|guard| guard.as_ref().and_then(|(_, cached, _)| cached.clone()))
+        .and_then(|guard| guard.as_ref().and_then(|(_, _, cached, _)| cached.clone()))
 }
 
 #[cfg(not(test))]
-pub(super) fn gather_git_info() -> Option<GitInfo> {
+pub(super) fn gather_git_info(working_dir: Option<&Path>) -> Option<GitInfo> {
     if crate::tui::is_ssh_remote() {
         return None;
     }
     use std::time::Instant;
 
     const TTL: Duration = Duration::from_secs(5);
+    let working_dir = working_dir
+        .map(Path::to_path_buf)
+        .or_else(|| std::env::current_dir().ok())?;
 
     if let Ok(mut guard) = GIT_INFO_CACHE.lock() {
-        if let Some((ts, cached, refreshing)) = guard.as_mut() {
+        if let Some((cached_dir, ts, cached, refreshing)) = guard.as_mut()
+            && *cached_dir == working_dir
+        {
             if ts.elapsed() < TTL {
                 return cached.clone();
             }
@@ -1102,20 +1107,34 @@ pub(super) fn gather_git_info() -> Option<GitInfo> {
             }
             let stale = cached.clone();
             *refreshing = true;
-            std::thread::spawn(|| {
-                let result = gather_git_info_inner();
-                if let Ok(mut guard) = GIT_INFO_CACHE.lock() {
-                    *guard = Some((Instant::now(), result, false));
+            let refresh_dir = working_dir.clone();
+            std::thread::spawn(move || {
+                let result = gather_git_info_inner(&refresh_dir);
+                if let Ok(mut guard) = GIT_INFO_CACHE.lock()
+                    && guard
+                        .as_ref()
+                        .is_some_and(|(cached_dir, _, _, _)| cached_dir == &refresh_dir)
+                {
+                    *guard = Some((refresh_dir, Instant::now(), result, false));
                 }
             });
             return stale;
         }
 
-        *guard = Some((backdated_now(TTL + Duration::from_secs(1)), None, true));
-        std::thread::spawn(|| {
-            let result = gather_git_info_inner();
-            if let Ok(mut guard) = GIT_INFO_CACHE.lock() {
-                *guard = Some((Instant::now(), result, false));
+        *guard = Some((
+            working_dir.clone(),
+            backdated_now(TTL + Duration::from_secs(1)),
+            None,
+            true,
+        ));
+        std::thread::spawn(move || {
+            let result = gather_git_info_inner(&working_dir);
+            if let Ok(mut guard) = GIT_INFO_CACHE.lock()
+                && guard
+                    .as_ref()
+                    .is_some_and(|(cached_dir, _, _, _)| cached_dir == &working_dir)
+            {
+                *guard = Some((working_dir, Instant::now(), result, false));
             }
         });
     }
@@ -1336,12 +1355,12 @@ pub(crate) fn format_countdown_until(target: chrono::DateTime<chrono::Utc>) -> S
     }
 }
 
-#[cfg(not(test))]
-fn gather_git_info_inner() -> Option<GitInfo> {
+fn gather_git_info_inner(working_dir: &Path) -> Option<GitInfo> {
     use std::process::Command;
 
     let in_repo = Command::new("git")
         .args(["rev-parse", "--is-inside-work-tree"])
+        .current_dir(working_dir)
         .output()
         .ok()
         .map(|o| o.status.success())
@@ -1353,6 +1372,7 @@ fn gather_git_info_inner() -> Option<GitInfo> {
 
     let branch = Command::new("git")
         .args(["branch", "--show-current"])
+        .current_dir(working_dir)
         .output()
         .ok()
         .and_then(|o| {
@@ -1370,7 +1390,10 @@ fn gather_git_info_inner() -> Option<GitInfo> {
     let mut untracked = 0;
     let mut dirty_files = Vec::new();
 
-    if let Ok(output) = Command::new("git").args(["status", "--porcelain"]).output()
+    if let Ok(output) = Command::new("git")
+        .args(["status", "--porcelain"])
+        .current_dir(working_dir)
+        .output()
         && output.status.success()
     {
         let status = String::from_utf8_lossy(&output.stdout);
