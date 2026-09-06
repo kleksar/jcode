@@ -137,6 +137,22 @@ impl Config {
         {
             self.tools.mcp_tools_token_threshold = parsed;
         }
+        if let Ok(v) = std::env::var("JCODE_BASH_OUTPUT_BACKEND") {
+            let backend = v.trim().to_ascii_lowercase();
+            if matches!(backend.as_str(), "raw" | "rtk") {
+                self.tools.bash.output_backend = backend;
+            }
+        }
+        if let Ok(v) = std::env::var("JCODE_RTK_BINARY")
+            && !v.trim().is_empty()
+        {
+            self.tools.bash.rtk_binary = v.trim().to_string();
+        }
+        if let Ok(v) = std::env::var("JCODE_RTK_REWRITE_TIMEOUT_MS")
+            && let Ok(parsed) = v.trim().parse::<u64>()
+        {
+            self.tools.bash.rtk_rewrite_timeout_ms = parsed.max(1);
+        }
 
         // ACP adapter
         if let Ok(v) = std::env::var("JCODE_ACP_PROFILE") {

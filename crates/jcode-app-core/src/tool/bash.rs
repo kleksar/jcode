@@ -41,6 +41,118 @@ fn shell_single_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\"'\"'"))
 }
 
+#[cfg(unix)]
+fn command_mentions_cargo(command: &str) -> bool {
+    command
+        .split(|ch: char| !(ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-')))
+        .any(|word| word == "cargo")
+}
+
+#[cfg(unix)]
+fn has_repo_cargo_wrapper(working_dir: Option<&Path>) -> bool {
+    working_dir
+        .and_then(crate::build::find_repo_in_ancestors)
+        .map(|repo| repo.join("scripts").join("dev_cargo.sh").is_file())
+        .unwrap_or(false)
+}
+
+fn expose_configured_rtk_binary(rewritten: String, binary: &str) -> String {
+    let path = Path::new(binary);
+    let Some(parent) = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+    else {
+        return rewritten;
+    };
+
+    #[cfg(unix)]
+    {
+        format!(
+            "PATH={}:\"$PATH\" {rewritten}",
+            shell_single_quote(&parent.to_string_lossy())
+        )
+    }
+    #[cfg(windows)]
+    {
+        format!("set \"PATH={};%PATH%\" && {rewritten}", parent.display())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RtkRewrite {
+    /// RTK's untrusted stdout, checked by Jcode's safety gate before execution.
+    candidate: String,
+    /// Shell command with the configured RTK binary's directory exposed in PATH.
+    command: String,
+}
+
+async fn rewrite_command_with_rtk(
+    command: &str,
+    working_dir: Option<&Path>,
+    config: &crate::config::BashToolConfig,
+) -> Option<RtkRewrite> {
+    // jcode's own cargo wrapper enforces build policy and records timings. An
+    // RTK-owned cargo child would bypass the exported shell function, so keep
+    // commands mentioning cargo raw inside repositories that provide it.
+    #[cfg(unix)]
+    if command_mentions_cargo(command) && has_repo_cargo_wrapper(working_dir) {
+        return None;
+    }
+
+    let mut rewrite = TokioCommand::new(&config.rtk_binary);
+    rewrite
+        .arg("rewrite")
+        .arg(command)
+        .kill_on_drop(true)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
+    if let Some(dir) = working_dir {
+        rewrite.current_dir(dir);
+    }
+
+    let output = tokio::time::timeout(
+        Duration::from_millis(config.rtk_rewrite_timeout_ms.max(1)),
+        rewrite.output(),
+    )
+    .await
+    .ok()?
+    .ok()?;
+    // RTK exit 3 means "rewrite, but let Claude Code ask for permission".
+    // That permission model is not available inside Jcode. Treat stdout from
+    // 0 or 3 only as an untrusted rewrite candidate; execute() applies Jcode's
+    // destructive-command gate to both the original and rewritten commands.
+    if !matches!(output.status.code(), Some(0 | 3)) {
+        return None;
+    }
+
+    let rewritten = String::from_utf8(output.stdout).ok()?.trim().to_string();
+    if rewritten.is_empty() || rewritten.trim() == command.trim() {
+        return None;
+    }
+    let command = expose_configured_rtk_binary(rewritten.clone(), &config.rtk_binary);
+    Some(RtkRewrite {
+        candidate: rewritten,
+        command,
+    })
+}
+
+fn annotate_rtk_output(
+    mut output: ToolOutput,
+    original_command: &str,
+    rewritten_command: &str,
+) -> ToolOutput {
+    let mut metadata = match output.metadata.take() {
+        Some(Value::Object(metadata)) => metadata,
+        _ => serde_json::Map::new(),
+    };
+    metadata.insert("bash_output_backend".to_string(), json!("rtk"));
+    metadata.insert("original_command".to_string(), json!(original_command));
+    metadata.insert("rewritten_command".to_string(), json!(rewritten_command));
+    output.metadata = Some(Value::Object(metadata));
+    output
+}
+
 /// Route ordinary `cargo` invocations (including those inside child scripts)
 /// through the repository wrapper. Besides applying the project's build policy,
 /// that wrapper appends real action timings to rust-actions.jsonl.
@@ -829,6 +941,9 @@ struct BashInput {
     /// Set only when re-issuing a call the gate refused (#604).
     #[serde(default)]
     justification: Option<String>,
+    /// Bypass the configured output optimizer for this call.
+    #[serde(default)]
+    raw_output: bool,
 }
 
 fn default_true() -> bool {
@@ -859,6 +974,7 @@ impl Tool for BashTool {
     async fn execute(&self, input: Value, ctx: ToolContext) -> Result<ToolOutput> {
         let mut params: BashInput = serde_json::from_value(input)?;
         let run_in_background = params.run_in_background.unwrap_or(false);
+        let original_command = params.command.clone();
 
         // Destructive-command gate (#604), before background dispatch.
         if let Some(refusal) = destructive_command_refusal(
@@ -869,6 +985,33 @@ impl Tool for BashTool {
             return Err(anyhow::anyhow!(refusal));
         }
 
+        let rtk_rewrite = if !params.raw_output {
+            let rtk_config = crate::config::config().tools.bash.clone();
+            if rtk_config.uses_rtk() {
+                rewrite_command_with_rtk(&params.command, ctx.working_dir.as_deref(), &rtk_config)
+                    .await
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+        if let Some(ref rewritten) = rtk_rewrite {
+            if let Some(refusal) = destructive_command_refusal(
+                &rewritten.candidate,
+                params.justification.as_deref(),
+                ctx.working_dir.clone(),
+            ) {
+                return Err(anyhow::anyhow!(
+                    "RTK rewrite was rejected by Jcode's command safety gate: {refusal}"
+                ));
+            }
+            if params.intent.is_none() {
+                params.intent = Some(original_command.clone());
+            }
+            params.command = rewritten.command.clone();
+        }
+
         #[cfg(unix)]
         if let Some(wrapped) = wrap_repo_cargo_commands(&params.command, ctx.working_dir.as_deref())
         {
@@ -876,7 +1019,13 @@ impl Tool for BashTool {
         }
 
         if run_in_background {
-            return self.execute_background(params, ctx).await;
+            let output = self.execute_background(params, ctx).await?;
+            return Ok(match rtk_rewrite {
+                Some(rewritten) => {
+                    annotate_rtk_output(output, &original_command, &rewritten.candidate)
+                }
+                None => output,
+            });
         }
 
         // Auto-detect browser bridge commands and rewrite them to the installed
@@ -898,7 +1047,11 @@ impl Tool for BashTool {
         }
 
         // Foreground execution with stdin detection
-        self.execute_foreground(&params, &ctx).await
+        let output = self.execute_foreground(&params, &ctx).await?;
+        Ok(match rtk_rewrite {
+            Some(rewritten) => annotate_rtk_output(output, &original_command, &rewritten.candidate),
+            None => output,
+        })
     }
 }
 

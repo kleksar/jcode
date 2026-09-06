@@ -336,6 +336,15 @@ disable_base_tools = false
 mcp_tools = "auto"
 mcp_tools_token_threshold = 8000
 
+[tools.bash]
+# Optional semantic compression of shell output via https://github.com/rtk-ai/rtk.
+# Disabled by default. Install RTK separately, then set output_backend = "rtk".
+# Every rewrite fails open: missing/slow/unsupported RTK leaves the command raw.
+# Set raw_output = true on an individual bash tool call to bypass RTK.
+output_backend = "raw"
+rtk_binary = "rtk"
+rtk_rewrite_timeout_ms = 500
+
 [acp]
 # Agent Client Protocol adapter compatibility profile: standard, extended, or full.
 # standard emits only spec-compatible ACP messages.

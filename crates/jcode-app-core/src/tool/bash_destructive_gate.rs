@@ -82,6 +82,10 @@ pub(super) fn bash_parameters_schema() -> serde_json::Value {
             "justification": {
                 "type": "string",
                 "description": "Only when re-issuing a command the destructive gate refused; explain which user request it serves."
+            },
+            "raw_output": {
+                "type": "boolean",
+                "description": "Bypass the configured shell-output optimizer for this call and return the ordinary raw command output."
             }
         }
     })

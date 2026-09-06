@@ -463,6 +463,42 @@ fn tool_config_defaults_to_full_toolset() {
     assert!(selection.disabled_tools.is_empty());
     assert_eq!(config.mcp_tools, McpToolsMode::Auto);
     assert_eq!(config.mcp_tools_token_threshold, 8_000);
+    assert_eq!(config.bash.output_backend, "raw");
+    assert_eq!(config.bash.rtk_binary, "rtk");
+    assert_eq!(config.bash.rtk_rewrite_timeout_ms, 500);
+}
+
+#[test]
+fn tool_config_deserializes_rtk_bash_backend() {
+    let config: Config = toml::from_str(
+        "[tools.bash]\noutput_backend = \"rtk\"\nrtk_binary = \"/opt/bin/rtk\"\nrtk_rewrite_timeout_ms = 250\n",
+    )
+    .expect("valid RTK bash configuration");
+
+    assert!(config.tools.bash.uses_rtk());
+    assert_eq!(config.tools.bash.rtk_binary, "/opt/bin/rtk");
+    assert_eq!(config.tools.bash.rtk_rewrite_timeout_ms, 250);
+}
+
+#[test]
+fn tool_config_rtk_env_overrides() {
+    let _guard = crate::storage::lock_test_env();
+    let previous_backend = std::env::var_os("JCODE_BASH_OUTPUT_BACKEND");
+    let previous_binary = std::env::var_os("JCODE_RTK_BINARY");
+    let previous_timeout = std::env::var_os("JCODE_RTK_REWRITE_TIMEOUT_MS");
+    crate::env::set_var("JCODE_BASH_OUTPUT_BACKEND", "rtk");
+    crate::env::set_var("JCODE_RTK_BINARY", "/tmp/rtk-test");
+    crate::env::set_var("JCODE_RTK_REWRITE_TIMEOUT_MS", "321");
+
+    let mut config = Config::default();
+    config.apply_env_overrides();
+
+    assert!(config.tools.bash.uses_rtk());
+    assert_eq!(config.tools.bash.rtk_binary, "/tmp/rtk-test");
+    assert_eq!(config.tools.bash.rtk_rewrite_timeout_ms, 321);
+    restore_env_var("JCODE_BASH_OUTPUT_BACKEND", previous_backend);
+    restore_env_var("JCODE_RTK_BINARY", previous_binary);
+    restore_env_var("JCODE_RTK_REWRITE_TIMEOUT_MS", previous_timeout);
 }
 
 #[test]
