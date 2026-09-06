@@ -243,3 +243,125 @@ fn test_file_diff_uses_left_splitter_instead_of_rounded_box() {
     assert_eq!(buf[(diff_area.x, diff_area.y + 1)].symbol(), "│");
     assert!(text.contains("demo.rs"), "rendered text: {text}");
 }
+
+fn init_worktree_pane_test_repo() -> tempfile::TempDir {
+    let repo = tempfile::tempdir().expect("temp repo");
+    let git = |args: &[&str]| {
+        let status = std::process::Command::new("git")
+            .current_dir(repo.path())
+            .args(args)
+            .status()
+            .expect("run git");
+        assert!(status.success(), "git command failed: {args:?}");
+    };
+    git(&["init", "-q"]);
+    git(&["config", "user.email", "jcode-test@example.invalid"]);
+    git(&["config", "user.name", "Jcode Test"]);
+    std::fs::write(repo.path().join("demo.rs"), "fn old() {}\n").expect("write baseline");
+    git(&["add", "demo.rs"]);
+    git(&["commit", "-qm", "baseline"]);
+    std::fs::write(repo.path().join("demo.rs"), "fn new() {}\n").expect("write edit");
+    std::fs::write(repo.path().join("notes.txt"), "first\nsecond\n")
+        .expect("write untracked file");
+    repo
+}
+
+#[test]
+fn test_wide_dirty_worktree_renders_automatic_changes_pane() {
+    let _lock = scroll_render_test_lock();
+    let repo = init_worktree_pane_test_repo();
+    crate::tui::ui::prime_worktree_changes_for_tests(repo.path());
+
+    let mut app = create_test_app();
+    app.session.working_dir = Some(repo.path().to_string_lossy().into_owned());
+    app.diff_mode = crate::config::DiffDisplayMode::Inline;
+
+    let backend = ratatui::backend::TestBackend::new(140, 24);
+    let mut terminal = ratatui::Terminal::new(backend).expect("test terminal");
+    let text = render_and_snap(&app, &mut terminal);
+    let layout = crate::tui::ui::last_layout_snapshot().expect("layout snapshot");
+    let pane = layout.diff_pane_area.expect("automatic worktree pane");
+
+    assert!(pane.width >= 42, "pane should remain readable: {pane:?}");
+    assert!(layout.messages_area.width >= 56, "chat should remain usable: {layout:?}");
+    assert!(text.contains("changes 2 files +3 -1"), "rendered text: {text}");
+    assert!(text.contains("demo.rs"), "rendered text: {text}");
+    assert!(text.contains("notes.txt"), "rendered text: {text}");
+    assert!(text.contains("fn new() {}"), "rendered text: {text}");
+    assert!(text.contains("fn old() {}"), "rendered text: {text}");
+    assert!(app.diff_pane_visible());
+    assert!(app.handle_diagram_ctrl_key(KeyCode::Char('l'), false));
+    assert!(app.diff_pane_focus, "Ctrl+L should focus the changes pane");
+}
+
+#[test]
+fn test_automatic_worktree_pane_hides_in_narrow_terminal() {
+    let _lock = scroll_render_test_lock();
+    let repo = init_worktree_pane_test_repo();
+    crate::tui::ui::prime_worktree_changes_for_tests(repo.path());
+
+    let mut app = create_test_app();
+    app.session.working_dir = Some(repo.path().to_string_lossy().into_owned());
+    app.diff_mode = crate::config::DiffDisplayMode::Inline;
+
+    let backend = ratatui::backend::TestBackend::new(109, 20);
+    let mut terminal = ratatui::Terminal::new(backend).expect("test terminal");
+    let text = render_and_snap(&app, &mut terminal);
+    let layout = crate::tui::ui::last_layout_snapshot().expect("layout snapshot");
+
+    assert!(layout.diff_pane_area.is_none(), "narrow layout: {layout:?}");
+    assert!(!text.contains("changes 2 files"), "rendered text: {text}");
+}
+
+#[test]
+fn test_automatic_worktree_pane_hides_for_clean_repo() {
+    let _lock = scroll_render_test_lock();
+    let repo = tempfile::tempdir().expect("temp repo");
+    let status = std::process::Command::new("git")
+        .current_dir(repo.path())
+        .args(["init", "-q"])
+        .status()
+        .expect("git init");
+    assert!(status.success());
+    crate::tui::ui::prime_worktree_changes_for_tests(repo.path());
+
+    let mut app = create_test_app();
+    app.session.working_dir = Some(repo.path().to_string_lossy().into_owned());
+
+    let backend = ratatui::backend::TestBackend::new(140, 20);
+    let mut terminal = ratatui::Terminal::new(backend).expect("test terminal");
+    let text = render_and_snap(&app, &mut terminal);
+    let layout = crate::tui::ui::last_layout_snapshot().expect("layout snapshot");
+
+    assert!(layout.diff_pane_area.is_none(), "clean layout: {layout:?}");
+    assert!(!text.contains(" changes "), "rendered text: {text}");
+}
+
+#[test]
+fn test_explicit_side_panel_takes_precedence_over_worktree_changes() {
+    let _lock = scroll_render_test_lock();
+    let repo = init_worktree_pane_test_repo();
+    crate::tui::ui::prime_worktree_changes_for_tests(repo.path());
+
+    let mut app = create_test_app();
+    app.session.working_dir = Some(repo.path().to_string_lossy().into_owned());
+    app.side_panel = crate::side_panel::SidePanelSnapshot {
+        focused_page_id: Some("plan".to_string()),
+        pages: vec![crate::side_panel::SidePanelPage {
+            id: "plan".to_string(),
+            title: "Plan".to_string(),
+            file_path: "".to_string(),
+            format: crate::side_panel::SidePanelPageFormat::Markdown,
+            source: crate::side_panel::SidePanelPageSource::Managed,
+            content: "explicit-panel-content".to_string(),
+            updated_at_ms: 1,
+        }],
+    };
+
+    let backend = ratatui::backend::TestBackend::new(140, 20);
+    let mut terminal = ratatui::Terminal::new(backend).expect("test terminal");
+    let text = render_and_snap(&app, &mut terminal);
+
+    assert!(text.contains("explicit-panel-content"), "rendered text: {text}");
+    assert!(!text.contains("changes 2 files"), "rendered text: {text}");
+}

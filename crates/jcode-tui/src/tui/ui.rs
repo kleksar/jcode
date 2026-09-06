@@ -90,6 +90,8 @@ pub(crate) mod tools_ui;
 mod transitions;
 #[path = "ui_viewport.rs"]
 pub(crate) mod viewport;
+#[path = "ui_worktree.rs"]
+mod worktree_ui;
 use crate::tui::mermaid;
 #[cfg(test)]
 pub(crate) use box_utils::truncate_line_to_width;
@@ -166,6 +168,11 @@ pub(crate) use viewport::{
     reserve_copy_badge_margins, truncate_line_for_copy_badge,
     truncate_line_in_place_to_width as truncate_copy_badge_line_to_width,
 };
+pub(crate) use worktree_ui::invalidate_worktree_changes_cache;
+pub(crate) use worktree_ui::poll_worktree_changes;
+#[cfg(test)]
+pub(crate) use worktree_ui::prime_worktree_changes_for_tests;
+use worktree_ui::{draw_worktree_changes, snapshot_for_worktree};
 /// Last known max scroll value from the renderer. Updated each frame.
 /// Scroll handlers use this to clamp scroll_offset and prevent overshoot.
 #[cfg(not(test))]
@@ -2815,8 +2822,22 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
     };
     let has_file_diff_edits =
         !swarm_page_active && diff_mode.is_file() && app.has_display_edit_tool_messages();
+    const AUTO_WORKTREE_PANE_MIN_WIDTH: u16 = 110;
+    let worktree_changes = if !swarm_page_active
+        && area.width >= AUTO_WORKTREE_PANE_MIN_WIDTH
+        && !has_side_panel_content
+        && !has_pinned_content
+        && !has_file_diff_edits
+        && !app.is_replay()
+    {
+        let working_dir = app.working_dir();
+        snapshot_for_worktree(working_dir.as_deref())
+    } else {
+        None
+    };
+    let has_worktree_changes = worktree_changes.is_some();
     let has_right_side_pane_content =
-        has_side_panel_content || has_pinned_content || has_file_diff_edits;
+        has_side_panel_content || has_pinned_content || has_file_diff_edits || has_worktree_changes;
     // The side panel is itself a single right-hand auxiliary surface and can render
     // visual content such as Mermaid diagrams inline. Pinned image/file-diff content
     // also uses that same right-hand surface. Do not also open the global pinned
@@ -2930,7 +2951,7 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
 
     let (chat_area, diff_pane_area) = if needs_side_pane {
         const MIN_DIFF_WIDTH: u16 = 30;
-        const MIN_CHAT_WIDTH: u16 = 20;
+        let min_chat_width: u16 = if has_worktree_changes { 56 } else { 20 };
         // Pinned images live in a tall narrow column, so a wide image fits to
         // the pane width and ends up small with empty space below it. When the
         // pane is showing image content (and the user has not manually resized
@@ -2945,10 +2966,15 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
         } else {
             base_ratio
         };
-        let max_diff = chat_area.width.saturating_sub(MIN_CHAT_WIDTH);
-        if max_diff >= MIN_DIFF_WIDTH {
+        let min_diff_width = if has_worktree_changes {
+            42
+        } else {
+            MIN_DIFF_WIDTH
+        };
+        let max_diff = chat_area.width.saturating_sub(min_chat_width);
+        if max_diff >= min_diff_width {
             let diff_width = (((chat_area.width as u32 * effective_ratio) / 100) as u16)
-                .max(MIN_DIFF_WIDTH)
+                .max(min_diff_width)
                 .min(max_diff);
             let new_chat_width = chat_area.width.saturating_sub(diff_width);
             let chat = Rect {
@@ -3461,6 +3487,20 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
                 app,
                 app.diff_pane_scroll(),
                 app.diff_line_wrap(),
+                app.diff_pane_focus(),
+            );
+        } else if let Some(snapshot) = worktree_changes.as_deref() {
+            if let Some(ref mut capture) = debug_capture {
+                capture
+                    .render_order
+                    .push("draw_worktree_changes".to_string());
+            }
+            draw_worktree_changes(
+                frame,
+                diff_area,
+                app,
+                snapshot,
+                app.diff_pane_scroll(),
                 app.diff_pane_focus(),
             );
         }
