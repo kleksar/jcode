@@ -9,6 +9,14 @@ pub(super) fn diff_del_color() -> Color {
     Color::Rgb(200, 100, 100)
 }
 
+pub(super) fn diff_add_background_color() -> Color {
+    Color::Rgb(18, 55, 28)
+}
+
+pub(super) fn diff_del_background_color() -> Color {
+    Color::Rgb(65, 24, 24)
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum DiffLineKind {
     Add,
@@ -379,36 +387,38 @@ fn trim_diff_content(content: &str) -> String {
     content.trim_start_matches([' ', '\t']).to_string()
 }
 
-pub(super) fn tint_span_with_diff_color(span: Span<'static>, diff_color: Color) -> Span<'static> {
-    let (dr, dg, db) = match diff_color {
-        Color::Rgb(r, g, b) => (r, g, b),
-        Color::Indexed(n) => super::color_support::indexed_to_rgb(n),
-        _ => return span,
-    };
-
-    let fg = span.style.fg.unwrap_or(Color::White);
-    let (sr, sg, sb) = match fg {
-        Color::Rgb(r, g, b) => (r, g, b),
-        Color::Indexed(n) => super::color_support::indexed_to_rgb(n),
-        Color::White => (255, 255, 255),
-        Color::Black => (0, 0, 0),
-        _ => return span,
-    };
-
-    let blend = |s: u8, d: u8| -> u8 { ((s as u16 * 70 + d as u16 * 30) / 100) as u8 };
-
-    let tinted = Color::Rgb(blend(sr, dr), blend(sg, dg), blend(sb, db));
-    Span::styled(span.content, span.style.fg(tinted))
+pub(super) fn with_diff_background(span: Span<'static>, background: Color) -> Span<'static> {
+    Span::styled(span.content, span.style.bg(background))
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
         DiffLineKind, collect_diff_lines, diff_change_counts_for_tool,
-        diff_counts_from_apply_patch_input, generate_diff_lines_from_strings,
+        diff_counts_from_apply_patch_input, generate_diff_lines_from_strings, with_diff_background,
     };
     use crate::message::ToolCall;
+    use ratatui::{
+        style::{Color, Modifier, Style},
+        text::Span,
+    };
     use serde_json::json;
+
+    #[test]
+    fn diff_background_preserves_syntax_foreground_and_modifiers() {
+        let span = Span::styled(
+            "fn",
+            Style::default()
+                .fg(Color::Blue)
+                .add_modifier(Modifier::BOLD),
+        );
+
+        let highlighted = with_diff_background(span, Color::Rgb(18, 55, 28));
+
+        assert_eq!(highlighted.style.fg, Some(Color::Blue));
+        assert_eq!(highlighted.style.bg, Some(Color::Rgb(18, 55, 28)));
+        assert!(highlighted.style.add_modifier.contains(Modifier::BOLD));
+    }
 
     #[test]
     fn apply_patch_counts_ignore_context_lines_with_plus_or_minus_prefixes() {

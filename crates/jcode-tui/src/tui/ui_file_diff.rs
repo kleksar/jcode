@@ -129,22 +129,24 @@ fn render_file_diff_row(row: &FileDiffDisplayRow, file_ext: Option<&str>) -> Lin
             Line::from(spans)
         }
         FileDiffDisplayRowKind::Add => {
+            let background = diff_add_background_color();
             let mut spans = vec![Span::styled(
                 row.prefix.clone(),
-                Style::default().fg(diff_add_color()),
+                Style::default().fg(diff_add_color()).bg(background),
             )];
             for span in markdown::highlight_line(&row.text, file_ext) {
-                spans.push(tint_span_with_diff_color(span, diff_add_color()));
+                spans.push(with_diff_background(span, background));
             }
             Line::from(spans)
         }
         FileDiffDisplayRowKind::Del => {
+            let background = diff_del_background_color();
             let mut spans = vec![Span::styled(
                 row.prefix.clone(),
-                Style::default().fg(diff_del_color()),
+                Style::default().fg(diff_del_color()).bg(background),
             )];
             for span in markdown::highlight_line(&row.text, file_ext) {
-                spans.push(tint_span_with_diff_color(span, diff_del_color()));
+                spans.push(with_diff_background(span, background));
             }
             Line::from(spans)
         }
@@ -612,4 +614,34 @@ pub(super) fn draw_file_diff_view(
 
     let paragraph = Paragraph::new(visible_lines);
     frame.render_widget(paragraph, inner);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn changed_rows_apply_background_without_changing_syntax_styles() {
+        for (kind, background) in [
+            (FileDiffDisplayRowKind::Add, diff_add_background_color()),
+            (FileDiffDisplayRowKind::Del, diff_del_background_color()),
+        ] {
+            let source = "fn demo() -> bool { true }";
+            let expected_syntax = markdown::highlight_line(source, Some("rs"));
+            let rendered = render_file_diff_row(
+                &FileDiffDisplayRow {
+                    prefix: "+ ".to_string(),
+                    text: source.to_string(),
+                    kind,
+                },
+                Some("rs"),
+            );
+
+            assert_eq!(rendered.spans[0].style.bg, Some(background));
+            assert_eq!(rendered.spans.len(), expected_syntax.len() + 1);
+            for (actual, expected) in rendered.spans[1..].iter().zip(expected_syntax) {
+                assert_eq!(actual.style, expected.style.bg(background));
+            }
+        }
+    }
 }

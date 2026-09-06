@@ -1025,18 +1025,22 @@ pub(super) fn draw_pinned_content_cached(
                         } else {
                             diff_del_color()
                         };
+                        let background = if line.kind == DiffLineKind::Add {
+                            diff_add_background_color()
+                        } else {
+                            diff_del_background_color()
+                        };
 
                         let mut spans: Vec<Span<'static>> = vec![Span::styled(
                             line.prefix.clone(),
-                            Style::default().fg(base_color),
+                            Style::default().fg(base_color).bg(background),
                         )];
 
                         if !line.content.is_empty() {
                             let highlighted =
                                 markdown::highlight_line(line.content.as_str(), file_ext);
                             for span in highlighted {
-                                let tinted = tint_span_with_diff_color(span, base_color);
-                                spans.push(tinted);
+                                spans.push(with_diff_background(span, background));
                             }
                         }
 

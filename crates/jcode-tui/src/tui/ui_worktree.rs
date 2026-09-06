@@ -503,8 +503,12 @@ fn build_render_lines(
                 line_number(line.new_line)
             );
             let (prefix, foreground, background) = match line.kind {
-                WorktreeLineKind::Add => ("+ ", diff_add_color(), Some(rgb(18, 55, 28))),
-                WorktreeLineKind::Del => ("- ", diff_del_color(), Some(rgb(65, 24, 24))),
+                WorktreeLineKind::Add => {
+                    ("+ ", diff_add_color(), Some(diff_add_background_color()))
+                }
+                WorktreeLineKind::Del => {
+                    ("- ", diff_del_color(), Some(diff_del_background_color()))
+                }
                 WorktreeLineKind::Context => ("  ", rgb(205, 210, 220), None),
                 WorktreeLineKind::Hunk => ("  ", rgb(130, 170, 220), None),
                 WorktreeLineKind::Meta => ("  ", dim_color(), None),
@@ -518,11 +522,10 @@ fn build_render_lines(
                 WorktreeLineKind::Add | WorktreeLineKind::Del | WorktreeLineKind::Context
             ) {
                 for span in markdown::highlight_line(&line.content, extension) {
-                    spans.push(match line.kind {
-                        WorktreeLineKind::Add | WorktreeLineKind::Del => {
-                            tint_span_with_diff_color(span, foreground)
-                        }
-                        _ => span,
+                    spans.push(if let Some(background) = background {
+                        with_diff_background(span, background)
+                    } else {
+                        span
                     });
                 }
             } else {
