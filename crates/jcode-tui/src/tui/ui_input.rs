@@ -2541,25 +2541,17 @@ pub(super) fn draw_session_footer(frame: &mut Frame, app: &dyn TuiState, area: R
     let gap = usize::from(!facts.is_empty() && !quota.is_empty()) * 2;
     let facts_width = (area.width as usize).saturating_sub(quota_width + gap);
 
-    if facts_width > 0 && !facts.is_empty() {
-        let left_area = Rect::new(area.x, area.y, facts_width as u16, 1);
-        frame.render_widget(
-            Paragraph::new(Line::from(overscroll_truncate_spans(facts, facts_width))),
-            left_area,
-        );
+    // Keep the quota adjacent to the model rather than anchoring it to the
+    // right edge. Reserve its width before truncating the session facts.
+    let mut spans = overscroll_truncate_spans(facts, facts_width);
+    if !spans.is_empty() && !quota.is_empty() {
+        spans.push(Span::raw("  "));
     }
-    if quota_width > 0 && quota_width <= area.width as usize {
-        let right_area = Rect::new(
-            area.right().saturating_sub(quota_width as u16),
-            area.y,
-            quota_width as u16,
-            1,
-        );
-        frame.render_widget(
-            Paragraph::new(Line::from(quota)).alignment(Alignment::Right),
-            right_area,
-        );
-    }
+    spans.extend(quota);
+    frame.render_widget(
+        Paragraph::new(Line::from(spans)),
+        Rect::new(area.x, area.y, area.width, 1),
+    );
 
     if area.height >= 2 {
         let hint_area = Rect::new(area.x, area.y + 1, area.width, 1);
