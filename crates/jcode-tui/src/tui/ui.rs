@@ -196,7 +196,7 @@ pub(crate) use worktree_ui::invalidate_worktree_changes_cache;
 pub(crate) use worktree_ui::poll_worktree_changes;
 pub(crate) use worktree_ui::{WorktreePaneLayout, worktree_file_is_present, worktree_pane_layout};
 use worktree_ui::{
-    draw_empty_worktree_changes, draw_project_files, draw_worktree_changes,
+    draw_empty_worktree_changes, draw_project_files, draw_project_terminal, draw_worktree_changes,
     snapshot_for_project_tree, snapshot_for_worktree,
 };
 #[cfg(test)]
@@ -2854,6 +2854,7 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
     let has_worktree_changes = worktree_changes.is_some();
     let explicit_worktree_pane = worktree_surface_allowed && app.worktree_pane_explicit_open();
     let files_tab_active = explicit_worktree_pane && app.worktree_files_tab_active();
+    let terminal_tab_active = explicit_worktree_pane && app.worktree_terminal_tab_active();
     let project_tree = if files_tab_active {
         let working_dir = app.working_dir();
         snapshot_for_project_tree(working_dir.as_deref())
@@ -3547,6 +3548,13 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
                 app.diff_line_wrap(),
                 app.diff_pane_focus(),
             );
+        } else if has_worktree_surface && terminal_tab_active {
+            if let Some(ref mut capture) = debug_capture {
+                capture
+                    .render_order
+                    .push("draw_project_terminal".to_string());
+            }
+            draw_project_terminal(frame, diff_area, app, app.diff_pane_focus());
         } else if has_worktree_surface && files_tab_active {
             if let Some(ref mut capture) = debug_capture {
                 capture.render_order.push("draw_project_files".to_string());

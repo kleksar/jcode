@@ -1867,6 +1867,21 @@ impl crate::tui::TuiState for App {
     fn worktree_files_tab_active(&self) -> bool {
         self.worktree_files_tab_active()
     }
+    fn worktree_terminal_tab_active(&self) -> bool {
+        self.worktree_terminal_tab_active()
+    }
+    fn project_terminal_input(&self) -> &str {
+        &self.worktree_pane.terminal_input
+    }
+    fn project_terminal_lines(&self) -> &[String] {
+        &self.worktree_pane.terminal_lines
+    }
+    fn project_terminal_cwd(&self) -> Option<&str> {
+        self.worktree_pane
+            .terminal_cwd
+            .as_deref()
+            .or(self.session.working_dir.as_deref())
+    }
     fn project_tree_selected_path(&self) -> Option<&str> {
         self.worktree_pane_matches_session()
             .then_some(self.worktree_pane.tree_selected_path.as_deref())

@@ -23,7 +23,9 @@ pub(crate) struct WorktreePaneLayout {
     pub area: Rect,
     pub diff_tab_area: Rect,
     pub files_tab_area: Rect,
+    pub terminal_tab_area: Rect,
     pub files_tab_active: bool,
+    pub terminal_tab_active: bool,
     pub list_area: Rect,
     pub body_area: Rect,
     pub list_scroll: usize,
@@ -1018,6 +1020,7 @@ fn cached_render_lines(
 
 const DIFF_TAB_LABEL: &str = " Diff ";
 const FILES_TAB_LABEL: &str = " Files ";
+const TERMINAL_TAB_LABEL: &str = " Terminal ";
 
 fn project_pane_tab_style(active: bool) -> Style {
     if active {
@@ -1030,18 +1033,27 @@ fn project_pane_tab_style(active: bool) -> Style {
     }
 }
 
-fn project_pane_title(files_active: bool, mut suffix: Vec<Span<'static>>) -> Line<'static> {
+fn project_pane_title(
+    files_active: bool,
+    terminal_active: bool,
+    mut suffix: Vec<Span<'static>>,
+) -> Line<'static> {
     let mut spans = vec![
-        Span::styled(DIFF_TAB_LABEL, project_pane_tab_style(!files_active)),
+        Span::styled(
+            DIFF_TAB_LABEL,
+            project_pane_tab_style(!files_active && !terminal_active),
+        ),
         Span::raw(" "),
         Span::styled(FILES_TAB_LABEL, project_pane_tab_style(files_active)),
+        Span::raw(" "),
+        Span::styled(TERMINAL_TAB_LABEL, project_pane_tab_style(terminal_active)),
         Span::raw("  "),
     ];
     spans.append(&mut suffix);
     Line::from(spans)
 }
 
-fn project_pane_tab_areas(area: Rect) -> (Rect, Rect) {
+fn project_pane_tab_areas(area: Rect) -> (Rect, Rect, Rect) {
     let header_x = area.x.saturating_add(1);
     let diff = Rect::new(header_x, area.y, DIFF_TAB_LABEL.len() as u16, 1);
     let files = Rect::new(
@@ -1050,7 +1062,13 @@ fn project_pane_tab_areas(area: Rect) -> (Rect, Rect) {
         FILES_TAB_LABEL.len() as u16,
         1,
     );
-    (diff, files)
+    let terminal = Rect::new(
+        files.right().saturating_add(1),
+        area.y,
+        TERMINAL_TAB_LABEL.len() as u16,
+        1,
+    );
+    (diff, files, terminal)
 }
 
 fn flatten_project_nodes(
@@ -1374,13 +1392,13 @@ pub(super) fn draw_project_files(
     } else {
         vec![Span::styled("loading…", Style::default().fg(dim_color()))]
     };
-    let title = project_pane_title(true, suffix);
+    let title = project_pane_title(true, false, suffix);
     let border = Style::default().fg(if focused { tool_color() } else { dim_color() });
     let Some(inner) = super::draw_right_rail_chrome(frame, area, title, border) else {
         return;
     };
     super::clear_area(frame, inner);
-    let (diff_tab_area, files_tab_area) = project_pane_tab_areas(area);
+    let (diff_tab_area, files_tab_area, terminal_tab_area) = project_pane_tab_areas(area);
 
     let Some(snapshot) = snapshot else {
         frame.render_widget(
@@ -1398,7 +1416,9 @@ pub(super) fn draw_project_files(
                 area,
                 diff_tab_area,
                 files_tab_area,
+                terminal_tab_area,
                 files_tab_active: true,
+                terminal_tab_active: false,
                 list_area: inner,
                 body_area: inner,
                 list_scroll: 0,
@@ -1539,7 +1559,9 @@ pub(super) fn draw_project_files(
             area,
             diff_tab_area,
             files_tab_area,
+            terminal_tab_area,
             files_tab_active: true,
+            terminal_tab_active: false,
             list_area: tree_area,
             body_area: preview_area.unwrap_or(tree_area),
             list_scroll: tree_scroll,
@@ -1566,6 +1588,7 @@ pub(super) fn draw_empty_worktree_changes(
     }
     let title = project_pane_title(
         false,
+        false,
         vec![Span::styled(
             "working tree clean",
             Style::default().fg(dim_color()),
@@ -1585,13 +1608,15 @@ pub(super) fn draw_empty_worktree_changes(
     super::set_last_diff_pane_max_scroll(0);
     super::set_last_diff_pane_effective_scroll(0);
     super::record_side_pane_snapshot(std::slice::from_ref(&line), 0, 1, inner);
-    let (diff_tab_area, files_tab_area) = project_pane_tab_areas(area);
+    let (diff_tab_area, files_tab_area, terminal_tab_area) = project_pane_tab_areas(area);
     WORKTREE_PANE_LAYOUT.with(|layout| {
         *layout.borrow_mut() = Some(WorktreePaneLayout {
             area,
             diff_tab_area,
             files_tab_area,
+            terminal_tab_area,
             files_tab_active: false,
+            terminal_tab_active: false,
             list_area: inner,
             body_area: inner,
             list_scroll: 0,
@@ -1602,6 +1627,75 @@ pub(super) fn draw_empty_worktree_changes(
             tree_rows: Arc::new(Vec::new()),
             preview_total_lines: 0,
             preview_scroll: 0,
+            working_dir: app.working_dir(),
+        })
+    });
+}
+
+pub(super) fn draw_project_terminal(
+    frame: &mut Frame,
+    area: Rect,
+    app: &dyn TuiState,
+    focused: bool,
+) {
+    if area.width < 30 || area.height < 3 {
+        return;
+    }
+    let cwd = app.project_terminal_cwd().unwrap_or(".");
+    let title = project_pane_title(
+        false,
+        true,
+        vec![Span::styled(
+            cwd.to_string(),
+            Style::default().fg(dim_color()),
+        )],
+    );
+    let border = Style::default().fg(if focused { tool_color() } else { dim_color() });
+    let Some(inner) = super::draw_right_rail_chrome(frame, area, title, border) else {
+        return;
+    };
+    super::clear_area(frame, inner);
+
+    let output_height = inner.height.saturating_sub(1) as usize;
+    let lines = app.project_terminal_lines();
+    let start = lines.len().saturating_sub(output_height);
+    let mut rendered = lines[start..]
+        .iter()
+        .map(|line| Line::from(Span::raw(line.clone())))
+        .collect::<Vec<_>>();
+    rendered.push(Line::from(vec![
+        Span::styled("$ ", Style::default().fg(tool_color())),
+        Span::raw(app.project_terminal_input().to_string()),
+        Span::styled(
+            if focused { "█" } else { "" },
+            Style::default().fg(file_link_color()),
+        ),
+    ]));
+    frame.render_widget(Paragraph::new(rendered.clone()), inner);
+    super::set_pinned_pane_total_lines(lines.len().saturating_add(1));
+    super::set_last_diff_pane_max_scroll(0);
+    super::set_last_diff_pane_effective_scroll(start);
+    super::record_side_pane_snapshot(&rendered, start, lines.len().saturating_add(1), inner);
+
+    let (diff_tab_area, files_tab_area, terminal_tab_area) = project_pane_tab_areas(area);
+    WORKTREE_PANE_LAYOUT.with(|layout| {
+        *layout.borrow_mut() = Some(WorktreePaneLayout {
+            area,
+            diff_tab_area,
+            files_tab_area,
+            terminal_tab_area,
+            files_tab_active: false,
+            terminal_tab_active: true,
+            list_area: inner,
+            body_area: inner,
+            list_scroll: 0,
+            paths: Arc::new(Vec::new()),
+            tree_area: None,
+            preview_area: None,
+            tree_scroll: 0,
+            tree_rows: Arc::new(Vec::new()),
+            preview_total_lines: lines.len().saturating_add(1),
+            preview_scroll: start,
             working_dir: app.working_dir(),
         })
     });
@@ -1619,6 +1713,7 @@ pub(super) fn draw_worktree_changes(
         return;
     }
     let title = project_pane_title(
+        false,
         false,
         vec![
             Span::styled("changes ", Style::default().fg(tool_color())),
@@ -1718,13 +1813,15 @@ pub(super) fn draw_worktree_changes(
         );
     }
     draw_padded_section_boundary(frame, boundary_area, true);
-    let (diff_tab_area, files_tab_area) = project_pane_tab_areas(area);
+    let (diff_tab_area, files_tab_area, terminal_tab_area) = project_pane_tab_areas(area);
     WORKTREE_PANE_LAYOUT.with(|layout| {
         *layout.borrow_mut() = Some(WorktreePaneLayout {
             area,
             diff_tab_area,
             files_tab_area,
+            terminal_tab_area,
             files_tab_active: false,
+            terminal_tab_active: false,
             list_area,
             body_area: body,
             list_scroll,

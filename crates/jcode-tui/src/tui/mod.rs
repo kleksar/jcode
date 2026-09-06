@@ -679,6 +679,18 @@ pub trait TuiState {
     fn worktree_files_tab_active(&self) -> bool {
         false
     }
+    fn worktree_terminal_tab_active(&self) -> bool {
+        false
+    }
+    fn project_terminal_input(&self) -> &str {
+        ""
+    }
+    fn project_terminal_lines(&self) -> &[String] {
+        &[]
+    }
+    fn project_terminal_cwd(&self) -> Option<&str> {
+        None
+    }
     fn project_tree_selected_path(&self) -> Option<&str> {
         None
     }

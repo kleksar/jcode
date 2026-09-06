@@ -7,6 +7,7 @@ pub(super) enum WorktreePaneTab {
     Diff,
     #[default]
     Files,
+    Terminal,
 }
 
 pub(super) struct WorktreePaneState {
@@ -20,6 +21,9 @@ pub(super) struct WorktreePaneState {
     pub(super) tree_expanded_dirs: std::collections::HashSet<String>,
     pub(super) tree_preview_scroll: usize,
     pub(super) tree_preview_focused: bool,
+    pub(super) terminal_input: String,
+    pub(super) terminal_lines: Vec<String>,
+    pub(super) terminal_cwd: Option<String>,
     session_id: String,
     working_dir: Option<String>,
 }
@@ -37,6 +41,9 @@ impl Default for WorktreePaneState {
             tree_expanded_dirs: std::collections::HashSet::new(),
             tree_preview_scroll: 0,
             tree_preview_focused: false,
+            terminal_input: String::new(),
+            terminal_lines: vec!["Jcode terminal. Type a command and press Enter.".to_string()],
+            terminal_cwd: None,
             session_id: String::new(),
             working_dir: None,
         }
@@ -73,6 +80,10 @@ impl App {
         self.worktree_pane.tab == WorktreePaneTab::Files
     }
 
+    pub(super) fn worktree_terminal_tab_active(&self) -> bool {
+        self.worktree_pane.tab == WorktreePaneTab::Terminal
+    }
+
     pub(super) fn worktree_pane_explicit_open(&self) -> bool {
         self.worktree_pane.explicit_open
     }
@@ -87,11 +98,106 @@ impl App {
         self.worktree_pane.tree_preview_focused = false;
         self.reset_worktree_diff_scroll();
         self.set_status_notice(match tab {
-            WorktreePaneTab::Diff => "Right pane: Diff (Tab switches to Files)",
+            WorktreePaneTab::Diff => "Right pane: Diff (Tab switches tabs)",
             WorktreePaneTab::Files => {
-                "Right pane: Files (arrows navigate, Enter expands/previews, Tab switches)"
+                "Right pane: Files (arrows navigate, Enter expands/previews, Tab switches tabs)"
+            }
+            WorktreePaneTab::Terminal => {
+                "Right pane: Terminal (type commands, Enter runs, Tab switches tabs)"
             }
         });
+    }
+
+    pub(super) fn handle_project_terminal_focus_key(&mut self, code: KeyCode) -> bool {
+        if !self.worktree_terminal_tab_active() {
+            return false;
+        }
+        self.prepare_worktree_pane_state();
+        match code {
+            KeyCode::Char(ch) => self.worktree_pane.terminal_input.push(ch),
+            KeyCode::Backspace => {
+                self.worktree_pane.terminal_input.pop();
+            }
+            KeyCode::Enter => self.run_project_terminal_command(),
+            KeyCode::Esc => self.set_diff_pane_focus(false),
+            KeyCode::Up | KeyCode::Down | KeyCode::Left | KeyCode::Right => {}
+            _ => {}
+        }
+        true
+    }
+
+    fn run_project_terminal_command(&mut self) {
+        let command = std::mem::take(&mut self.worktree_pane.terminal_input);
+        let command = command.trim().to_string();
+        if command.is_empty() {
+            return;
+        }
+        let cwd = self
+            .worktree_pane
+            .terminal_cwd
+            .clone()
+            .or_else(|| self.session.working_dir.clone())
+            .unwrap_or_else(|| ".".to_string());
+        self.worktree_pane
+            .terminal_lines
+            .push(format!("{} $ {}", cwd, command));
+
+        if let Some(target) = command.strip_prefix("cd ").map(str::trim) {
+            let target = if target == "~" {
+                std::env::var("HOME").unwrap_or_else(|_| cwd.clone())
+            } else {
+                target.to_string()
+            };
+            let path = std::path::Path::new(&cwd).join(target);
+            match path.canonicalize() {
+                Ok(path) if path.is_dir() => {
+                    self.worktree_pane.terminal_cwd = Some(path.to_string_lossy().into_owned());
+                }
+                _ => self
+                    .worktree_pane
+                    .terminal_lines
+                    .push("cd: directory not found".to_string()),
+            }
+        } else {
+            let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string());
+            match std::process::Command::new(shell)
+                .arg("-lc")
+                .arg(&command)
+                .current_dir(&cwd)
+                .output()
+            {
+                Ok(output) => {
+                    self.worktree_pane.terminal_lines.extend(
+                        String::from_utf8_lossy(&output.stdout)
+                            .lines()
+                            .map(str::to_string),
+                    );
+                    self.worktree_pane.terminal_lines.extend(
+                        String::from_utf8_lossy(&output.stderr)
+                            .lines()
+                            .map(str::to_string),
+                    );
+                    if !output.status.success() {
+                        self.worktree_pane.terminal_lines.push(format!(
+                            "command exited with {}",
+                            output
+                                .status
+                                .code()
+                                .map_or_else(|| "signal".to_string(), |c| c.to_string())
+                        ));
+                    }
+                }
+                Err(error) => self
+                    .worktree_pane
+                    .terminal_lines
+                    .push(format!("failed to run command: {error}")),
+            }
+        }
+        const MAX_TERMINAL_LINES: usize = 2_000;
+        if self.worktree_pane.terminal_lines.len() > MAX_TERMINAL_LINES {
+            let remove = self.worktree_pane.terminal_lines.len() - MAX_TERMINAL_LINES;
+            self.worktree_pane.terminal_lines.drain(..remove);
+        }
     }
 
     pub(super) fn open_project_files_pane(&mut self) {
@@ -341,6 +447,15 @@ impl App {
                 layout.files_tab_area,
             ) {
                 self.set_worktree_pane_tab(WorktreePaneTab::Files);
+                self.set_diff_pane_focus(true);
+                return true;
+            }
+            if crate::tui::layout_utils::point_in_rect(
+                mouse.column,
+                mouse.row,
+                layout.terminal_tab_area,
+            ) {
+                self.set_worktree_pane_tab(WorktreePaneTab::Terminal);
                 self.set_diff_pane_focus(true);
                 return true;
             }

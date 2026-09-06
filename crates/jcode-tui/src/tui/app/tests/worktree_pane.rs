@@ -99,6 +99,30 @@ fn test_files_command_opens_project_tree_with_inline_preview() {
 }
 
 #[test]
+fn test_terminal_tab_renders_and_runs_a_command() {
+    let _lock = scroll_render_test_lock();
+    let repo = init_worktree_pane_test_repo();
+    crate::tui::ui::prime_project_tree_for_tests(repo.path());
+    let mut app = create_test_app();
+    app.session.working_dir = Some(repo.path().to_string_lossy().into_owned());
+    app.diff_mode = crate::config::DiffDisplayMode::Inline;
+    app.set_worktree_pane_tab(super::worktree_pane::WorktreePaneTab::Terminal);
+    app.set_diff_pane_focus(true);
+
+    for ch in "printf terminal-ok".chars() {
+        assert!(app.handle_diff_pane_focus_key(KeyCode::Char(ch), KeyModifiers::NONE));
+    }
+    assert!(app.handle_diff_pane_focus_key(KeyCode::Enter, KeyModifiers::NONE));
+
+    let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(140, 30)).unwrap();
+    let text = render_and_snap(&app, &mut terminal);
+    let layout = crate::tui::ui::worktree_pane_layout().expect("terminal pane layout");
+    assert!(layout.terminal_tab_active, "Terminal tab should be active: {text}");
+    assert!(text.contains("Diff") && text.contains("Files") && text.contains("Terminal"));
+    assert!(text.contains("terminal-ok"), "command output should render: {text}");
+}
+
+#[test]
 fn test_files_pane_is_visible_and_active_by_default() {
     let _lock = scroll_render_test_lock();
     let repo = init_worktree_pane_test_repo();
