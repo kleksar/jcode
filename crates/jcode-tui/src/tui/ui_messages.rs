@@ -4390,6 +4390,11 @@ pub(crate) fn render_tool_message(
             } else {
                 diff_del_color()
             };
+            let background = if line.kind == DiffLineKind::Add {
+                diff_add_background_color()
+            } else {
+                diff_del_background_color()
+            };
 
             let border_prefix = format!("{}│ ", pad_str);
             let prefix_visual_width = unicode_width::UnicodeWidthStr::width(border_prefix.as_str())
@@ -4398,7 +4403,10 @@ pub(crate) fn render_tool_message(
 
             let mut spans: Vec<Span<'static>> = vec![
                 Span::styled(border_prefix, Style::default().fg(dim_color())),
-                Span::styled(line.prefix.clone(), Style::default().fg(base_color)),
+                Span::styled(
+                    line.prefix.clone(),
+                    Style::default().fg(base_color).bg(background),
+                ),
             ];
 
             if !line.content.is_empty() {
@@ -4423,13 +4431,16 @@ pub(crate) fn render_tool_message(
                     let truncated = &content[..end];
                     let highlighted = markdown::highlight_line(truncated, file_ext);
                     for span in highlighted {
-                        spans.push(tint_span_with_diff_color(span, base_color));
+                        spans.push(with_diff_background(span, background));
                     }
-                    spans.push(Span::styled("…", Style::default().fg(dim_color())));
+                    spans.push(Span::styled(
+                        "…",
+                        Style::default().fg(dim_color()).bg(background),
+                    ));
                 } else {
                     let highlighted = markdown::highlight_line(content.as_str(), file_ext);
                     for span in highlighted {
-                        spans.push(tint_span_with_diff_color(span, base_color));
+                        spans.push(with_diff_background(span, background));
                     }
                 }
             }
