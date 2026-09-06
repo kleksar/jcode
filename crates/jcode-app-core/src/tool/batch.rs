@@ -8,6 +8,7 @@ use serde_json::{Value, json};
 use std::collections::HashMap;
 
 const MAX_PARALLEL: usize = 10;
+const BATCH_OUTPUT_BUDGET_BYTES: usize = 20_000;
 
 const BATCH_DESCRIPTION: &str = r#"Run independent tool calls in parallel instead of making them sequentially. Example:
 {
@@ -30,7 +31,9 @@ const BATCH_DESCRIPTION: &str = r#"Run independent tool calls in parallel instea
       "max_regions": 20
     }
   ]
-}"#;
+}
+
+Use batch for independent calls with predictably small outputs. Narrow broad reads, web fetches, diffs, and logs before batching them. If a subcall is truncated, rerun that subcall directly for its full output."#;
 
 pub(crate) fn generic_batch_schema() -> Value {
     json!({
@@ -91,6 +94,56 @@ fn ordered_batch_subcalls(
         .collect();
     ordered.sort_by_key(|entry| entry.index);
     ordered
+}
+
+fn format_batch_results(
+    results: Vec<(usize, String, Result<ToolOutput>)>,
+) -> (String, usize, usize, Vec<String>) {
+    let successful_results = results
+        .iter()
+        .filter(|(_, _, result)| result.is_ok())
+        .count();
+    let mut successful_remaining = successful_results;
+    let mut payload_budget_remaining = BATCH_OUTPUT_BUDGET_BYTES;
+    let mut output = String::new();
+    let mut success_count = 0;
+    let mut error_count = 0;
+    let mut failed_tools = Vec::new();
+
+    for (i, tool_name, result) in results {
+        output.push_str(&format!("--- [{}] {} ---\n", i + 1, tool_name));
+        match result {
+            Ok(out) => {
+                success_count += 1;
+                let max_for_subcall = payload_budget_remaining / successful_remaining.max(1);
+                let rendered = crate::util::truncate_str(&out.output, max_for_subcall);
+                output.push_str(rendered);
+                payload_budget_remaining = payload_budget_remaining.saturating_sub(rendered.len());
+                successful_remaining = successful_remaining.saturating_sub(1);
+
+                if rendered.len() < out.output.len() {
+                    output.push_str(&format!(
+                        "\n... (truncated to the batch output budget; rerun subcall [{}] `{}` directly for full output)",
+                        i + 1,
+                        tool_name
+                    ));
+                }
+            }
+            Err(e) => {
+                error_count += 1;
+                failed_tools.push(tool_name.clone());
+                output.push_str(&format!("Error: {}", e));
+            }
+        }
+        output.push_str("\n\n");
+    }
+
+    output.push_str(&format!(
+        "Completed: {} succeeded, {} failed",
+        success_count, error_count
+    ));
+
+    (output, success_count, error_count, failed_tools)
 }
 
 pub struct BatchTool {
@@ -322,33 +375,7 @@ impl Tool for BatchTool {
         // Restore original order
         results.sort_by_key(|(i, _, _)| *i);
 
-        // Format results
-        let mut output = String::new();
-        let mut success_count = 0;
-        let mut error_count = 0;
-        let mut failed_tools = Vec::new();
-
-        for (i, tool_name, result) in results {
-            output.push_str(&format!("--- [{}] {} ---\n", i + 1, tool_name));
-            match result {
-                Ok(out) => {
-                    success_count += 1;
-                    let max_per_tool = 50_000 / num_tools.max(1);
-                    if out.output.len() > max_per_tool {
-                        output.push_str(crate::util::truncate_str(&out.output, max_per_tool));
-                        output.push_str("...\n(truncated)");
-                    } else {
-                        output.push_str(&out.output);
-                    }
-                }
-                Err(e) => {
-                    error_count += 1;
-                    failed_tools.push(tool_name.clone());
-                    output.push_str(&format!("Error: {}", e));
-                }
-            }
-            output.push_str("\n\n");
-        }
+        let (output, _success_count, error_count, failed_tools) = format_batch_results(results);
 
         if error_count > 0 {
             crate::logging::warn(&format!(
@@ -360,11 +387,6 @@ impl Tool for BatchTool {
                 failed_tools.join(", ")
             ));
         }
-
-        output.push_str(&format!(
-            "Completed: {} succeeded, {} failed",
-            success_count, error_count
-        ));
 
         Ok(ToolOutput::new(output))
     }
