@@ -3,8 +3,8 @@ use super::selection_highlight::highlight_line_selection;
 use super::tools_ui::{get_tool_activity_detail, summarize_batch_running_tools_compact};
 use super::visual_debug::{self, FrameCaptureBuilder};
 use super::{
-    ProcessingStatus, TuiState, accent_color, ai_color, asap_color, dim_color, pending_color,
-    queued_color, rainbow_prompt_color, user_color,
+    ProcessingStatus, TuiState, accent_color, ai_color, asap_color, border_color, dim_color,
+    pending_color, queued_color, rainbow_prompt_color, user_color,
 };
 use crate::message::ConnectionPhase;
 use crate::tui::app;
@@ -756,7 +756,7 @@ pub(super) fn draw_status(
     app: &dyn TuiState,
     area: Rect,
     pending_count: usize,
-    show_idle_separator: bool,
+    show_section_separator: bool,
 ) {
     let elapsed = app.elapsed().map(|d| d.as_secs_f32()).unwrap_or(0.0);
     let stale_secs = app.time_since_activity().map(|d| d.as_secs_f32());
@@ -1054,14 +1054,7 @@ pub(super) fn draw_status(
         }
     };
 
-    let line = if show_idle_separator && line.width() == 0 && area.width > 0 {
-        Line::from(Span::styled(
-            "─".repeat(area.width as usize),
-            Style::default().fg(rgb(58, 58, 68)),
-        ))
-    } else {
-        line
-    };
+    let line = status_line_with_separator(line, area.width, show_section_separator);
 
     crate::memory::check_staleness();
 
@@ -1070,6 +1063,38 @@ pub(super) fn draw_status(
         return;
     }
     frame.render_widget(Paragraph::new(line), area);
+}
+
+/// Use the status row itself as the lower section boundary. A non-empty status
+/// keeps its spinner at column zero for the one-cell fast repaint path, while a
+/// themed rule fills the unused suffix. Idle rows become a full-width rule.
+fn status_line_with_separator(
+    mut line: Line<'static>,
+    width: u16,
+    show_separator: bool,
+) -> Line<'static> {
+    if !show_separator || width == 0 {
+        return line;
+    }
+
+    let used = line.width();
+    if used == 0 {
+        return Line::from(Span::styled(
+            "─".repeat(width as usize),
+            Style::default().fg(border_color()),
+        ));
+    }
+
+    let available = width as usize;
+    if used + 1 >= available {
+        return line;
+    }
+    line.spans.push(Span::raw(" "));
+    line.spans.push(Span::styled(
+        "─".repeat(available - used - 1),
+        Style::default().fg(border_color()),
+    ));
+    line
 }
 
 fn running_tool_header_spans(
@@ -1146,6 +1171,37 @@ mod tests {
         assert_eq!(spans[2].content.as_ref(), " · cargo test");
         assert_eq!(spans[2].style.fg, Some(accent));
         assert!(spans[2].style.add_modifier.contains(Modifier::BOLD));
+    }
+
+    #[test]
+    fn status_separator_preserves_spinner_column_and_fills_suffix() {
+        let spinner = Color::Rgb(12, 34, 56);
+        let line = Line::from(vec![
+            Span::styled("⠋", Style::default().fg(spinner)),
+            Span::raw(" thinking…"),
+        ]);
+        let decorated = status_line_with_separator(line, 24, true);
+        let text = decorated
+            .spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect::<String>();
+
+        assert_eq!(decorated.spans[0].content.as_ref(), "⠋");
+        assert_eq!(decorated.spans[0].style.fg, Some(spinner));
+        assert_eq!(unicode_width::UnicodeWidthStr::width(text.as_str()), 24);
+        assert!(text.ends_with('─'));
+    }
+
+    #[test]
+    fn empty_status_becomes_full_width_section_rule() {
+        let decorated = status_line_with_separator(Line::from(""), 12, true);
+        let text = decorated
+            .spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect::<String>();
+        assert_eq!(text, "────────────");
     }
 
     #[test]

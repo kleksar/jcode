@@ -570,10 +570,10 @@ use status_support::{
 };
 use theme_support::{
     accent_color, activity_indicator, activity_indicator_frame_index, ai_color, ai_text,
-    asap_color, blend_color, dim_color, file_link_color, header_icon_color, header_name_color,
-    header_session_color, pending_color, prompt_entry_bg_color, prompt_entry_color,
-    prompt_entry_shimmer_color, queued_color, rainbow_prompt_color, system_message_color,
-    tool_color, user_bg, user_color, user_text,
+    asap_color, blend_color, border_color, dim_color, file_link_color, header_icon_color,
+    header_name_color, header_session_color, pending_color, prompt_entry_bg_color,
+    prompt_entry_color, prompt_entry_shimmer_color, queued_color, rainbow_prompt_color,
+    system_message_color, tool_color, user_bg, user_color, user_text,
 };
 
 pub(crate) use jcode_tui_markdown::{CopyTargetKind, RawCopyTarget};
@@ -3525,13 +3525,7 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
     if let Some(ref mut capture) = debug_capture {
         capture.render_order.push("draw_status".to_string());
     }
-    input_ui::draw_status(
-        frame,
-        app,
-        chunks[3],
-        pending_count,
-        session_footer_height > 0,
-    );
+    input_ui::draw_status(frame, app, chunks[3], pending_count, true);
     if notification_height > 0 {
         input_ui::draw_notification(frame, app, chunks[4]);
     }

@@ -51,6 +51,53 @@ fn chat_swarm_member(session_id: &str) -> crate::protocol::SwarmMemberStatus {
     }
 }
 
+#[test]
+fn user_prompt_and_response_are_separated_by_a_themed_rule() {
+    let state = TestState {
+        display_messages: vec![
+            DisplayMessage {
+                role: "user".to_string(),
+                content: "Please inspect this".to_string(),
+                tool_calls: Vec::new(),
+                duration_secs: None,
+                title: None,
+                tool_data: None,
+            },
+            DisplayMessage {
+                role: "assistant".to_string(),
+                content: "Inspecting now".to_string(),
+                tool_calls: Vec::new(),
+                duration_secs: None,
+                title: None,
+                tool_data: None,
+            },
+        ],
+        ..Default::default()
+    };
+
+    let prepared = prepare::prepare_body(&state, 48, false);
+    let rendered = prepared
+        .wrapped_lines
+        .iter()
+        .map(extract_line_text)
+        .collect::<Vec<_>>();
+    let prompt = rendered
+        .iter()
+        .position(|line| line.contains("Please inspect this"))
+        .expect("user prompt row");
+    let response = rendered
+        .iter()
+        .position(|line| line.contains("Inspecting now"))
+        .expect("assistant response row");
+
+    assert_eq!(response, prompt + 2, "unexpected rows: {rendered:?}");
+    assert!(
+        rendered[prompt + 1].chars().all(|ch| ch == '─'),
+        "missing turn divider: {rendered:?}"
+    );
+    assert_eq!(rendered[prompt + 1].chars().count(), 47);
+}
+
 fn nested_chat_swarm_member(
     session_id: &str,
     parent_id: &str,

@@ -1293,6 +1293,23 @@ pub(super) fn draw_messages(
                 };
                 clear_area(frame, preview_area);
                 frame.render_widget(Paragraph::new(preview_lines), preview_area);
+
+                let divider_area = Rect {
+                    x: preview_area.x,
+                    y: preview_area.y.saturating_add(line_count),
+                    width: preview_area.width,
+                    height: 1,
+                };
+                if divider_area.width > 0 {
+                    clear_area(frame, divider_area);
+                    frame.render_widget(
+                        Paragraph::new(Span::styled(
+                            "─".repeat(divider_area.width as usize),
+                            Style::default().fg(border_color()),
+                        )),
+                        divider_area,
+                    );
+                }
             }
         }
     }
@@ -1536,7 +1553,9 @@ fn compute_prompt_preview_line_count(
     let content_width = area_width.saturating_sub(prefix_len as u16 + 2) as usize;
     let text_flat = prompt_text.replace('\n', " ");
     let display_width = UnicodeWidthStr::width(text_flat.as_str());
-    if display_width > content_width { 2 } else { 1 }
+    // Reserve one extra row for the themed boundary between the sticky prompt
+    // preview and the pinned/live action stream beneath it.
+    if display_width > content_width { 3 } else { 2 }
 }
 
 fn compute_max_scroll_with_prompt_preview(
