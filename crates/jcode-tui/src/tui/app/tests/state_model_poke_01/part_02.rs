@@ -183,7 +183,9 @@ fn test_pinned_content_uses_left_splitter_instead_of_rounded_box() {
                 "file_path": "src/demo.rs",
                 "content": "fn demo() {}\n"
             }),
-            intent: None, thought_signature: None, }),
+            intent: None,
+            thought_signature: None,
+        }),
     }];
     app.bump_display_messages_version();
 
@@ -226,7 +228,9 @@ fn test_file_diff_uses_left_splitter_instead_of_rounded_box() {
                 "file_path": file_path.display().to_string(),
                 "content": "fn demo() {\n    println!(\"hi\");\n}\n"
             }),
-            intent: None, thought_signature: None, }),
+            intent: None,
+            thought_signature: None,
+        }),
     }];
     app.bump_display_messages_version();
 
@@ -261,13 +265,12 @@ fn init_worktree_pane_test_repo() -> tempfile::TempDir {
     git(&["add", "demo.rs"]);
     git(&["commit", "-qm", "baseline"]);
     std::fs::write(repo.path().join("demo.rs"), "fn new() {}\n").expect("write edit");
-    std::fs::write(repo.path().join("notes.txt"), "first\nsecond\n")
-        .expect("write untracked file");
+    std::fs::write(repo.path().join("notes.txt"), "first\nsecond\n").expect("write untracked file");
     repo
 }
 
 #[test]
-fn test_wide_dirty_worktree_renders_automatic_changes_pane() {
+fn test_wide_dirty_worktree_renders_changes_when_diff_tab_is_selected() {
     let _lock = scroll_render_test_lock();
     let repo = init_worktree_pane_test_repo();
     crate::tui::ui::prime_worktree_changes_for_tests(repo.path());
@@ -275,6 +278,7 @@ fn test_wide_dirty_worktree_renders_automatic_changes_pane() {
     let mut app = create_test_app();
     app.session.working_dir = Some(repo.path().to_string_lossy().into_owned());
     app.diff_mode = crate::config::DiffDisplayMode::Inline;
+    app.set_worktree_pane_tab(super::worktree_pane::WorktreePaneTab::Diff);
 
     let backend = ratatui::backend::TestBackend::new(140, 24);
     let mut terminal = ratatui::Terminal::new(backend).expect("test terminal");
@@ -283,8 +287,14 @@ fn test_wide_dirty_worktree_renders_automatic_changes_pane() {
     let pane = layout.diff_pane_area.expect("automatic worktree pane");
 
     assert!(pane.width >= 42, "pane should remain readable: {pane:?}");
-    assert!(layout.messages_area.width >= 56, "chat should remain usable: {layout:?}");
-    assert!(text.contains("changes 2 files +3 -1"), "rendered text: {text}");
+    assert!(
+        layout.messages_area.width >= 56,
+        "chat should remain usable: {layout:?}"
+    );
+    assert!(
+        text.contains("changes 2 files +3 -1"),
+        "rendered text: {text}"
+    );
     assert!(text.contains("demo.rs"), "rendered text: {text}");
     assert!(text.contains("notes.txt"), "rendered text: {text}");
     assert!(text.contains("fn new() {}"), "rendered text: {text}");
@@ -314,7 +324,7 @@ fn test_automatic_worktree_pane_hides_in_narrow_terminal() {
 }
 
 #[test]
-fn test_automatic_worktree_pane_hides_for_clean_repo() {
+fn test_default_files_pane_remains_visible_for_clean_repo() {
     let _lock = scroll_render_test_lock();
     let repo = tempfile::tempdir().expect("temp repo");
     let status = std::process::Command::new("git")
@@ -324,6 +334,7 @@ fn test_automatic_worktree_pane_hides_for_clean_repo() {
         .expect("git init");
     assert!(status.success());
     crate::tui::ui::prime_worktree_changes_for_tests(repo.path());
+    crate::tui::ui::prime_project_tree_for_tests(repo.path());
 
     let mut app = create_test_app();
     app.session.working_dir = Some(repo.path().to_string_lossy().into_owned());
@@ -333,7 +344,13 @@ fn test_automatic_worktree_pane_hides_for_clean_repo() {
     let text = render_and_snap(&app, &mut terminal);
     let layout = crate::tui::ui::last_layout_snapshot().expect("layout snapshot");
 
-    assert!(layout.diff_pane_area.is_none(), "clean layout: {layout:?}");
+    assert!(layout.diff_pane_area.is_some(), "clean layout: {layout:?}");
+    assert!(
+        crate::tui::ui::worktree_pane_layout()
+            .expect("default files pane")
+            .files_tab_active,
+        "Files should remain active in a clean repo: {text}"
+    );
     assert!(!text.contains(" changes "), "rendered text: {text}");
 }
 
@@ -362,6 +379,9 @@ fn test_explicit_side_panel_takes_precedence_over_worktree_changes() {
     let mut terminal = ratatui::Terminal::new(backend).expect("test terminal");
     let text = render_and_snap(&app, &mut terminal);
 
-    assert!(text.contains("explicit-panel-content"), "rendered text: {text}");
+    assert!(
+        text.contains("explicit-panel-content"),
+        "rendered text: {text}"
+    );
     assert!(!text.contains("changes 2 files"), "rendered text: {text}");
 }

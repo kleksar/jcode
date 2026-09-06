@@ -4,12 +4,11 @@ const FILTER_IDLE_TIMEOUT: Duration = Duration::from_secs(60);
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(super) enum WorktreePaneTab {
-    #[default]
     Diff,
+    #[default]
     Files,
 }
 
-#[derive(Default)]
 pub(super) struct WorktreePaneState {
     pub(super) selected_file: Option<String>,
     pub(super) list_scroll: usize,
@@ -23,6 +22,25 @@ pub(super) struct WorktreePaneState {
     pub(super) tree_preview_focused: bool,
     session_id: String,
     working_dir: Option<String>,
+}
+
+impl Default for WorktreePaneState {
+    fn default() -> Self {
+        Self {
+            selected_file: None,
+            list_scroll: 0,
+            last_activity: None,
+            explicit_open: true,
+            tab: WorktreePaneTab::Files,
+            tree_selected_path: None,
+            tree_scroll: 0,
+            tree_expanded_dirs: std::collections::HashSet::new(),
+            tree_preview_scroll: 0,
+            tree_preview_focused: false,
+            session_id: String::new(),
+            working_dir: None,
+        }
+    }
 }
 
 impl App {
@@ -39,11 +57,7 @@ impl App {
 
     fn prepare_worktree_pane_state(&mut self) {
         if !self.worktree_pane_matches_session() {
-            let explicit_open = self.worktree_pane.explicit_open;
-            let tab = self.worktree_pane.tab;
             self.worktree_pane = WorktreePaneState {
-                explicit_open,
-                tab,
                 session_id: self.session.id.clone(),
                 working_dir: self.session.working_dir.clone(),
                 ..Default::default()
@@ -52,11 +66,11 @@ impl App {
     }
 
     pub(super) fn worktree_files_tab_active(&self) -> bool {
-        self.worktree_pane_matches_session() && self.worktree_pane.tab == WorktreePaneTab::Files
+        !self.worktree_pane_matches_session() || self.worktree_pane.tab == WorktreePaneTab::Files
     }
 
     pub(super) fn worktree_pane_explicit_open(&self) -> bool {
-        self.worktree_pane_matches_session() && self.worktree_pane.explicit_open
+        !self.worktree_pane_matches_session() || self.worktree_pane.explicit_open
     }
 
     pub(super) fn set_worktree_pane_tab(&mut self, tab: WorktreePaneTab) {
