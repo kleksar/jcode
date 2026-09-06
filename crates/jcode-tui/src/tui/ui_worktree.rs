@@ -412,6 +412,7 @@ fn git_project_paths(root: &Path) -> Option<(Vec<String>, bool)> {
             ".",
         ])
         .stdout(Stdio::piped())
+        .stderr(Stdio::null())
         .spawn()
         .ok()?;
     let stdout = child.stdout.take()?;
@@ -602,10 +603,19 @@ fn collect_filesystem_paths(root: &Path, relative: &Path, paths: &mut Vec<String
 }
 
 fn collect_project_tree(working_dir: &Path) -> Option<ProjectTreeSnapshot> {
-    let root = working_dir.canonicalize().ok()?;
-    if !root.is_dir() {
+    let session_root = working_dir.canonicalize().ok()?;
+    if !session_root.is_dir() {
         return None;
     }
+    let root = command_output(&session_root, &["rev-parse", "--show-toplevel"])
+        .and_then(|output| {
+            let path = PathBuf::from(String::from_utf8_lossy(&output).trim());
+            (!path.as_os_str().is_empty())
+                .then(|| path.canonicalize().ok())
+                .flatten()
+        })
+        .filter(|path| path.is_dir())
+        .unwrap_or(session_root);
     let (mut paths, git_truncated) = git_project_paths(&root).unwrap_or_else(|| {
         let mut paths = Vec::new();
         collect_filesystem_paths(&root, Path::new(""), &mut paths, 0);
@@ -1849,7 +1859,7 @@ mod tests {
     }
 
     #[test]
-    fn project_tree_is_rooted_at_session_working_directory() {
+    fn project_tree_uses_git_root_when_session_starts_in_subdirectory() {
         let dir = tempfile::tempdir().unwrap();
         Command::new("git")
             .current_dir(dir.path())
@@ -1866,9 +1876,73 @@ mod tests {
             .unwrap();
 
         let snapshot = collect_project_tree(&dir.path().join("project")).expect("project tree");
+        assert_eq!(snapshot.root, dir.path().canonicalize().unwrap());
+        assert!(snapshot.nodes.iter().any(|node| node.path == "project"));
+        assert!(snapshot.nodes.iter().any(|node| node.path == "outside.rs"));
+    }
+
+    #[test]
+    fn project_tree_uses_session_pwd_outside_git() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("project/src")).unwrap();
+        std::fs::write(dir.path().join("outside.rs"), "fn outside() {}\n").unwrap();
+        std::fs::write(dir.path().join("project/src/lib.rs"), "fn inside() {}\n").unwrap();
+
+        let pwd = dir.path().join("project");
+        let snapshot = collect_project_tree(&pwd).expect("project tree");
+        assert_eq!(snapshot.root, pwd.canonicalize().unwrap());
         assert_eq!(snapshot.root_label, "project");
         assert!(snapshot.nodes.iter().any(|node| node.path == "src"));
         assert!(!snapshot.nodes.iter().any(|node| node.path == "outside.rs"));
+    }
+
+    #[test]
+    fn project_tree_uses_linked_worktree_root() {
+        let dir = tempfile::tempdir().unwrap();
+        let main = dir.path().join("main");
+        let linked = dir.path().join("linked");
+        std::fs::create_dir(&main).unwrap();
+        let git = |cwd: &Path, args: &[&str]| {
+            assert!(
+                Command::new("git")
+                    .current_dir(cwd)
+                    .args(args)
+                    .status()
+                    .unwrap()
+                    .success()
+            );
+        };
+        git(&main, &["init", "-q"]);
+        std::fs::write(main.join("tracked.rs"), "fn tracked() {}\n").unwrap();
+        git(&main, &["add", "."]);
+        git(
+            &main,
+            &[
+                "-c",
+                "user.name=Jcode Test",
+                "-c",
+                "user.email=jcode@example.invalid",
+                "commit",
+                "-qm",
+                "fixture",
+            ],
+        );
+        git(
+            &main,
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "--detach",
+                linked.to_str().unwrap(),
+            ],
+        );
+        std::fs::create_dir(linked.join("nested")).unwrap();
+
+        let snapshot = collect_project_tree(&linked.join("nested")).expect("worktree tree");
+        assert_eq!(snapshot.root, linked.canonicalize().unwrap());
+        assert_eq!(snapshot.root_label, "linked");
+        assert!(snapshot.nodes.iter().any(|node| node.path == "tracked.rs"));
     }
 
     #[test]

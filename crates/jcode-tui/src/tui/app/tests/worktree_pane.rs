@@ -17,6 +17,7 @@ fn worktree_filter_fixture() -> (
     let mut app = create_test_app();
     app.session.working_dir = Some(repo.path().to_string_lossy().into_owned());
     app.diff_mode = crate::config::DiffDisplayMode::Inline;
+    app.set_worktree_pane_tab(super::worktree_pane::WorktreePaneTab::Diff);
     let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(140, 30)).unwrap();
     render_and_snap(&app, &mut terminal);
     let list = crate::tui::ui::worktree_pane_layout().unwrap().list_area;
@@ -38,6 +39,7 @@ fn test_worktree_header_has_padded_heavy_boundary() {
     let mut app = create_test_app();
     app.session.working_dir = Some(repo.path().to_string_lossy().into_owned());
     app.diff_mode = crate::config::DiffDisplayMode::Inline;
+    app.set_worktree_pane_tab(super::worktree_pane::WorktreePaneTab::Diff);
     let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(140, 30)).unwrap();
 
     render_and_snap(&app, &mut terminal);
@@ -79,12 +81,41 @@ fn test_files_command_opens_project_tree_with_inline_preview() {
     let text = render_and_snap(&app, &mut terminal);
     let layout = crate::tui::ui::worktree_pane_layout().expect("files pane layout");
 
-    assert!(layout.files_tab_active, "Files tab should be active: {text}");
-    assert!(text.contains("Diff") && text.contains("Files"), "tab header: {text}");
+    assert!(
+        layout.files_tab_active,
+        "Files tab should be active: {text}"
+    );
+    assert!(
+        text.contains("Diff") && text.contains("Files"),
+        "tab header: {text}"
+    );
     assert!(text.contains("demo.rs"), "project tree: {text}");
-    assert!(text.contains("fn new() {}"), "selected file preview: {text}");
+    assert!(
+        text.contains("fn new() {}"),
+        "selected file preview: {text}"
+    );
     assert!(layout.tree_area.is_some());
     assert!(layout.preview_area.is_some());
+}
+
+#[test]
+fn test_files_pane_is_visible_and_active_by_default() {
+    let _lock = scroll_render_test_lock();
+    let repo = init_worktree_pane_test_repo();
+    crate::tui::ui::prime_project_tree_for_tests(repo.path());
+    let mut app = create_test_app();
+    app.session.working_dir = Some(repo.path().to_string_lossy().into_owned());
+    app.diff_mode = crate::config::DiffDisplayMode::Inline;
+    let backend = ratatui::backend::TestBackend::new(140, 30);
+    let mut terminal = ratatui::Terminal::new(backend).expect("test terminal");
+
+    let text = render_and_snap(&app, &mut terminal);
+    let layout = crate::tui::ui::worktree_pane_layout().expect("default files pane");
+    assert!(
+        layout.files_tab_active,
+        "Files should be the default tab: {text}"
+    );
+    assert!(text.contains("demo.rs"), "default project tree: {text}");
 }
 
 #[test]
@@ -105,7 +136,10 @@ fn test_files_tree_expands_and_tab_returns_to_diff() {
     let mut terminal = ratatui::Terminal::new(backend).expect("test terminal");
     let collapsed = render_and_snap(&app, &mut terminal);
     assert!(collapsed.contains("▸ src"), "collapsed tree: {collapsed}");
-    assert!(!collapsed.contains("lib.rs"), "children start hidden: {collapsed}");
+    assert!(
+        !collapsed.contains("lib.rs"),
+        "children start hidden: {collapsed}"
+    );
 
     assert!(app.handle_diff_pane_focus_key(KeyCode::Right, KeyModifiers::NONE));
     let expanded = render_and_snap(&app, &mut terminal);
@@ -115,8 +149,14 @@ fn test_files_tree_expands_and_tab_returns_to_diff() {
     assert!(app.handle_diff_pane_focus_key(KeyCode::Tab, KeyModifiers::NONE));
     let diff = render_and_snap(&app, &mut terminal);
     let layout = crate::tui::ui::worktree_pane_layout().expect("diff pane layout");
-    assert!(!layout.files_tab_active, "Tab should switch to Diff: {diff}");
-    assert!(diff.contains("changes"), "dirty diff should render after switch: {diff}");
+    assert!(
+        !layout.files_tab_active,
+        "Tab should switch to Diff: {diff}"
+    );
+    assert!(
+        diff.contains("changes"),
+        "dirty diff should render after switch: {diff}"
+    );
 }
 
 #[test]
@@ -148,9 +188,11 @@ fn test_files_header_tabs_switch_with_mouse() {
         files_layout.diff_tab_area.y,
     )));
     render_and_snap(&app, &mut terminal);
-    assert!(!crate::tui::ui::worktree_pane_layout()
-        .expect("diff pane")
-        .files_tab_active);
+    assert!(
+        !crate::tui::ui::worktree_pane_layout()
+            .expect("diff pane")
+            .files_tab_active
+    );
 }
 
 #[test]
@@ -180,11 +222,16 @@ fn test_files_pane_opens_and_closes_in_clean_repo() {
     assert!(super::commands::handle_files_command(&mut app, "/files"));
     let open = render_and_snap(&app, &mut terminal);
     assert!(open.contains("Files"), "clean project explorer: {open}");
-    assert!(crate::tui::ui::worktree_pane_layout()
-        .expect("files pane")
-        .files_tab_active);
+    assert!(
+        crate::tui::ui::worktree_pane_layout()
+            .expect("files pane")
+            .files_tab_active
+    );
 
-    assert!(super::commands::handle_files_command(&mut app, "/files off"));
+    assert!(super::commands::handle_files_command(
+        &mut app,
+        "/files off"
+    ));
     assert!(!app.diff_pane_focus, "closing Files returns focus to chat");
     render_and_snap(&app, &mut terminal);
     assert!(
@@ -220,7 +267,10 @@ fn test_files_preview_has_independent_keyboard_scroll() {
     }
     render_and_snap(&app, &mut terminal);
     let layout = crate::tui::ui::worktree_pane_layout().expect("files pane");
-    assert!(layout.preview_scroll > 0, "preview should scroll independently");
+    assert!(
+        layout.preview_scroll > 0,
+        "preview should scroll independently"
+    );
     assert_eq!(app.worktree_pane.tree_scroll, 0, "tree remains anchored");
 }
 
@@ -412,6 +462,7 @@ fn test_worktree_file_list_stays_fixed_when_diff_scrolls() {
     let mut app = create_test_app();
     app.session.working_dir = Some(repo.path().to_string_lossy().into_owned());
     app.diff_mode = crate::config::DiffDisplayMode::Inline;
+    app.set_worktree_pane_tab(super::worktree_pane::WorktreePaneTab::Diff);
     let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(140, 24)).unwrap();
     render_and_snap(&app, &mut terminal);
     let pane = crate::tui::ui::last_layout_snapshot()
@@ -601,6 +652,7 @@ fn test_worktree_file_click_filters_and_second_click_shows_all() {
     let mut app = create_test_app();
     app.session.working_dir = Some(repo.path().to_string_lossy().into_owned());
     app.diff_mode = crate::config::DiffDisplayMode::Inline;
+    app.set_worktree_pane_tab(super::worktree_pane::WorktreePaneTab::Diff);
     let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(140, 30)).unwrap();
     let all = render_and_snap(&app, &mut terminal);
     assert!(all.contains("fn new() {}") && all.contains("second"));
