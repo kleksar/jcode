@@ -1861,6 +1861,53 @@ impl crate::tui::TuiState for App {
             0
         }
     }
+    fn worktree_pane_explicit_open(&self) -> bool {
+        self.worktree_pane_explicit_open()
+    }
+    fn worktree_files_tab_active(&self) -> bool {
+        self.worktree_files_tab_active()
+    }
+    fn project_tree_selected_path(&self) -> Option<&str> {
+        self.worktree_pane_matches_session()
+            .then_some(self.worktree_pane.tree_selected_path.as_deref())
+            .flatten()
+    }
+    fn project_tree_scroll(&self) -> usize {
+        if self.worktree_pane_matches_session() {
+            self.worktree_pane.tree_scroll
+        } else {
+            0
+        }
+    }
+    fn project_tree_dir_expanded(&self, path: &str) -> bool {
+        self.worktree_pane_matches_session() && self.worktree_pane.tree_expanded_dirs.contains(path)
+    }
+    fn project_tree_expansion_hash(&self) -> u64 {
+        use std::hash::{Hash, Hasher};
+
+        if !self.worktree_pane_matches_session() {
+            return 0;
+        }
+        let mut paths = self
+            .worktree_pane
+            .tree_expanded_dirs
+            .iter()
+            .collect::<Vec<_>>();
+        paths.sort();
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        paths.hash(&mut hasher);
+        hasher.finish()
+    }
+    fn project_tree_preview_scroll(&self) -> usize {
+        if self.worktree_pane_matches_session() {
+            self.worktree_pane.tree_preview_scroll
+        } else {
+            0
+        }
+    }
+    fn project_tree_preview_focused(&self) -> bool {
+        self.worktree_pane_matches_session() && self.worktree_pane.tree_preview_focused
+    }
     fn side_panel_image_zoom_percent(&self) -> u8 {
         self.side_panel_image_zoom_percent
     }

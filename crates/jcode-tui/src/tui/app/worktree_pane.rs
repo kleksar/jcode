@@ -2,11 +2,25 @@ use super::*;
 
 const FILTER_IDLE_TIMEOUT: Duration = Duration::from_secs(60);
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(super) enum WorktreePaneTab {
+    #[default]
+    Diff,
+    Files,
+}
+
 #[derive(Default)]
 pub(super) struct WorktreePaneState {
     pub(super) selected_file: Option<String>,
     pub(super) list_scroll: usize,
     pub(super) last_activity: Option<Instant>,
+    pub(super) explicit_open: bool,
+    pub(super) tab: WorktreePaneTab,
+    pub(super) tree_selected_path: Option<String>,
+    pub(super) tree_scroll: usize,
+    pub(super) tree_expanded_dirs: std::collections::HashSet<String>,
+    pub(super) tree_preview_scroll: usize,
+    pub(super) tree_preview_focused: bool,
     session_id: String,
     working_dir: Option<String>,
 }
@@ -25,12 +39,211 @@ impl App {
 
     fn prepare_worktree_pane_state(&mut self) {
         if !self.worktree_pane_matches_session() {
+            let explicit_open = self.worktree_pane.explicit_open;
+            let tab = self.worktree_pane.tab;
             self.worktree_pane = WorktreePaneState {
+                explicit_open,
+                tab,
                 session_id: self.session.id.clone(),
                 working_dir: self.session.working_dir.clone(),
                 ..Default::default()
             };
         }
+    }
+
+    pub(super) fn worktree_files_tab_active(&self) -> bool {
+        self.worktree_pane_matches_session() && self.worktree_pane.tab == WorktreePaneTab::Files
+    }
+
+    pub(super) fn worktree_pane_explicit_open(&self) -> bool {
+        self.worktree_pane_matches_session() && self.worktree_pane.explicit_open
+    }
+
+    pub(super) fn set_worktree_pane_tab(&mut self, tab: WorktreePaneTab) {
+        self.prepare_worktree_pane_state();
+        self.worktree_pane.explicit_open = true;
+        if self.worktree_pane.tab == tab {
+            return;
+        }
+        self.worktree_pane.tab = tab;
+        self.worktree_pane.tree_preview_focused = false;
+        self.reset_worktree_diff_scroll();
+        self.set_status_notice(match tab {
+            WorktreePaneTab::Diff => "Right pane: Diff (Tab switches to Files)",
+            WorktreePaneTab::Files => {
+                "Right pane: Files (arrows navigate, Enter expands/previews, Tab switches)"
+            }
+        });
+    }
+
+    pub(super) fn open_project_files_pane(&mut self) {
+        self.set_worktree_pane_tab(WorktreePaneTab::Files);
+        self.set_diff_pane_focus(true);
+    }
+
+    pub(super) fn close_project_files_pane(&mut self) {
+        self.prepare_worktree_pane_state();
+        self.worktree_pane.explicit_open = false;
+        self.worktree_pane.tree_preview_focused = false;
+        self.set_diff_pane_focus(false);
+        self.set_status_notice("Project files pane hidden");
+    }
+
+    fn select_project_tree_index(
+        &mut self,
+        layout: &crate::tui::ui::WorktreePaneLayout,
+        index: usize,
+    ) {
+        let Some(row) = layout.tree_rows.get(index) else {
+            return;
+        };
+        self.prepare_worktree_pane_state();
+        if self.worktree_pane.tree_selected_path.as_deref() != Some(&row.path) {
+            self.worktree_pane.tree_preview_scroll = 0;
+            self.worktree_pane.tree_preview_focused = false;
+        }
+        self.worktree_pane.tree_selected_path = Some(row.path.clone());
+        let height = layout
+            .tree_area
+            .map(|area| area.height as usize)
+            .unwrap_or(1)
+            .max(1);
+        let max_scroll = layout.tree_rows.len().saturating_sub(height);
+        let mut scroll = layout.tree_scroll.min(max_scroll);
+        if index < scroll {
+            scroll = index;
+        } else if index >= scroll.saturating_add(height) {
+            scroll = index
+                .saturating_add(1)
+                .saturating_sub(height)
+                .min(max_scroll);
+        }
+        self.worktree_pane.tree_scroll = scroll;
+    }
+
+    fn toggle_project_tree_dir(&mut self, path: &str, expanded: bool) {
+        self.prepare_worktree_pane_state();
+        if expanded {
+            self.worktree_pane.tree_expanded_dirs.remove(path);
+        } else {
+            self.worktree_pane
+                .tree_expanded_dirs
+                .insert(path.to_string());
+        }
+    }
+
+    fn scroll_project_preview(
+        &mut self,
+        layout: &crate::tui::ui::WorktreePaneLayout,
+        delta: isize,
+    ) {
+        self.prepare_worktree_pane_state();
+        let height = layout
+            .preview_area
+            .map(|area| area.height as usize)
+            .unwrap_or(0);
+        let max_scroll = layout.preview_total_lines.saturating_sub(height);
+        let current = layout.preview_scroll.min(max_scroll);
+        self.worktree_pane.tree_preview_scroll = if delta < 0 {
+            current.saturating_sub(delta.unsigned_abs())
+        } else {
+            current.saturating_add(delta as usize).min(max_scroll)
+        };
+    }
+
+    pub(super) fn handle_project_files_focus_key(&mut self, code: KeyCode) -> bool {
+        let Some(layout) = crate::tui::ui::worktree_pane_layout() else {
+            return false;
+        };
+        if !layout.files_tab_active {
+            return false;
+        }
+        self.prepare_worktree_pane_state();
+        if self.worktree_pane.tree_preview_focused {
+            let page = layout
+                .preview_area
+                .map(|area| area.height.saturating_sub(1) as isize)
+                .unwrap_or(1)
+                .max(1);
+            match code {
+                KeyCode::Char('j') | KeyCode::Down => self.scroll_project_preview(&layout, 1),
+                KeyCode::Char('k') | KeyCode::Up => self.scroll_project_preview(&layout, -1),
+                KeyCode::Char('d') | KeyCode::PageDown => {
+                    self.scroll_project_preview(&layout, page)
+                }
+                KeyCode::Char('u') | KeyCode::PageUp => self.scroll_project_preview(&layout, -page),
+                KeyCode::Char('g') | KeyCode::Home => self.worktree_pane.tree_preview_scroll = 0,
+                KeyCode::Char('G') | KeyCode::End => {
+                    self.worktree_pane.tree_preview_scroll = usize::MAX
+                }
+                KeyCode::Char('h') | KeyCode::Left | KeyCode::Esc => {
+                    self.worktree_pane.tree_preview_focused = false;
+                    self.set_status_notice("Files: tree focus");
+                }
+                _ => {}
+            }
+            return true;
+        }
+
+        if layout.tree_rows.is_empty() {
+            if code == KeyCode::Esc {
+                self.set_diff_pane_focus(false);
+            }
+            return true;
+        }
+        let current = self
+            .worktree_pane
+            .tree_selected_path
+            .as_deref()
+            .and_then(|path| layout.tree_rows.iter().position(|row| row.path == path))
+            .unwrap_or(0);
+        let page = layout
+            .tree_area
+            .map(|area| area.height.saturating_sub(1) as usize)
+            .unwrap_or(1)
+            .max(1);
+        let target = match code {
+            KeyCode::Char('j') | KeyCode::Down => {
+                Some((current + 1).min(layout.tree_rows.len() - 1))
+            }
+            KeyCode::Char('k') | KeyCode::Up => Some(current.saturating_sub(1)),
+            KeyCode::Char('d') | KeyCode::PageDown => {
+                Some(current.saturating_add(page).min(layout.tree_rows.len() - 1))
+            }
+            KeyCode::Char('u') | KeyCode::PageUp => Some(current.saturating_sub(page)),
+            KeyCode::Char('g') | KeyCode::Home => Some(0),
+            KeyCode::Char('G') | KeyCode::End => Some(layout.tree_rows.len() - 1),
+            _ => None,
+        };
+        if let Some(index) = target {
+            self.select_project_tree_index(&layout, index);
+            return true;
+        }
+
+        let row = layout.tree_rows[current].clone();
+        match code {
+            KeyCode::Enter | KeyCode::Char(' ') | KeyCode::Char('l') | KeyCode::Right => {
+                if row.is_dir {
+                    self.toggle_project_tree_dir(&row.path, row.expanded);
+                } else if layout.preview_area.is_some() {
+                    self.worktree_pane.tree_preview_focused = true;
+                    self.set_status_notice("Files: preview focus (j/k scroll, Left returns)");
+                }
+            }
+            KeyCode::Char('h') | KeyCode::Left => {
+                if row.is_dir && row.expanded {
+                    self.toggle_project_tree_dir(&row.path, true);
+                } else if let Some((parent, _)) = row.path.rsplit_once('/')
+                    && let Some(index) =
+                        layout.tree_rows.iter().position(|item| item.path == parent)
+                {
+                    self.select_project_tree_index(&layout, index);
+                }
+            }
+            KeyCode::Esc => self.set_diff_pane_focus(false),
+            _ => {}
+        }
+        true
     }
 
     pub(super) fn note_worktree_pane_activity(&mut self) {
@@ -94,6 +307,87 @@ impl App {
             return false;
         }
         self.note_worktree_pane_activity();
+        if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) {
+            if crate::tui::layout_utils::point_in_rect(
+                mouse.column,
+                mouse.row,
+                layout.diff_tab_area,
+            ) {
+                self.set_worktree_pane_tab(WorktreePaneTab::Diff);
+                self.set_diff_pane_focus(true);
+                return true;
+            }
+            if crate::tui::layout_utils::point_in_rect(
+                mouse.column,
+                mouse.row,
+                layout.files_tab_area,
+            ) {
+                self.set_worktree_pane_tab(WorktreePaneTab::Files);
+                self.set_diff_pane_focus(true);
+                return true;
+            }
+        }
+        if layout.files_tab_active {
+            if let Some(tree_area) = layout.tree_area
+                && crate::tui::layout_utils::point_in_rect(mouse.column, mouse.row, tree_area)
+            {
+                match mouse.kind {
+                    MouseEventKind::Down(MouseButton::Left) => {
+                        let index = layout.tree_scroll + (mouse.row - tree_area.y) as usize;
+                        if let Some(row) = layout.tree_rows.get(index).cloned() {
+                            self.select_project_tree_index(&layout, index);
+                            if row.is_dir {
+                                self.toggle_project_tree_dir(&row.path, row.expanded);
+                            }
+                            self.set_diff_pane_focus(true);
+                        }
+                    }
+                    MouseEventKind::ScrollUp => {
+                        let current = self
+                            .worktree_pane
+                            .tree_selected_path
+                            .as_deref()
+                            .and_then(|path| {
+                                layout.tree_rows.iter().position(|row| row.path == path)
+                            })
+                            .unwrap_or(layout.tree_scroll);
+                        self.select_project_tree_index(&layout, current.saturating_sub(3));
+                    }
+                    MouseEventKind::ScrollDown => {
+                        let current = self
+                            .worktree_pane
+                            .tree_selected_path
+                            .as_deref()
+                            .and_then(|path| {
+                                layout.tree_rows.iter().position(|row| row.path == path)
+                            })
+                            .unwrap_or(layout.tree_scroll);
+                        let target = current
+                            .saturating_add(3)
+                            .min(layout.tree_rows.len().saturating_sub(1));
+                        self.select_project_tree_index(&layout, target);
+                    }
+                    _ => {}
+                }
+                return true;
+            }
+            if let Some(preview_area) = layout.preview_area
+                && crate::tui::layout_utils::point_in_rect(mouse.column, mouse.row, preview_area)
+            {
+                match mouse.kind {
+                    MouseEventKind::Down(MouseButton::Left) => {
+                        self.prepare_worktree_pane_state();
+                        self.worktree_pane.tree_preview_focused = true;
+                        self.set_diff_pane_focus(true);
+                    }
+                    MouseEventKind::ScrollUp => self.scroll_project_preview(&layout, -3),
+                    MouseEventKind::ScrollDown => self.scroll_project_preview(&layout, 3),
+                    _ => {}
+                }
+                return true;
+            }
+            return true;
+        }
         if !crate::tui::layout_utils::point_in_rect(mouse.column, mouse.row, layout.list_area) {
             return false;
         }
