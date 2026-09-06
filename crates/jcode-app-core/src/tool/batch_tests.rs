@@ -1,12 +1,188 @@
 use super::*;
 use serde_json::json;
 
+struct EchoPayloadTool;
+
+#[async_trait]
+impl Tool for EchoPayloadTool {
+    fn name(&self) -> &str {
+        "echo_payload"
+    }
+
+    fn description(&self) -> &str {
+        "Returns the requested test payload."
+    }
+
+    fn parameters_schema(&self) -> Value {
+        json!({
+            "type": "object",
+            "properties": { "payload": { "type": "string" } },
+            "required": ["payload"]
+        })
+    }
+
+    async fn execute(&self, input: Value, _ctx: ToolContext) -> Result<ToolOutput> {
+        Ok(ToolOutput::new(
+            input["payload"].as_str().unwrap_or_default().to_string(),
+        ))
+    }
+}
+
+fn test_context() -> ToolContext {
+    ToolContext {
+        session_id: "batch-acceptance-test".to_string(),
+        message_id: "test-message".to_string(),
+        tool_call_id: "test-batch".to_string(),
+        working_dir: Some(std::env::temp_dir()),
+        stdin_request_tx: None,
+        graceful_shutdown_signal: None,
+        execution_mode: jcode_tool_core::ToolExecutionMode::Direct,
+    }
+}
+
 #[test]
 fn description_includes_parallel_tool_call_example() {
     assert!(BATCH_DESCRIPTION.contains("Run independent tool calls in parallel"));
     assert!(BATCH_DESCRIPTION.contains(r#""tool_calls": ["#));
     assert!(BATCH_DESCRIPTION.contains(r#""tool": "read""#));
     assert!(BATCH_DESCRIPTION.contains(r#""tool": "agentgrep""#));
+    assert!(BATCH_DESCRIPTION.contains("predictably small outputs"));
+    assert!(BATCH_DESCRIPTION.contains("rerun that subcall directly"));
+}
+
+#[test]
+fn format_results_preserves_small_outputs_and_errors() {
+    let results = vec![
+        (0, "read".to_string(), Ok(ToolOutput::new("small output"))),
+        (
+            1,
+            "agentgrep".to_string(),
+            Err(anyhow::anyhow!("search failed exactly")),
+        ),
+    ];
+
+    let (output, successes, errors, failed_tools) = format_batch_results(results);
+
+    assert!(output.contains("small output"));
+    assert!(output.contains("Error: search failed exactly"));
+    assert!(!output.contains("truncated to the batch output budget"));
+    assert_eq!(successes, 1);
+    assert_eq!(errors, 1);
+    assert_eq!(failed_tools, vec!["agentgrep"]);
+}
+
+#[test]
+fn format_results_caps_combined_success_payload_and_explains_recovery() {
+    let results = vec![
+        (
+            0,
+            "read".to_string(),
+            Ok(ToolOutput::new("α".repeat(30_000))),
+        ),
+        (
+            1,
+            "bash".to_string(),
+            Ok(ToolOutput::new("β".repeat(30_000))),
+        ),
+    ];
+
+    let (output, successes, errors, _) = format_batch_results(results);
+
+    assert_eq!(
+        output.matches('α').count() * "α".len(),
+        BATCH_OUTPUT_BUDGET_BYTES / 2
+    );
+    assert_eq!(
+        output.matches('β').count() * "β".len(),
+        BATCH_OUTPUT_BUDGET_BYTES / 2
+    );
+    assert!(output.contains("rerun subcall [1] `read` directly for full output"));
+    assert!(output.contains("rerun subcall [2] `bash` directly for full output"));
+    assert_eq!(successes, 2);
+    assert_eq!(errors, 0);
+}
+
+#[test]
+fn format_results_reuses_budget_left_by_small_subcalls() {
+    let small = "s".repeat(100);
+    let results = vec![
+        (0, "read".to_string(), Ok(ToolOutput::new(small.clone()))),
+        (
+            1,
+            "bash".to_string(),
+            Ok(ToolOutput::new("x".repeat(30_000))),
+        ),
+    ];
+
+    let (output, _, _, _) = format_batch_results(results);
+
+    assert!(output.contains(&small));
+    assert_eq!(
+        output.matches('x').count(),
+        BATCH_OUTPUT_BUDGET_BYTES - small.len()
+    );
+}
+
+#[test]
+fn format_results_truncates_unicode_on_a_character_boundary() {
+    let payload = "🦀".repeat(10_000);
+    let results = vec![(0, "read".to_string(), Ok(ToolOutput::new(payload)))];
+
+    let (output, _, _, _) = format_batch_results(results);
+
+    assert!(output.contains("🦀"));
+    assert!(output.contains("rerun subcall [1] `read` directly for full output"));
+    assert_eq!(
+        output.matches('🦀').count() * "🦀".len(),
+        BATCH_OUTPUT_BUDGET_BYTES
+    );
+}
+
+#[tokio::test]
+async fn registry_execute_enforces_batch_budget_and_returns_recovery_instructions() {
+    let registry = Registry::empty();
+    registry
+        .register(
+            "echo_payload".to_string(),
+            std::sync::Arc::new(EchoPayloadTool),
+        )
+        .await;
+    registry
+        .register(
+            "batch".to_string(),
+            std::sync::Arc::new(BatchTool::new(registry.clone())),
+        )
+        .await;
+
+    let output = registry
+        .execute(
+            "batch",
+            json!({
+                "intent": "Exercise the public batch execution path",
+                "tool_calls": [
+                    {
+                        "tool": "echo_payload",
+                        "intent": "Return alpha payload",
+                        "payload": "α".repeat(30_000)
+                    },
+                    {
+                        "tool": "echo_payload",
+                        "intent": "Return beta payload",
+                        "payload": "β".repeat(30_000)
+                    }
+                ]
+            }),
+            test_context(),
+        )
+        .await
+        .expect("public batch execution should succeed")
+        .output;
+
+    let payload_bytes =
+        output.matches('α').count() * "α".len() + output.matches('β').count() * "β".len();
+    assert_eq!(payload_bytes, BATCH_OUTPUT_BUDGET_BYTES);
+    assert_eq!(output.matches("rerun subcall").count(), 2);
+    assert!(output.contains("Completed: 2 succeeded, 0 failed"));
 }
 
 #[test]
