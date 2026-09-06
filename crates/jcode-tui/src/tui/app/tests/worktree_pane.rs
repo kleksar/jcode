@@ -241,6 +241,47 @@ fn test_files_pane_opens_and_closes_in_clean_repo() {
 }
 
 #[test]
+fn test_files_visibility_and_tab_choice_survive_session_transition() {
+    let _lock = scroll_render_test_lock();
+    let clean = tempfile::tempdir().expect("clean project");
+    std::process::Command::new("git")
+        .current_dir(clean.path())
+        .args(["init", "-q"])
+        .status()
+        .expect("git init");
+    crate::tui::ui::prime_project_tree_for_tests(clean.path());
+    let mut app = create_test_app();
+    app.session.working_dir = Some(clean.path().to_string_lossy().into_owned());
+    assert!(super::commands::handle_files_command(
+        &mut app,
+        "/files off"
+    ));
+
+    app.session.id = "next-clean-session".to_string();
+    let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(140, 24)).unwrap();
+    render_and_snap(&app, &mut terminal);
+    assert!(
+        crate::tui::ui::worktree_pane_layout().is_none(),
+        "explicit off should survive a session transition"
+    );
+
+    let dirty = init_worktree_pane_test_repo();
+    crate::tui::ui::prime_worktree_changes_for_tests(dirty.path());
+    crate::tui::ui::prime_project_tree_for_tests(dirty.path());
+    app.session.working_dir = Some(dirty.path().to_string_lossy().into_owned());
+    app.session.id = "dirty-session".to_string();
+    app.set_worktree_pane_tab(super::worktree_pane::WorktreePaneTab::Diff);
+    app.session.id = "next-dirty-session".to_string();
+    render_and_snap(&app, &mut terminal);
+    assert!(
+        !crate::tui::ui::worktree_pane_layout()
+            .expect("dirty right pane")
+            .files_tab_active,
+        "Diff choice should survive a session transition"
+    );
+}
+
+#[test]
 fn test_files_preview_has_independent_keyboard_scroll() {
     let _lock = scroll_render_test_lock();
     let repo = init_worktree_pane_test_repo();
