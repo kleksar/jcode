@@ -692,6 +692,18 @@ impl RemoteConnection {
         Ok(())
     }
 
+    /// Explicitly close an idle session while retaining its persisted transcript.
+    pub async fn close_session(&mut self, session_id: &str) -> Result<u64> {
+        let id = self.next_request_id;
+        let request = Request::CloseSession {
+            id,
+            session_id: session_id.to_string(),
+        };
+        self.next_request_id += 1;
+        self.send_request(request).await?;
+        Ok(id)
+    }
+
     /// Request a wider compacted-history window for the active session.
     pub async fn get_compacted_history(&mut self, visible_messages: usize) -> Result<u64> {
         let id = self.next_request_id;
@@ -1551,6 +1563,32 @@ mod tests {
             serde_json::from_str::<Request>(&line).expect("resume request should deserialize"),
             Request::ResumeSession { session_id, .. }
                 if session_id == "session_orphaned_after_reload"
+        ));
+    }
+
+    #[tokio::test]
+    async fn explicit_close_session_sends_close_request_for_selected_session() {
+        let mut remote = RemoteConnection::dummy();
+        let peer = remote
+            ._dummy_peer
+            .take()
+            .expect("dummy remote should retain peer stream");
+        let (reader, _writer) = peer.into_split();
+        let mut reader = BufReader::new(reader);
+
+        remote
+            .close_session("session_close_target")
+            .await
+            .expect("close request should send");
+
+        let mut line = String::new();
+        reader
+            .read_line(&mut line)
+            .await
+            .expect("close request should be readable by peer");
+        assert!(matches!(
+            serde_json::from_str::<Request>(&line).expect("close request should deserialize"),
+            Request::CloseSession { session_id, .. } if session_id == "session_close_target"
         ));
     }
 

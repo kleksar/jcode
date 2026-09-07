@@ -198,6 +198,10 @@ pub enum Request {
         allow_session_takeover: bool,
     },
 
+    /// Explicitly close an idle session while retaining its transcript.
+    #[serde(rename = "close_session")]
+    CloseSession { id: u64, session_id: String },
+
     /// Resume/continue every live session that was interrupted and would
     /// auto-continue on a reload (e.g. crashed/errored mid-turn). This is the
     /// on-demand equivalent of the automatic post-reload recovery sweep.
@@ -1091,6 +1095,10 @@ pub enum ServerEvent {
     /// Session ID assigned
     #[serde(rename = "session")]
     SessionId { session_id: String },
+
+    /// Explicit session close completed successfully.
+    #[serde(rename = "session_closed")]
+    SessionClosed { id: u64, session_id: String },
 
     /// Server requests that this client/session close itself.
     #[serde(rename = "session_close_requested")]

@@ -74,7 +74,7 @@ fn session_picker_enter_queues_current_terminal_resume_and_closes_overlay() {
                 is_debug: false,
                 saved: false,
                 save_label: None,
-                status: crate::session::SessionStatus::Closed,
+                status: crate::session::SessionStatus::Active,
                 needs_catchup: false,
                 estimated_tokens: 0,
                 first_user_prompt: None,
@@ -90,11 +90,27 @@ fn session_picker_enter_queues_current_terminal_resume_and_closes_overlay() {
             },
         ]),
     ));
+    app.session_picker_overlay
+        .as_ref()
+        .expect("picker")
+        .borrow_mut()
+        .set_live_presence_for_test(vec![crate::session::SessionPresence {
+            session_id: "session_here_123".to_string(),
+            pid: std::process::id(),
+            streaming: false,
+            streaming_since: None,
+            internal: false,
+        }]);
 
-    app.handle_session_picker_key(
-        crossterm::event::KeyCode::Enter,
-        crossterm::event::KeyModifiers::empty(),
-    )
+    let modifiers = match crate::config::config().keybindings.session_picker_enter {
+        crate::config::SessionPickerResumeAction::CurrentTerminal => {
+            crossterm::event::KeyModifiers::empty()
+        }
+        crate::config::SessionPickerResumeAction::NewTerminal => {
+            crossterm::event::KeyModifiers::CONTROL
+        }
+    };
+    app.handle_session_picker_key(crossterm::event::KeyCode::Enter, modifiers)
     .expect("session picker enter should succeed");
 
     assert!(app.session_picker_overlay.is_none());
@@ -102,6 +118,147 @@ fn session_picker_enter_queues_current_terminal_resume_and_closes_overlay() {
         app.workspace_client.take_pending_resume_session().as_deref(),
         Some("session_here_123")
     );
+}
+
+#[test]
+fn session_closed_event_refreshes_picker_and_keeps_it_open() {
+    let mut app = create_test_app();
+    app.session_picker_mode = SessionPickerMode::Resume;
+    app.session_picker_overlay = Some(RefCell::new(
+        crate::tui::session_picker::SessionPicker::new(vec![
+            crate::tui::session_picker::SessionInfo {
+                id: "session_closed_by_server".to_string(),
+                parent_id: None,
+                short_name: "close target".to_string(),
+                icon: "x".to_string(),
+                title: "Close target".to_string(),
+                message_count: 1,
+                user_message_count: 1,
+                assistant_message_count: 0,
+                created_at: chrono::Utc::now(),
+                last_message_time: chrono::Utc::now(),
+                last_active_at: None,
+                working_dir: None,
+                model: None,
+                provider_key: None,
+                is_canary: false,
+                is_debug: false,
+                saved: false,
+                save_label: None,
+                status: crate::session::SessionStatus::Active,
+                needs_catchup: false,
+                estimated_tokens: 0,
+                first_user_prompt: None,
+                messages_preview: Vec::new(),
+                search_index: "close target".to_string(),
+                server_name: None,
+                server_icon: None,
+                source: crate::tui::session_picker::SessionSource::Jcode,
+                resume_target: crate::tui::session_picker::ResumeTarget::JcodeSession {
+                    session_id: "session_closed_by_server".to_string(),
+                },
+                external_path: None,
+            },
+        ]),
+    ));
+    app.workspace_client
+        .begin_close_request(71, "session_closed_by_server".to_string());
+    let runtime = tokio::runtime::Runtime::new().expect("test runtime");
+    let _guard = runtime.enter();
+    let mut remote = crate::tui::backend::RemoteConnection::dummy();
+
+    assert!(app.handle_server_event(
+        crate::protocol::ServerEvent::SessionClosed {
+            id: 71,
+            session_id: "session_closed_by_server".to_string(),
+        },
+        &mut remote,
+    ));
+    assert!(app.session_picker_overlay.is_some());
+    assert!(app
+        .status_notice
+        .as_ref()
+        .is_some_and(|(notice, _)| notice.contains("Session closed")));
+}
+
+#[test]
+fn close_session_error_keeps_picker_open_and_shows_server_reason() {
+    let mut app = create_test_app();
+    app.session_picker_mode = SessionPickerMode::Resume;
+    app.session_picker_overlay = Some(RefCell::new(
+        crate::tui::session_picker::SessionPicker::new(Vec::new()),
+    ));
+    app.workspace_client
+        .begin_close_request(72, "session_refused_by_server".to_string());
+    let runtime = tokio::runtime::Runtime::new().expect("test runtime");
+    let _guard = runtime.enter();
+    let mut remote = crate::tui::backend::RemoteConnection::dummy();
+
+    assert!(app.handle_server_event(
+        crate::protocol::ServerEvent::Error {
+            id: 72,
+            message: "session is still working".to_string(),
+            retry_after_secs: None,
+        },
+        &mut remote,
+    ));
+    assert!(app.session_picker_overlay.is_some());
+    assert!(app
+        .status_notice
+        .as_ref()
+        .is_some_and(|(notice, _)| notice.contains("session is still working")));
+}
+
+#[test]
+fn unrelated_server_error_does_not_become_picker_close_feedback() {
+    let mut app = create_test_app();
+    app.session_picker_mode = SessionPickerMode::Resume;
+    app.session_picker_overlay = Some(RefCell::new(
+        crate::tui::session_picker::SessionPicker::new(Vec::new()),
+    ));
+    app.workspace_client
+        .begin_close_request(72, "session_refused_by_server".to_string());
+    let runtime = tokio::runtime::Runtime::new().expect("test runtime");
+    let _guard = runtime.enter();
+    let mut remote = crate::tui::backend::RemoteConnection::dummy();
+
+    app.handle_server_event(
+        crate::protocol::ServerEvent::Error {
+            id: 99,
+            message: "unrelated server failure".to_string(),
+            retry_after_secs: None,
+        },
+        &mut remote,
+    );
+    assert_eq!(
+        app.session_picker_overlay
+            .as_ref()
+            .and_then(|picker| picker.borrow().close_feedback_for_test()),
+        None
+    );
+}
+
+#[test]
+fn stale_session_closed_event_does_not_complete_another_close_request() {
+    let mut app = create_test_app();
+    app.session_picker_mode = SessionPickerMode::Resume;
+    app.session_picker_overlay = Some(RefCell::new(
+        crate::tui::session_picker::SessionPicker::new(Vec::new()),
+    ));
+    app.workspace_client
+        .begin_close_request(73, "expected-session".to_string());
+    let runtime = tokio::runtime::Runtime::new().expect("test runtime");
+    let _guard = runtime.enter();
+    let mut remote = crate::tui::backend::RemoteConnection::dummy();
+
+    assert!(!app.handle_server_event(
+        crate::protocol::ServerEvent::SessionClosed {
+            id: 73,
+            session_id: "stale-session".to_string(),
+        },
+        &mut remote,
+    ));
+    assert!(app.workspace_client.close_request_pending());
 }
 
 #[test]

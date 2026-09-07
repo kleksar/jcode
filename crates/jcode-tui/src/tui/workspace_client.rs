@@ -22,6 +22,8 @@ pub(crate) struct WorkspaceClientState {
     imported_server_sessions: bool,
     pending_split_target: Option<WorkspaceSplitTarget>,
     pending_resume_session: Option<String>,
+    pending_close_session: Option<String>,
+    in_flight_close_request: Option<(u64, String)>,
 }
 
 impl WorkspaceClientState {
@@ -42,6 +44,8 @@ impl WorkspaceClientState {
         self.enabled = false;
         self.pending_split_target = None;
         self.pending_resume_session = None;
+        self.pending_close_session = None;
+        self.in_flight_close_request = None;
     }
 
     #[cfg(test)]
@@ -91,6 +95,52 @@ impl WorkspaceClientState {
 
     pub(crate) fn queue_resume_session(&mut self, session_id: String) {
         self.pending_resume_session = Some(session_id);
+    }
+
+    pub(crate) fn queue_close_session(&mut self, session_id: String) {
+        self.pending_close_session = Some(session_id);
+    }
+
+    pub(crate) fn close_request_pending(&self) -> bool {
+        self.pending_close_session.is_some() || self.in_flight_close_request.is_some()
+    }
+
+    pub(crate) fn take_pending_close_session(&mut self) -> Option<String> {
+        self.pending_close_session.take()
+    }
+
+    pub(crate) fn begin_close_request(&mut self, id: u64, session_id: String) {
+        self.in_flight_close_request = Some((id, session_id));
+    }
+
+    pub(crate) fn finish_close_request(&mut self, id: u64) -> Option<String> {
+        if self
+            .in_flight_close_request
+            .as_ref()
+            .is_some_and(|(request_id, _)| *request_id == id)
+        {
+            return self
+                .in_flight_close_request
+                .take()
+                .map(|(_, session_id)| session_id);
+        }
+        None
+    }
+
+    pub(crate) fn finish_close_request_for_session(
+        &mut self,
+        id: u64,
+        session_id: &str,
+    ) -> bool {
+        if self
+            .in_flight_close_request
+            .as_ref()
+            .is_some_and(|(request_id, target)| *request_id == id && target == session_id)
+        {
+            self.in_flight_close_request = None;
+            return true;
+        }
+        false
     }
 
     pub(crate) fn handle_split_response(&mut self, new_session_id: &str) -> bool {
@@ -238,6 +288,17 @@ fn derive_visual_state(
 #[cfg(test)]
 mod tests {
     use super::{WorkspaceClientState, WorkspaceSplitTarget};
+
+    #[test]
+    fn queued_close_session_is_taken_once_without_affecting_resume_queue() {
+        let mut state = WorkspaceClientState::default();
+        state.queue_resume_session("resume_target".to_string());
+        state.queue_close_session("close_target".to_string());
+
+        assert_eq!(state.take_pending_close_session().as_deref(), Some("close_target"));
+        assert!(state.take_pending_close_session().is_none());
+        assert_eq!(state.take_pending_resume_session().as_deref(), Some("resume_target"));
+    }
 
     #[test]
     fn enabling_imports_initial_sessions() {

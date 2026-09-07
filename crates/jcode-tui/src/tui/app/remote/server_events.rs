@@ -1208,11 +1208,31 @@ pub(in crate::tui::app) fn handle_server_event(
             }
             completed_current_message || auto_poked
         }
+        ServerEvent::SessionClosed { id, session_id } => {
+            if app
+                .workspace_client
+                .finish_close_request_for_session(id, &session_id)
+            {
+                if let Some(picker) = app.session_picker_overlay.as_ref() {
+                    picker.borrow_mut().apply_session_closed(&session_id);
+                }
+                app.set_status_notice("Session closed");
+                return true;
+            }
+            false
+        }
         ServerEvent::Error {
+            id,
             message,
             retry_after_secs,
-            ..
         } => {
+            if app.workspace_client.finish_close_request(id).is_some()
+                && let Some(picker) = app.session_picker_overlay.as_ref()
+            {
+                picker.borrow_mut().set_close_feedback(message.clone());
+                app.set_status_notice(message.clone());
+                return true;
+            }
             // The server rejects a Message request with this error while its
             // previous turn is still running. This typically happens when a
             // reload/reconnect raced the turn-end dispatch: the history

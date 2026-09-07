@@ -3083,6 +3083,7 @@ impl App {
                         self.onboarding_start_recent_project_review();
                         return Ok(());
                     }
+                    PickerResult::CloseSession { .. } => return Ok(()),
                 };
                 self.session_picker_overlay = None;
                 self.session_picker_mode = SessionPickerMode::Resume;
@@ -3109,6 +3110,19 @@ impl App {
                     }
                 } else {
                     self.handle_session_picker_current_terminal_selection(&ids);
+                    self.session_picker_overlay = None;
+                    self.session_picker_mode = SessionPickerMode::Resume;
+                }
+            }
+            OverlayAction::Selected(PickerResult::CloseSession { session_id }) => {
+                if self.workspace_client.close_request_pending() {
+                    if let Some(picker) = self.session_picker_overlay.as_ref() {
+                        picker
+                            .borrow_mut()
+                            .set_close_feedback("Wait for the current close request to finish");
+                    }
+                } else {
+                    self.workspace_client.queue_close_session(session_id);
                 }
             }
             OverlayAction::Selected(PickerResult::TakeOverClaude(target)) => {
