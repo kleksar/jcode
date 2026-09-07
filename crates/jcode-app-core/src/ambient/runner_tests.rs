@@ -1,6 +1,6 @@
 use super::AmbientRunnerHandle;
-use crate::ambient::{Priority, ScheduleTarget, ScheduledItem};
-use crate::message::{Message, Role, StreamEvent, ToolDefinition};
+use crate::ambient::{Priority, ScheduleContextMode, ScheduleTarget, ScheduledItem};
+use crate::message::{ContentBlock, Message, Role, StreamEvent, ToolDefinition};
 use crate::provider::{EventStream, Provider};
 use crate::session::Session;
 use anyhow::Result;
@@ -180,6 +180,13 @@ async fn spawn_target_creates_one_child_session_and_runs_task() {
         Some("Parent".to_string()),
     );
     parent.working_dir = Some(temp.path().display().to_string());
+    parent.add_message(
+        Role::User,
+        vec![ContentBlock::Text {
+            text: "intentional inherited parent context".to_string(),
+            cache_control: None,
+        }],
+    );
     parent.save().expect("save parent session");
 
     let item = ScheduledItem {
@@ -189,6 +196,7 @@ async fn spawn_target_creates_one_child_session_and_runs_task() {
         priority: Priority::Normal,
         target: ScheduleTarget::Spawn {
             parent_session_id: parent.id.clone(),
+            context_mode: ScheduleContextMode::Inherit,
         },
         created_by_session: parent.id.clone(),
         created_at: chrono::Utc::now(),
@@ -211,6 +219,11 @@ async fn spawn_target_creates_one_child_session_and_runs_task() {
     assert_eq!(child.parent_id.as_deref(), Some(parent.id.as_str()));
     assert_eq!(child.working_dir, parent.working_dir);
     assert!(child.messages.iter().any(|message| {
+        message
+            .content_preview()
+            .contains("intentional inherited parent context")
+    }));
+    assert!(child.messages.iter().any(|message| {
         message.role == Role::User
             && message.content_preview().contains("[Scheduled task]")
             && message.content_preview().contains("Follow up later")
@@ -220,5 +233,79 @@ async fn spawn_target_creates_one_child_session_and_runs_task() {
             && message
                 .content_preview()
                 .contains("Spawned session handled task.")
+    }));
+}
+
+#[tokio::test]
+async fn fresh_spawn_target_does_not_copy_parent_conversation_context() {
+    let _guard = crate::storage::lock_test_env();
+    let temp = tempfile::tempdir().expect("tempdir");
+    let _home = EnvVarGuard::set_path("JCODE_HOME", temp.path());
+
+    let provider = StreamingTestProvider::default();
+    provider.queue_response(vec![
+        StreamEvent::TextDelta("Fresh child handled task.".to_string()),
+        StreamEvent::MessageEnd { stop_reason: None },
+    ]);
+    let provider: Arc<dyn Provider> = Arc::new(provider);
+
+    let mut parent = Session::create_with_id(
+        "session_parent_fresh_spawn_test".to_string(),
+        None,
+        Some("Parent".to_string()),
+    );
+    parent.working_dir = Some(temp.path().display().to_string());
+    parent.add_message(
+        Role::User,
+        vec![ContentBlock::Text {
+            text: "parent conversation must not leak".to_string(),
+            cache_control: None,
+        }],
+    );
+    parent.save().expect("save parent session");
+
+    let item = ScheduledItem {
+        id: "sched_fresh_spawn_test".to_string(),
+        scheduled_for: chrono::Utc::now(),
+        context: "Run isolated follow-up".to_string(),
+        priority: Priority::Normal,
+        target: ScheduleTarget::Spawn {
+            parent_session_id: parent.id.clone(),
+            context_mode: ScheduleContextMode::Fresh,
+        },
+        created_by_session: parent.id.clone(),
+        created_at: chrono::Utc::now(),
+        working_dir: parent.working_dir.clone(),
+        task_description: Some("Run isolated follow-up".to_string()),
+        relevant_files: vec![],
+        git_branch: None,
+        additional_context: None,
+    };
+
+    let runner = AmbientRunnerHandle::new(Arc::new(crate::safety::SafetySystem::new()));
+    let child_session_id = runner
+        .spawn_session_for_scheduled_item(&provider, &item, &parent.id)
+        .await
+        .expect("fresh scheduled spawn should succeed");
+
+    let child = Session::load(&child_session_id).expect("load fresh child session");
+    assert_eq!(child.parent_id.as_deref(), Some(parent.id.as_str()));
+    assert_eq!(child.working_dir, parent.working_dir);
+    assert!(
+        !child.messages.iter().any(|message| message
+            .content_preview()
+            .contains("parent conversation must not leak")),
+        "fresh scheduled spawn must not copy parent conversation messages"
+    );
+    assert!(
+        child
+            .messages
+            .iter()
+            .any(|message| message.content_preview().contains("Run isolated follow-up"))
+    );
+    assert!(child.messages.iter().any(|message| {
+        message
+            .content_preview()
+            .contains("Fresh child handled task.")
     }));
 }

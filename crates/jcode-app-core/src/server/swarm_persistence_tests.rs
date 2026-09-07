@@ -481,6 +481,8 @@ fn deep_plan_mode_and_node_meta_round_trip() {
         "root".to_string(),
         crate::plan::NodeMeta {
             kind: Some("explore".to_string()),
+            model: Some("openai-api:gpt-5.6-terra".to_string()),
+            effort: Some("xhigh".to_string()),
             parent: None,
             expanded: true,
             is_gate: false,
@@ -493,6 +495,8 @@ fn deep_plan_mode_and_node_meta_round_trip() {
         "root.gate".to_string(),
         crate::plan::NodeMeta {
             kind: Some("critique".to_string()),
+            model: None,
+            effort: None,
             parent: Some("root".to_string()),
             expanded: false,
             is_gate: true,
@@ -550,6 +554,8 @@ fn deep_plan_mode_and_node_meta_round_trip() {
     // Node kinds, gate flags, expansion, planner, and artifacts survive in node_meta.
     let root_meta = loaded_plan.node_meta.get("root").expect("root meta");
     assert_eq!(root_meta.kind.as_deref(), Some("explore"));
+    assert_eq!(root_meta.model.as_deref(), Some("openai-api:gpt-5.6-terra"));
+    assert_eq!(root_meta.effort.as_deref(), Some("xhigh"));
     assert!(root_meta.expanded);
     assert!(!root_meta.is_gate);
     assert_eq!(root_meta.planner.as_deref(), Some("session-1"));
@@ -612,6 +618,8 @@ fn gate_debt_and_artifact_hydration_survive_reload() {
     let meta = |kind: &str, parent: Option<&str>, is_gate: bool, artifact: Option<&str>| {
         crate::plan::NodeMeta {
             kind: Some(kind.to_string()),
+            model: None,
+            effort: None,
             parent: parent.map(str::to_string),
             expanded: false,
             is_gate,

@@ -90,6 +90,26 @@ pub enum Priority {
     High,
 }
 
+/// How a spawned scheduled child receives conversation context.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ScheduleContextMode {
+    /// Start the child with only the scheduled task and fresh session context.
+    #[default]
+    Fresh,
+    /// Fork the originating session's conversation and compaction state.
+    Inherit,
+}
+
+impl ScheduleContextMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Fresh => "fresh",
+            Self::Inherit => "inherit",
+        }
+    }
+}
+
 /// Where a scheduled task should be delivered when it becomes due.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -99,8 +119,12 @@ pub enum ScheduleTarget {
     Ambient,
     /// Deliver the reminder back into a specific interactive session.
     Session { session_id: String },
-    /// Spawn a single new session derived from the originating session.
-    Spawn { parent_session_id: String },
+    /// Spawn a single one-shot child session.
+    Spawn {
+        parent_session_id: String,
+        #[serde(default)]
+        context_mode: ScheduleContextMode,
+    },
 }
 
 impl ScheduleTarget {

@@ -119,6 +119,12 @@ pub struct NodeMeta {
     /// "synthesize" | "critique". Defaults to a plain task when absent.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub kind: Option<String>,
+    /// Optional worker-model override for this node. Applied only to fresh workers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    /// Optional worker reasoning-effort override for this node. Applied only to fresh workers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effort: Option<String>,
     /// The composite node this was decomposed from, if any.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parent: Option<String>,
@@ -622,9 +628,63 @@ pub fn next_unassigned_runnable_item_id(plan: &VersionedPlan) -> Option<String> 
             plan.items
                 .iter()
                 .find(|item| item.id == *candidate_id)
-                .map(|item| item.assigned_to.is_none())
+                .map(|item| {
+                    item.assigned_to.is_none()
+                        && !has_active_file_scope_conflict(plan, candidate_id)
+                })
                 .unwrap_or(false)
         })
+}
+
+/// Whether assigning `task_id` would overlap an active mutating task's exclusive
+/// file scope. Legacy nodes without a recognized DAG kind retain the previous
+/// unconstrained behavior, as do empty scopes and read-only node kinds.
+pub fn has_active_file_scope_conflict(plan: &VersionedPlan, task_id: &str) -> bool {
+    let Some(candidate) = plan.items.iter().find(|item| item.id == task_id) else {
+        return false;
+    };
+    if candidate.file_scope.is_empty() || !is_mutating_node(plan, candidate) {
+        return false;
+    }
+
+    plan.items.iter().any(|active| {
+        active.id != candidate.id
+            && !is_terminal_status(&active.status)
+            && active.assigned_to.is_some()
+            && !active.file_scope.is_empty()
+            && is_mutating_node(plan, active)
+            && scopes_overlap(&candidate.file_scope, &active.file_scope)
+    })
+}
+
+fn is_mutating_node(plan: &VersionedPlan, item: &PlanItem) -> bool {
+    matches!(
+        plan.node_meta
+            .get(&item.id)
+            .and_then(|meta| meta.kind.as_deref())
+            .map(str::trim),
+        Some(kind) if kind.eq_ignore_ascii_case("implement") || kind.eq_ignore_ascii_case("fix")
+    )
+}
+
+fn scopes_overlap(left: &[String], right: &[String]) -> bool {
+    left.iter().any(|left_path| {
+        right
+            .iter()
+            .any(|right_path| scope_paths_overlap(left_path, right_path))
+    })
+}
+
+fn scope_paths_overlap(left: &str, right: &str) -> bool {
+    let left = left.trim().trim_end_matches('/');
+    let right = right.trim().trim_end_matches('/');
+    left == right
+        || left
+            .strip_prefix(right)
+            .is_some_and(|suffix| suffix.starts_with('/'))
+        || right
+            .strip_prefix(left)
+            .is_some_and(|suffix| suffix.starts_with('/'))
 }
 
 /// Cap on automatic reclaims of a node stranded on a dead assignee. Past this,
@@ -981,6 +1041,80 @@ mod tests {
 
         assert_eq!(next_runnable_item_ids(&items, None), vec!["a", "b", "c"]);
         assert_eq!(next_runnable_item_ids(&items, Some(2)), vec!["a", "b"]);
+    }
+
+    #[test]
+    fn overlapping_mutating_file_scopes_are_serialized_but_read_only_work_is_not() {
+        let mut active = item("active-write", "running", &[]);
+        active.assigned_to = Some("worker-a".to_string());
+        active.file_scope = vec!["crates/shared".to_string()];
+        let mut overlapping_write = item("overlapping-write", "queued", &[]);
+        overlapping_write.file_scope = vec!["crates/shared/src/lib.rs".to_string()];
+        let mut read_only = item("verify", "queued", &[]);
+        read_only.file_scope = vec!["crates/shared/src/lib.rs".to_string()];
+
+        let mut plan = VersionedPlan::new();
+        plan.items = vec![active, overlapping_write, read_only];
+        plan.node_meta.insert(
+            "active-write".to_string(),
+            NodeMeta {
+                kind: Some("implement".to_string()),
+                ..NodeMeta::default()
+            },
+        );
+        plan.node_meta.insert(
+            "overlapping-write".to_string(),
+            NodeMeta {
+                kind: Some("fix".to_string()),
+                ..NodeMeta::default()
+            },
+        );
+        plan.node_meta.insert(
+            "verify".to_string(),
+            NodeMeta {
+                kind: Some("verify".to_string()),
+                ..NodeMeta::default()
+            },
+        );
+
+        assert_eq!(
+            next_unassigned_runnable_item_id(&plan),
+            Some("verify".to_string())
+        );
+
+        plan.items.retain(|item| item.id != "verify");
+        assert_eq!(next_unassigned_runnable_item_id(&plan), None);
+    }
+
+    #[test]
+    fn disjoint_mutating_file_scopes_remain_concurrent() {
+        let mut active = item("active-write", "running", &[]);
+        active.assigned_to = Some("worker-a".to_string());
+        active.file_scope = vec!["crates/left/src".to_string()];
+        let mut disjoint_write = item("right-write", "queued", &[]);
+        disjoint_write.file_scope = vec!["crates/right/src".to_string()];
+
+        let mut plan = VersionedPlan::new();
+        plan.items = vec![active, disjoint_write];
+        plan.node_meta.insert(
+            "active-write".to_string(),
+            NodeMeta {
+                kind: Some("implement".to_string()),
+                ..NodeMeta::default()
+            },
+        );
+        plan.node_meta.insert(
+            "right-write".to_string(),
+            NodeMeta {
+                kind: Some("fix".to_string()),
+                ..NodeMeta::default()
+            },
+        );
+
+        assert_eq!(
+            next_unassigned_runnable_item_id(&plan),
+            Some("right-write".to_string())
+        );
     }
 
     #[test]

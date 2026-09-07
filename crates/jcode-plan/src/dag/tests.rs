@@ -109,6 +109,155 @@ fn seed_replay_rejects_changed_existing_definition() {
 }
 
 #[test]
+fn seed_replay_rejects_changed_execution_metadata() {
+    let mut original = spec("a", NodeKind::Implement);
+    original.model = Some("openai-api:gpt-5.6-terra".to_string());
+    original.effort = Some("xhigh".to_string());
+    original.subsystem = Some("planner".to_string());
+    original.file_scope = vec!["crates/plan/src".to_string()];
+    let mut graph = dag(Mode::Light, vec![original.clone()]);
+    let before = graph.clone();
+
+    let mut changed = original;
+    changed.effort = Some("low".to_string());
+    let err = seed(&mut graph, vec![changed]).unwrap_err();
+
+    assert_eq!(err, DagError::DuplicateNode("a".into()));
+    assert_eq!(graph, before, "conflicting reseed must not lose metadata");
+}
+
+#[test]
+fn seed_normalizes_repo_relative_file_scopes_before_persisting_and_comparing() {
+    let mut submitted = spec("write", NodeKind::Implement);
+    submitted.file_scope = vec![
+        " ./src//foo/ ".to_string(),
+        "src/foo".to_string(),
+        "./src/./bar//".to_string(),
+    ];
+    let mut graph = TaskGraph::new(Mode::Light);
+
+    seed(&mut graph, vec![submitted]).unwrap();
+
+    assert_eq!(
+        graph.get("write").expect("seeded node").file_scope,
+        vec!["src/foo", "src/bar"]
+    );
+
+    let mut replay = spec("write", NodeKind::Implement);
+    replay.file_scope = vec!["src/foo".to_string(), "src/bar/".to_string()];
+    seed(&mut graph, vec![replay]).expect("normalized replay is identical");
+}
+
+#[test]
+fn seed_rejects_absolute_parent_traversal_and_empty_normalized_file_scopes() {
+    for (scope, reason) in [
+        ("/outside/repo", "absolute paths"),
+        ("C:\\outside\\repo", "absolute paths"),
+        ("src/../outside", "parent traversal"),
+        (" ././ ", "normalizes to an empty"),
+    ] {
+        let mut submitted = spec("write", NodeKind::Implement);
+        submitted.file_scope = vec![scope.to_string()];
+        let err = seed(&mut TaskGraph::new(Mode::Light), vec![submitted]).unwrap_err();
+
+        assert!(matches!(err, DagError::InvalidFileScope { .. }));
+        assert!(err.to_string().contains(reason), "{err}");
+    }
+}
+
+#[test]
+fn expand_and_inject_normalize_file_scopes_before_persisting() {
+    let mut light = dag(Mode::Light, vec![spec("root", NodeKind::Explore)]);
+    assert!(dispatch(&mut light, "root", "planner"));
+    let mut child = spec("child", NodeKind::Implement);
+    child.file_scope = vec![" ./src//child.rs/ ".to_string()];
+    expand_node(&mut light, "root", "planner", vec![child]).unwrap();
+    assert_eq!(
+        light.get("child").expect("expanded child").file_scope,
+        vec!["src/child.rs"]
+    );
+
+    let mut deep = dag(Mode::Deep, vec![spec("root", NodeKind::Explore)]);
+    assert!(dispatch(&mut deep, "root", "planner"));
+    let gate_id = expand_node(
+        &mut deep,
+        "root",
+        "planner",
+        vec![spec("child", NodeKind::Explore)],
+    )
+    .unwrap()
+    .gate_id
+    .expect("deep gate");
+    assert!(dispatch(&mut deep, "child", "worker"));
+    complete_node(&mut deep, "child", "worker", sim::deep_artifact("done")).unwrap();
+    assert!(dispatch(&mut deep, &gate_id, "reviewer"));
+    let mut gap = spec("gap", NodeKind::Fix);
+    gap.file_scope = vec!["./src//gap.rs/".to_string()];
+    inject_from_gate(&mut deep, &gate_id, "reviewer", vec![gap]).unwrap();
+    assert_eq!(
+        deep.get("gap").expect("injected gap").file_scope,
+        vec!["src/gap.rs"]
+    );
+}
+
+#[test]
+fn invalid_node_effort_is_rejected_by_seed_expand_and_inject() {
+    let mut invalid_seed = spec("seed", NodeKind::Explore);
+    invalid_seed.effort = Some("turbo".to_string());
+    assert_eq!(
+        seed(&mut TaskGraph::new(Mode::Light), vec![invalid_seed]),
+        Err(DagError::InvalidEffort {
+            node: "seed".to_string(),
+            effort: "turbo".to_string(),
+        })
+    );
+
+    let mut light = dag(Mode::Light, vec![spec("root", NodeKind::Explore)]);
+    assert!(dispatch(&mut light, "root", "planner"));
+    let mut invalid_child = spec("child", NodeKind::Explore);
+    invalid_child.effort = Some("turbo".to_string());
+    assert_eq!(
+        expand_node(&mut light, "root", "planner", vec![invalid_child]),
+        Err(DagError::InvalidEffort {
+            node: "child".to_string(),
+            effort: "turbo".to_string(),
+        })
+    );
+    assert!(!light.get("root").expect("root").expanded);
+
+    let mut deep = dag(Mode::Deep, vec![spec("root", NodeKind::Explore)]);
+    assert!(dispatch(&mut deep, "root", "planner"));
+    let gate_id = expand_node(
+        &mut deep,
+        "root",
+        "planner",
+        vec![spec("child", NodeKind::Explore)],
+    )
+    .unwrap()
+    .gate_id
+    .expect("deep gate");
+    assert!(dispatch(&mut deep, "child", "worker"));
+    complete_node(&mut deep, "child", "worker", sim::deep_artifact("done")).unwrap();
+    assert!(dispatch(&mut deep, &gate_id, "reviewer"));
+    let mut invalid_gap = spec("gap", NodeKind::Fix);
+    invalid_gap.effort = Some("turbo".to_string());
+    assert_eq!(
+        inject_from_gate(&mut deep, &gate_id, "reviewer", vec![invalid_gap]),
+        Err(DagError::InvalidEffort {
+            node: "gap".to_string(),
+            effort: "turbo".to_string(),
+        })
+    );
+    assert!(deep.get("gap").is_none());
+}
+
+#[test]
+fn absent_node_effort_remains_backward_compatible() {
+    let graph = dag(Mode::Light, vec![spec("legacy", NodeKind::Explore)]);
+    assert_eq!(graph.get("legacy").expect("seeded node").effort, None);
+}
+
+#[test]
 fn seed_rejects_unknown_dependency() {
     let mut g = TaskGraph::new(Mode::Light);
     let err = seed(

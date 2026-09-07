@@ -26,6 +26,35 @@ fn test_comm_propose_plan_roundtrip() -> Result<()> {
 }
 
 #[test]
+fn task_graph_node_spec_serde_preserves_execution_metadata_and_defaults_legacy_fields() -> Result<()> {
+    let legacy: TaskGraphNodeSpec = serde_json::from_str(
+        r#"{"id":"legacy","content":"keep working","kind":"implement"}"#,
+    )?;
+    assert_eq!(legacy.model, None);
+    assert_eq!(legacy.effort, None);
+    assert_eq!(legacy.subsystem, None);
+    assert!(legacy.file_scope.is_empty());
+
+    let node = TaskGraphNodeSpec {
+        id: "route-aware".to_string(),
+        content: "implement the parser".to_string(),
+        kind: Some("implement".to_string()),
+        depends_on: vec!["setup".to_string()],
+        priority: 4,
+        model: Some("openai-api:gpt-5.6-terra".to_string()),
+        effort: Some("xhigh".to_string()),
+        subsystem: Some("parser".to_string()),
+        file_scope: vec!["crates/parser/src".to_string()],
+    };
+
+    let json = serde_json::to_string(&node)?;
+    assert!(json.contains("\"model\":\"openai-api:gpt-5.6-terra\""));
+    assert!(json.contains("\"effort\":\"xhigh\""));
+    assert_eq!(serde_json::from_str::<TaskGraphNodeSpec>(&json)?, node);
+    Ok(())
+}
+
+#[test]
 fn test_stdin_response_roundtrip() -> Result<()> {
     let req = Request::StdinResponse {
         id: 99,

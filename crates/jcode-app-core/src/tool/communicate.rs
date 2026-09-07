@@ -2150,8 +2150,40 @@ impl Tool for CommunicateTool {
                 "nodes".to_string(),
                 json!({
                     "type": "array",
-                    "description": "Node specs for task_graph/expand_node/inject_gap. Each: {id, content, kind?, depends_on?, priority?}.",
-                    "items": { "type": "object", "additionalProperties": true }
+                    "description": "Node specs for task_graph/expand_node/inject_gap. Node model/effort are used only if dispatch creates a fresh worker; file_scope is a normalized repo-relative lexical exclusive write scope for implement/fix nodes.",
+                    "items": {
+                        "type": "object",
+                        "required": ["id", "content"],
+                        "properties": {
+                            "id": { "type": "string" },
+                            "content": { "type": "string" },
+                            "kind": {
+                                "type": "string",
+                                "enum": ["explore", "implement", "verify", "fix", "synthesize", "critique"]
+                            },
+                            "depends_on": {
+                                "type": "array",
+                                "items": { "type": "string" }
+                            },
+                            "priority": { "type": "integer", "minimum": 0 },
+                            "model": {
+                                "type": "string",
+                                "description": "Optional fresh-worker model override for this node."
+                            },
+                            "effort": {
+                                "type": "string",
+                                "enum": ["none", "minimal", "low", "medium", "high", "xhigh", "max"],
+                                "description": "Optional fresh-worker reasoning effort override for this node."
+                            },
+                            "subsystem": { "type": "string" },
+                            "file_scope": {
+                                "type": "array",
+                                "items": { "type": "string" },
+                                "description": "Repo-relative lexical exclusive write scope for implement/fix nodes. DAG ingestion trims and normalizes ./, duplicate/trailing separators; absolute paths, empty normalized scopes, and .. traversal are rejected. Overlapping non-empty scopes serialize writes."
+                            }
+                        },
+                        "additionalProperties": false
+                    }
                 }),
             );
             props.insert(

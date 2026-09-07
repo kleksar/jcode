@@ -1,7 +1,7 @@
 use super::{Tool, ToolContext, ToolOutput};
 use crate::ambient::{
-    AmbientCycleResult, AmbientManager, AmbientState, CycleStatus, Priority, ScheduleRequest,
-    ScheduleTarget, ScheduledItem,
+    AmbientCycleResult, AmbientManager, AmbientState, CycleStatus, Priority, ScheduleContextMode,
+    ScheduleRequest, ScheduleTarget, ScheduledItem,
 };
 use crate::ambient_runner::AmbientRunnerHandle;
 use crate::safety::{self, PermissionRequest, PermissionResult, SafetySystem, Urgency};
@@ -750,6 +750,8 @@ struct ScheduleToolInput {
     success_criteria: Option<String>,
     #[serde(default)]
     target: Option<String>,
+    #[serde(default)]
+    context_mode: Option<String>,
 }
 
 #[async_trait]
@@ -798,7 +800,12 @@ impl Tool for ScheduleTool {
                 "target": {
                     "type": "string",
                     "enum": ["resume", "spawn", "ambient"],
-                    "description": "Delivery target. Defaults to resuming this session; 'spawn' runs one new child session."
+                    "description": "Delivery target. Defaults to resuming this session; 'spawn' runs one one-shot child session. Use swarm/task DAG, not schedule, for multi-step plan execution."
+                },
+                "context_mode": {
+                    "type": "string",
+                    "enum": ["fresh", "inherit"],
+                    "description": "For target=spawn only. Defaults to fresh. Use inherit only for an intentional conversation fork."
                 }
             }
         })
@@ -868,7 +875,11 @@ impl ScheduleTool {
                 }
             });
 
-        let target = parse_schedule_target(params.target.as_deref(), &ctx.session_id)?;
+        let target = parse_schedule_target(
+            params.target.as_deref(),
+            params.context_mode.as_deref(),
+            &ctx.session_id,
+        )?;
         let target_summary = format_schedule_target(&target);
 
         let request = ScheduleRequest {
@@ -974,11 +985,27 @@ fn parse_priority(s: Option<&str>) -> Priority {
     }
 }
 
-fn parse_schedule_target(s: Option<&str>, session_id: &str) -> Result<ScheduleTarget> {
+fn parse_schedule_target(
+    s: Option<&str>,
+    context_mode: Option<&str>,
+    session_id: &str,
+) -> Result<ScheduleTarget> {
+    if context_mode.is_some() && s != Some("spawn") {
+        anyhow::bail!("context_mode is only valid when target is spawn");
+    }
+    let context_mode = match context_mode {
+        Some("inherit") => ScheduleContextMode::Inherit,
+        Some("fresh") | None => ScheduleContextMode::Fresh,
+        Some(other) => anyhow::bail!(
+            "Invalid context_mode '{}'. Expected one of: fresh, inherit",
+            other
+        ),
+    };
     Ok(match s {
         Some("ambient") => ScheduleTarget::Ambient,
         Some("spawn") => ScheduleTarget::Spawn {
             parent_session_id: session_id.to_string(),
+            context_mode,
         },
         Some("resume") | None => ScheduleTarget::Session {
             session_id: session_id.to_string(),
@@ -994,8 +1021,15 @@ fn format_schedule_target(target: &ScheduleTarget) -> String {
     match target {
         ScheduleTarget::Ambient => "ambient agent".to_string(),
         ScheduleTarget::Session { session_id } => format!("resume session {}", session_id),
-        ScheduleTarget::Spawn { parent_session_id } => {
-            format!("spawn one child session from {}", parent_session_id)
+        ScheduleTarget::Spawn {
+            parent_session_id,
+            context_mode,
+        } => {
+            format!(
+                "spawn one {}-context child session from {}",
+                context_mode.as_str(),
+                parent_session_id
+            )
         }
     }
 }

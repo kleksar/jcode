@@ -562,6 +562,14 @@ struct DebugNodeSpec {
     depends_on: Vec<String>,
     #[serde(default)]
     priority: u8,
+    #[serde(default)]
+    model: Option<String>,
+    #[serde(default)]
+    effort: Option<String>,
+    #[serde(default)]
+    subsystem: Option<String>,
+    #[serde(default)]
+    file_scope: Vec<String>,
 }
 
 fn debug_specs(specs: Vec<DebugNodeSpec>) -> Vec<jcode_plan::dag::NodeSpec> {
@@ -573,6 +581,10 @@ fn debug_specs(specs: Vec<DebugNodeSpec>) -> Vec<jcode_plan::dag::NodeSpec> {
             kind: jcode_plan::bridge::parse_kind(s.kind.as_deref()),
             depends_on: s.depends_on,
             priority: s.priority,
+            model: s.model,
+            effort: s.effort,
+            subsystem: s.subsystem,
+            file_scope: s.file_scope,
         })
         .collect()
 }

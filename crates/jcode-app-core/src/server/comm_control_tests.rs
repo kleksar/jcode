@@ -1,4 +1,9 @@
-use super::{handle_comm_assign_next, handle_comm_assign_task, handle_comm_task_control};
+use super::{
+    AssignNextTaskReservationState, assign_next_task_reservation_key,
+    assign_next_task_reservations, handle_comm_assign_next, handle_comm_assign_task,
+    handle_comm_task_control, install_assign_next_reservation_test_hook, node_execution_routing,
+    release_assign_next_task_reservation, reserve_next_unassigned_runnable_task,
+};
 use crate::agent::Agent;
 use crate::message::{Message, StreamEvent, ToolDefinition};
 use crate::plan::PlanItem;
@@ -152,6 +157,7 @@ include!("comm_control_tests/assign_busy_skip.rs");
 include!("comm_control_tests/task_control.rs");
 include!("comm_control_tests/assign_next_dependency.rs");
 include!("comm_control_tests/assign_next_metadata.rs");
+include!("comm_control_tests/assign_next_reservation.rs");
 include!("comm_control_tests/await_late_joiners.rs");
 include!("comm_control_tests/await_disconnect.rs");
 include!("comm_control_tests/await_any.rs");

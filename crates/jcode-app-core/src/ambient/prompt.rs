@@ -341,8 +341,15 @@ pub fn build_ambient_system_prompt(
                 ScheduleTarget::Session { session_id } => {
                     prompt.push_str(&format!("  Target session: {}\n", session_id));
                 }
-                ScheduleTarget::Spawn { parent_session_id } => {
-                    prompt.push_str(&format!("  Spawn from session: {}\n", parent_session_id));
+                ScheduleTarget::Spawn {
+                    parent_session_id,
+                    context_mode,
+                } => {
+                    prompt.push_str(&format!(
+                        "  Spawn from session: {} ({} context)\n",
+                        parent_session_id,
+                        context_mode.as_str()
+                    ));
                 }
             }
             if let Some(ref dir) = item.working_dir {

@@ -9,7 +9,7 @@
 use crate::agent::Agent;
 use crate::ambient::{
     self, AmbientCycleResult, AmbientLock, AmbientManager, AmbientState, AmbientStatus,
-    CycleStatus, ScheduleTarget, ScheduledItem,
+    CycleStatus, ScheduleContextMode, ScheduleTarget, ScheduledItem,
 };
 use crate::ambient_scheduler::{AdaptiveScheduler, AmbientSchedulerConfig};
 use crate::config::config;
@@ -289,9 +289,9 @@ impl AmbientRunnerHandle {
                                 ScheduleTarget::Session { session_id } => {
                                     ("session", Some(session_id.clone()), None)
                                 }
-                                ScheduleTarget::Spawn { parent_session_id } => {
-                                    ("spawn", None, Some(parent_session_id.clone()))
-                                }
+                                ScheduleTarget::Spawn {
+                                    parent_session_id, ..
+                                } => ("spawn", None, Some(parent_session_id.clone())),
                             };
                         let overdue_seconds =
                             (Utc::now() - item.scheduled_for).num_seconds().max(0);
@@ -412,6 +412,10 @@ impl AmbientRunnerHandle {
         item: &ScheduledItem,
         parent_session_id: &str,
     ) -> anyhow::Result<String> {
+        let context_mode = match &item.target {
+            ScheduleTarget::Spawn { context_mode, .. } => *context_mode,
+            _ => ScheduleContextMode::Fresh,
+        };
         let mut child = match Session::load(parent_session_id) {
             Ok(parent) => {
                 let mut child = Session::create(
@@ -422,8 +426,12 @@ impl AmbientRunnerHandle {
                             .unwrap_or_else(|| "Scheduled task".to_string()),
                     ),
                 );
-                child.replace_messages(parent.messages.clone());
-                child.compaction = parent.compaction.clone();
+                if context_mode == ScheduleContextMode::Inherit {
+                    child.replace_messages(parent.messages.clone());
+                    child.compaction = parent.compaction.clone();
+                    child.memory_injections = parent.memory_injections.clone();
+                    child.replay_events = parent.replay_events.clone();
+                }
                 child.provider_key = parent.provider_key.clone();
                 child.route_api_method = parent.route_api_method.clone();
                 child.model = parent.model.clone();
@@ -434,8 +442,6 @@ impl AmbientRunnerHandle {
                 child.is_canary = parent.is_canary;
                 child.testing_build = parent.testing_build.clone();
                 child.is_debug = parent.is_debug;
-                child.memory_injections = parent.memory_injections.clone();
-                child.replay_events = parent.replay_events.clone();
                 child.working_dir = item.working_dir.clone().or(parent.working_dir.clone());
                 child
             }
@@ -512,7 +518,9 @@ impl AmbientRunnerHandle {
                     }
                 }
             }
-            ScheduleTarget::Spawn { parent_session_id } => {
+            ScheduleTarget::Spawn {
+                parent_session_id, ..
+            } => {
                 let spawned_session_id = self
                     .spawn_session_for_scheduled_item(provider, item, parent_session_id)
                     .await?;

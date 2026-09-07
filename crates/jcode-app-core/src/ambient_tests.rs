@@ -8,6 +8,21 @@ fn test_ambient_status_default() {
 }
 
 #[test]
+fn legacy_spawn_target_without_context_mode_defaults_to_fresh() {
+    let target: ScheduleTarget =
+        serde_json::from_str(r#"{"kind":"spawn","parent_session_id":"session_parent"}"#)
+            .expect("legacy spawn target should still deserialize");
+
+    assert_eq!(
+        target,
+        ScheduleTarget::Spawn {
+            parent_session_id: "session_parent".to_string(),
+            context_mode: ScheduleContextMode::Fresh,
+        }
+    );
+}
+
+#[test]
 fn test_priority_ordering() {
     assert!(Priority::High > Priority::Normal);
     assert!(Priority::Normal > Priority::Low);
@@ -189,6 +204,7 @@ fn test_take_ready_direct_items_only_removes_direct_targets() {
         priority: Priority::High,
         target: ScheduleTarget::Spawn {
             parent_session_id: "session_123".into(),
+            context_mode: ScheduleContextMode::Fresh,
         },
         created_by_session: "session_123".into(),
         created_at: Utc::now(),

@@ -56,6 +56,10 @@ fn conflicting_seed_ids_are_scoped_and_dependencies_follow_the_remap() {
             kind: Some("explore".to_string()),
             depends_on: Vec::new(),
             priority: 10,
+            model: None,
+            effort: None,
+            subsystem: None,
+            file_scope: Vec::new(),
         },
         crate::protocol::TaskGraphNodeSpec {
             id: "final-synthesis".to_string(),
@@ -63,6 +67,10 @@ fn conflicting_seed_ids_are_scoped_and_dependencies_follow_the_remap() {
             kind: Some("synthesize".to_string()),
             depends_on: vec!["explore".to_string()],
             priority: 20,
+            model: None,
+            effort: None,
+            subsystem: None,
+            file_scope: Vec::new(),
         },
         crate::protocol::TaskGraphNodeSpec {
             id: "verify".to_string(),
@@ -70,6 +78,10 @@ fn conflicting_seed_ids_are_scoped_and_dependencies_follow_the_remap() {
             kind: Some("verify".to_string()),
             depends_on: vec!["final-synthesis".to_string()],
             priority: 30,
+            model: None,
+            effort: None,
+            subsystem: None,
+            file_scope: Vec::new(),
         },
     ];
     let occupied = HashSet::from([
@@ -1360,6 +1372,30 @@ fn schema_advertises_supported_swarm_fields() {
             .as_array()
             .expect("action enum")
             .contains(&json!("salvage"))
+    );
+}
+
+#[test]
+fn schema_describes_task_graph_execution_metadata() {
+    let schema = CommunicateTool::new().parameters_schema();
+    let node_properties = &schema["properties"]["nodes"]["items"]["properties"];
+
+    assert_eq!(node_properties["model"]["type"], json!("string"));
+    assert_eq!(
+        node_properties["effort"]["enum"],
+        json!(["none", "minimal", "low", "medium", "high", "xhigh", "max"])
+    );
+    assert_eq!(node_properties["subsystem"]["type"], json!("string"));
+    assert_eq!(node_properties["file_scope"]["type"], json!("array"));
+    assert_eq!(
+        node_properties["file_scope"]["items"]["type"],
+        json!("string")
+    );
+    assert!(
+        node_properties["file_scope"]["description"]
+            .as_str()
+            .expect("file scope description")
+            .contains("Repo-relative lexical")
     );
 }
 

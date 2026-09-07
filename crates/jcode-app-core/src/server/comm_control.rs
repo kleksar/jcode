@@ -20,8 +20,8 @@ use crate::agent::Agent;
 use crate::plan::{
     TaskControlAction, assignment_affinities_for_task, assignment_loads,
     build_control_assignment_text, combine_assignment_text, explicit_task_blocked_reason,
-    next_unassigned_runnable_item_id, task_control_action_allows_status, task_control_status_error,
-    task_control_target_item_id,
+    has_active_file_scope_conflict, next_runnable_item_ids, next_unassigned_runnable_item_id,
+    task_control_action_allows_status, task_control_status_error, task_control_target_item_id,
 };
 use crate::protocol::{NotificationType, PlanGraphStatus, ServerEvent};
 use jcode_agent_runtime::SoftInterruptSource;
@@ -131,6 +131,204 @@ fn release_auto_assign_claim(swarm_id: &str, session_id: &str) {
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     claims.remove(&auto_assign_claim_key(swarm_id, session_id));
 }
+
+#[derive(Clone)]
+struct AssignNextTaskReservationState {
+    swarm_id: String,
+    task_id: String,
+    claim_id: u64,
+    #[cfg(test)]
+    claimed_at: std::time::Instant,
+    file_scope: Vec<String>,
+    mutating: bool,
+}
+
+/// A task reservation is held from `assign_next` selection until its assignment
+/// response is finalized. In particular, it covers slow fresh-worker spawning,
+/// during which the task is not yet durably assigned in the plan.
+struct AssignNextTaskReservation {
+    swarm_id: String,
+    task_id: String,
+    claim_id: u64,
+}
+
+impl Drop for AssignNextTaskReservation {
+    fn drop(&mut self) {
+        release_assign_next_task_reservation(&self.swarm_id, &self.task_id, self.claim_id);
+    }
+}
+
+fn assign_next_task_reservations()
+-> &'static std::sync::Mutex<HashMap<String, AssignNextTaskReservationState>> {
+    static RESERVATIONS: std::sync::OnceLock<
+        std::sync::Mutex<HashMap<String, AssignNextTaskReservationState>>,
+    > = std::sync::OnceLock::new();
+    RESERVATIONS.get_or_init(|| std::sync::Mutex::new(HashMap::new()))
+}
+
+fn assign_next_task_reservation_sequence() -> &'static std::sync::atomic::AtomicU64 {
+    static SEQUENCE: std::sync::OnceLock<std::sync::atomic::AtomicU64> = std::sync::OnceLock::new();
+    SEQUENCE.get_or_init(|| std::sync::atomic::AtomicU64::new(1))
+}
+
+fn assign_next_task_reservation_key(swarm_id: &str, task_id: &str) -> String {
+    format!("{swarm_id}\n{task_id}")
+}
+
+fn release_assign_next_task_reservation(swarm_id: &str, task_id: &str, claim_id: u64) {
+    let mut reservations = assign_next_task_reservations()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let key = assign_next_task_reservation_key(swarm_id, task_id);
+    if reservations
+        .get(&key)
+        .is_some_and(|reservation| reservation.claim_id == claim_id)
+    {
+        reservations.remove(&key);
+    }
+}
+
+/// Reserve the next runnable unassigned task under the caller's existing plan
+/// write lock. This prevents a second concurrent `assign_next` from selecting
+/// the same task, or an overlapping mutating scope, before the first request has
+/// finished spawning its worker and writes `assigned_to` into the plan.
+fn reserve_next_unassigned_runnable_task(
+    swarm_id: &str,
+    plan: &VersionedPlan,
+) -> Option<AssignNextTaskReservation> {
+    let mut reservations = assign_next_task_reservations()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let selected = next_runnable_item_ids(&plan.items, None)
+        .into_iter()
+        .find_map(|task_id| {
+            let item = plan.items.iter().find(|item| item.id == task_id)?;
+            (item.assigned_to.is_none()
+                && !has_active_file_scope_conflict(plan, &task_id)
+                && !has_assign_next_task_reservation_conflict(swarm_id, plan, item, &reservations))
+            .then_some(item)
+        })?;
+
+    let claim_id =
+        assign_next_task_reservation_sequence().fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let task_id = selected.id.clone();
+    reservations.insert(
+        assign_next_task_reservation_key(swarm_id, &task_id),
+        AssignNextTaskReservationState {
+            swarm_id: swarm_id.to_string(),
+            task_id: task_id.clone(),
+            claim_id,
+            #[cfg(test)]
+            claimed_at: std::time::Instant::now(),
+            file_scope: selected.file_scope.clone(),
+            mutating: is_mutating_file_scoped_task(plan, &task_id),
+        },
+    );
+    Some(AssignNextTaskReservation {
+        swarm_id: swarm_id.to_string(),
+        task_id,
+        claim_id,
+    })
+}
+
+fn has_assign_next_task_reservation_conflict(
+    swarm_id: &str,
+    plan: &VersionedPlan,
+    candidate: &crate::plan::PlanItem,
+    reservations: &HashMap<String, AssignNextTaskReservationState>,
+) -> bool {
+    let candidate_mutating = is_mutating_file_scoped_task(plan, &candidate.id);
+    reservations.values().any(|reservation| {
+        reservation.swarm_id == swarm_id
+            && (reservation.task_id == candidate.id
+                || (candidate_mutating
+                    && reservation.mutating
+                    && file_scopes_overlap(&candidate.file_scope, &reservation.file_scope)))
+    })
+}
+
+fn is_mutating_file_scoped_task(plan: &VersionedPlan, task_id: &str) -> bool {
+    matches!(
+        plan.node_meta
+            .get(task_id)
+            .and_then(|meta| meta.kind.as_deref())
+            .map(str::trim),
+        Some(kind) if kind.eq_ignore_ascii_case("implement") || kind.eq_ignore_ascii_case("fix")
+    )
+}
+
+fn file_scopes_overlap(left: &[String], right: &[String]) -> bool {
+    left.iter().any(|left_path| {
+        right.iter().any(|right_path| {
+            left_path == right_path
+                || left_path
+                    .strip_prefix(right_path)
+                    .is_some_and(|suffix| suffix.starts_with('/'))
+                || right_path
+                    .strip_prefix(left_path)
+                    .is_some_and(|suffix| suffix.starts_with('/'))
+        })
+    })
+}
+
+#[cfg(test)]
+#[derive(Clone)]
+struct AssignNextReservationTestHook {
+    entered: mpsc::UnboundedSender<String>,
+    releases: Arc<Mutex<mpsc::UnboundedReceiver<()>>>,
+}
+
+#[cfg(test)]
+fn assign_next_reservation_test_hook()
+-> &'static std::sync::Mutex<Option<AssignNextReservationTestHook>> {
+    static HOOK: std::sync::OnceLock<std::sync::Mutex<Option<AssignNextReservationTestHook>>> =
+        std::sync::OnceLock::new();
+    HOOK.get_or_init(|| std::sync::Mutex::new(None))
+}
+
+#[cfg(test)]
+struct AssignNextReservationTestHookGuard;
+
+#[cfg(test)]
+impl Drop for AssignNextReservationTestHookGuard {
+    fn drop(&mut self) {
+        *assign_next_reservation_test_hook()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
+    }
+}
+
+#[cfg(test)]
+fn install_assign_next_reservation_test_hook() -> (
+    mpsc::UnboundedReceiver<String>,
+    mpsc::UnboundedSender<()>,
+    AssignNextReservationTestHookGuard,
+) {
+    let (entered_tx, entered_rx) = mpsc::unbounded_channel();
+    let (release_tx, release_rx) = mpsc::unbounded_channel();
+    *assign_next_reservation_test_hook()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(AssignNextReservationTestHook {
+        entered: entered_tx,
+        releases: Arc::new(Mutex::new(release_rx)),
+    });
+    (entered_rx, release_tx, AssignNextReservationTestHookGuard)
+}
+
+#[cfg(test)]
+async fn pause_after_assign_next_task_reservation(task_id: &str) {
+    let hook = assign_next_reservation_test_hook()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .clone();
+    if let Some(hook) = hook {
+        let _ = hook.entered.send(task_id.to_string());
+        let _ = hook.releases.lock().await.recv().await;
+    }
+}
+
+#[cfg(not(test))]
+async fn pause_after_assign_next_task_reservation(_task_id: &str) {}
 
 /// Error for an auto-pick that found no assignable worker. The leading
 /// sentence is a stable contract: `spawn_if_needed`/`run_plan` match on it to
@@ -587,13 +785,23 @@ pub(super) async fn resolve_assignment_target_for_task_test_hook(
     .await
 }
 
-async fn next_unassigned_runnable_task_id(
-    swarm_id: &str,
-    swarm_plans: &Arc<RwLock<HashMap<String, VersionedPlan>>>,
-) -> Option<String> {
-    let plans = swarm_plans.read().await;
-    let plan = plans.get(swarm_id)?;
-    next_unassigned_runnable_item_id(plan)
+/// Resolve the routing request used only when `assign_next` must create a fresh
+/// worker. Reusing an existing worker intentionally leaves its route untouched.
+fn node_execution_routing(
+    plan: &VersionedPlan,
+    task_id: &str,
+    fallback_model: Option<String>,
+    fallback_effort: Option<String>,
+) -> (Option<String>, Option<String>) {
+    let node_meta = plan.node_meta.get(task_id);
+    (
+        node_meta
+            .and_then(|meta| meta.model.clone())
+            .or(fallback_model),
+        node_meta
+            .and_then(|meta| meta.effort.clone())
+            .or(fallback_effort),
+    )
 }
 
 /// Like [`next_unassigned_runnable_task_id`], but when no unassigned runnable
@@ -609,13 +817,17 @@ async fn next_unassigned_runnable_task_id(
 /// per-node by [`crate::plan::MAX_DEAD_ASSIGNEE_RECLAIMS`] to respect the
 /// repeat-failure policy: beyond the cap only explicit `retry`/`assign_task`
 /// move the node.
-async fn next_runnable_task_id_reclaiming_stranded(
+async fn reserve_next_runnable_task_reclaiming_stranded(
     swarm_id: &str,
     swarm_plans: &Arc<RwLock<HashMap<String, VersionedPlan>>>,
     swarm_members: &Arc<RwLock<HashMap<String, SwarmMember>>>,
-) -> Option<String> {
-    if let Some(task_id) = next_unassigned_runnable_task_id(swarm_id, swarm_plans).await {
-        return Some(task_id);
+) -> Option<AssignNextTaskReservation> {
+    {
+        let plans = swarm_plans.write().await;
+        let plan = plans.get(swarm_id)?;
+        if let Some(reservation) = reserve_next_unassigned_runnable_task(swarm_id, plan) {
+            return Some(reservation);
+        }
     }
 
     // Snapshot member liveness first so the plans write lock is not held
@@ -639,13 +851,16 @@ async fn next_runnable_task_id_reclaiming_stranded(
 
     let mut plans = swarm_plans.write().await;
     let plan = plans.get_mut(swarm_id)?;
+    if let Some(reservation) = reserve_next_unassigned_runnable_task(swarm_id, plan) {
+        return Some(reservation);
+    }
     let stranded_id = crate::plan::next_stranded_runnable_item_id(plan, &assignee_is_dead)?;
     if crate::plan::reclaim_stranded_assignment(plan, &stranded_id) {
         crate::logging::info(&format!(
             "swarm {}: reclaimed stranded task '{}' from dead assignee for re-dispatch",
             swarm_id, stranded_id
         ));
-        Some(stranded_id)
+        reserve_next_unassigned_runnable_task(swarm_id, plan)
     } else {
         None
     }
@@ -1580,11 +1795,21 @@ async fn handle_comm_assign_task_with_mode(
         } else {
             None
         };
-        let blocked_reason = conflict_reason.or_else(|| {
-            requested_task_id
-                .as_deref()
-                .and_then(|task_id| explicit_task_blocked_reason(plan, task_id))
-        });
+        let blocked_reason = conflict_reason
+            .or_else(|| {
+                requested_task_id.as_deref().and_then(|task_id| {
+                    has_active_file_scope_conflict(plan, task_id).then(|| {
+                        format!(
+                            "Task '{task_id}' overlaps an active implement/fix node's exclusive file_scope; wait for it to become terminal before dispatching this write task."
+                        )
+                    })
+                })
+            })
+            .or_else(|| {
+                requested_task_id
+                    .as_deref()
+                    .and_then(|task_id| explicit_task_blocked_reason(plan, task_id))
+            });
         let found_idx = if blocked_reason.is_some() {
             None
         } else {
@@ -1888,8 +2113,9 @@ pub(super) async fn handle_comm_assign_next(
             None => return,
         };
 
-        let Some(selected_task_id) =
-            next_runnable_task_id_reclaiming_stranded(&swarm_id, swarm_plans, swarm_members).await
+        let Some(task_reservation) =
+            reserve_next_runnable_task_reclaiming_stranded(&swarm_id, swarm_plans, swarm_members)
+                .await
         else {
             let _ = client_event_tx.send(ServerEvent::Error {
                 id,
@@ -1897,6 +2123,18 @@ pub(super) async fn handle_comm_assign_next(
                 retry_after_secs: None,
             });
             return;
+        };
+        let selected_task_id = task_reservation.task_id.clone();
+        pause_after_assign_next_task_reservation(&selected_task_id).await;
+
+        let (node_model, node_effort) = {
+            let plans = swarm_plans.read().await;
+            plans
+                .get(&swarm_id)
+                .map(|plan| {
+                    node_execution_routing(plan, &selected_task_id, model.clone(), effort.clone())
+                })
+                .unwrap_or_else(|| (model.clone(), effort.clone()))
         };
 
         let preferred_target = resolve_assignment_target_for_task(
@@ -1924,8 +2162,8 @@ pub(super) async fn handle_comm_assign_next(
                 working_dir.clone(),
                 None,
                 None,
-                model.clone(),
-                effort.clone(),
+                node_model,
+                node_effort,
                 None,
                 sessions,
                 global_session_id,

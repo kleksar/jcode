@@ -107,3 +107,57 @@ async fn assign_next_prefers_worker_with_matching_subsystem_metadata() {
         other => panic!("expected CommAssignTaskResponse, got {other:?}"),
     }
 }
+
+#[test]
+fn node_execution_routing_prefers_node_overrides_and_preserves_request_fallbacks() {
+    let mut plan = VersionedPlan::new();
+    plan.node_meta.insert(
+        "override".to_string(),
+        crate::plan::NodeMeta {
+            model: Some("openai-api:gpt-5.6-terra".to_string()),
+            effort: Some("xhigh".to_string()),
+            ..crate::plan::NodeMeta::default()
+        },
+    );
+    plan.node_meta.insert(
+        "partial".to_string(),
+        crate::plan::NodeMeta {
+            model: Some("inherit".to_string()),
+            ..crate::plan::NodeMeta::default()
+        },
+    );
+
+    assert_eq!(
+        node_execution_routing(
+            &plan,
+            "override",
+            Some("request-model".to_string()),
+            Some("low".to_string()),
+        ),
+        (
+            Some("openai-api:gpt-5.6-terra".to_string()),
+            Some("xhigh".to_string())
+        )
+    );
+    assert_eq!(
+        node_execution_routing(
+            &plan,
+            "partial",
+            Some("request-model".to_string()),
+            Some("high".to_string()),
+        ),
+        (Some("inherit".to_string()), Some("high".to_string()))
+    );
+    assert_eq!(
+        node_execution_routing(
+            &plan,
+            "legacy",
+            Some("request-model".to_string()),
+            Some("medium".to_string()),
+        ),
+        (
+            Some("request-model".to_string()),
+            Some("medium".to_string())
+        )
+    );
+}

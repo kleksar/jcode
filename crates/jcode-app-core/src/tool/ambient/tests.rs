@@ -335,11 +335,13 @@ fn test_schedule_tool_input_spawn_target() {
     let input = json!({
         "task": "Follow up in a new child session",
         "wake_in_minutes": 10,
-        "target": "spawn"
+        "target": "spawn",
+        "context_mode": "inherit"
     });
 
     let parsed: ScheduleToolInput = serde_json::from_value(input).unwrap();
     assert_eq!(parsed.target.as_deref(), Some("spawn"));
+    assert_eq!(parsed.context_mode.as_deref(), Some("inherit"));
 }
 
 #[test]
@@ -373,13 +375,13 @@ fn test_schedule_tool_input_cancel_action() {
 #[test]
 fn test_parse_schedule_target_defaults_to_resume_originating_session() {
     assert_eq!(
-        parse_schedule_target(None, "session_123").unwrap(),
+        parse_schedule_target(None, None, "session_123").unwrap(),
         ScheduleTarget::Session {
             session_id: "session_123".to_string()
         }
     );
     assert_eq!(
-        parse_schedule_target(Some("resume"), "session_123").unwrap(),
+        parse_schedule_target(Some("resume"), None, "session_123").unwrap(),
         ScheduleTarget::Session {
             session_id: "session_123".to_string()
         }
@@ -389,22 +391,30 @@ fn test_parse_schedule_target_defaults_to_resume_originating_session() {
 #[test]
 fn test_parse_schedule_target_supports_spawn_and_ambient() {
     assert_eq!(
-        parse_schedule_target(Some("spawn"), "session_123").unwrap(),
+        parse_schedule_target(Some("spawn"), None, "session_123").unwrap(),
         ScheduleTarget::Spawn {
-            parent_session_id: "session_123".to_string()
+            parent_session_id: "session_123".to_string(),
+            context_mode: ScheduleContextMode::Fresh,
         }
     );
     assert_eq!(
-        parse_schedule_target(Some("ambient"), "session_123").unwrap(),
+        parse_schedule_target(Some("ambient"), None, "session_123").unwrap(),
         ScheduleTarget::Ambient
     );
 }
 
 #[test]
 fn test_parse_schedule_target_rejects_removed_session_alias() {
-    let err = parse_schedule_target(Some("session"), "session_123")
+    let err = parse_schedule_target(Some("session"), None, "session_123")
         .expect_err("removed session alias should be rejected");
     assert!(err.to_string().contains("resume, spawn, ambient"));
+}
+
+#[test]
+fn test_parse_schedule_target_rejects_context_mode_for_non_spawn_target() {
+    let err = parse_schedule_target(Some("resume"), Some("inherit"), "session_123")
+        .expect_err("context mode is only meaningful for spawned child sessions");
+    assert!(err.to_string().contains("context_mode is only valid"));
 }
 
 #[tokio::test]
@@ -472,6 +482,8 @@ fn test_schedule_tool_schema_avoids_top_level_combinators() {
     assert!(schema.get("anyOf").is_none());
     assert!(schema.get("oneOf").is_none());
     assert!(schema.get("allOf").is_none());
+    let context_mode = &schema["properties"]["context_mode"];
+    assert_eq!(context_mode["enum"], json!(["fresh", "inherit"]));
 }
 
 #[tokio::test]

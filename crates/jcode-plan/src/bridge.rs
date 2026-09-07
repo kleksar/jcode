@@ -111,6 +111,10 @@ pub fn to_task_graph(plan: &VersionedPlan) -> TaskGraph {
             is_gate: meta.is_gate,
             planner: meta.planner.clone(),
             priority: crate::priority_rank(&item.priority),
+            model: meta.model.clone(),
+            effort: meta.effort.clone(),
+            subsystem: item.subsystem.clone(),
+            file_scope: item.file_scope.clone(),
             output: artifact,
             origin: parse_origin(meta.origin.as_deref()),
         });
@@ -143,8 +147,8 @@ pub fn apply_task_graph(plan: &mut VersionedPlan, graph: &TaskGraph) {
                 .map(|p| p.priority.clone())
                 .unwrap_or_else(|| priority_string(node.priority)),
             id: node.id.clone(),
-            subsystem: prev.and_then(|p| p.subsystem.clone()),
-            file_scope: prev.map(|p| p.file_scope.clone()).unwrap_or_default(),
+            subsystem: node.subsystem.clone(),
+            file_scope: node.file_scope.clone(),
             blocked_by: node.depends_on.clone(),
             assigned_to: node.owner.clone(),
         });
@@ -152,6 +156,8 @@ pub fn apply_task_graph(plan: &mut VersionedPlan, graph: &TaskGraph) {
             node.id.clone(),
             NodeMeta {
                 kind: Some(kind_str(node.kind).to_string()),
+                model: node.model.clone(),
+                effort: node.effort.clone(),
                 parent: node.parent.clone(),
                 expanded: node.expanded,
                 is_gate: node.is_gate,
@@ -320,7 +326,7 @@ pub fn low_confidence_completed_ids(plan: &VersionedPlan) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::dag::{NodeSpec, complete_node, dispatch, expand_node, seed};
+    use crate::dag::{NodeSpec, complete_node, dispatch, expand_node, inject_from_gate, seed};
 
     fn plan_item(id: &str, status: &str) -> PlanItem {
         PlanItem {
@@ -440,6 +446,97 @@ mod tests {
         // The child's artifact round-trips through node_meta JSON.
         let stored = &plan.node_meta["root.1"].artifact_json;
         assert!(stored.as_ref().unwrap().contains("found"));
+    }
+
+    #[test]
+    fn execution_metadata_survives_seed_expand_and_gap_injection() {
+        fn spec(id: &str, kind: NodeKind, scope: &str) -> NodeSpec {
+            NodeSpec {
+                id: Some(id.to_string()),
+                content: format!("task {id}"),
+                kind,
+                depends_on: Vec::new(),
+                priority: 0,
+                model: Some("openai-api:gpt-5.6-terra".to_string()),
+                effort: Some("xhigh".to_string()),
+                subsystem: Some("task-graph".to_string()),
+                file_scope: vec![scope.to_string()],
+            }
+        }
+
+        let mut plan = VersionedPlan::new();
+        plan.mode = "deep".to_string();
+
+        let mut graph = to_task_graph(&plan);
+        seed(
+            &mut graph,
+            vec![spec("root", NodeKind::Implement, "crates/root")],
+        )
+        .unwrap();
+        apply_task_graph(&mut plan, &graph);
+
+        let root = plan.items.iter().find(|item| item.id == "root").unwrap();
+        assert_eq!(root.subsystem.as_deref(), Some("task-graph"));
+        assert_eq!(root.file_scope, vec!["crates/root"]);
+        assert_eq!(
+            plan.node_meta["root"].model.as_deref(),
+            Some("openai-api:gpt-5.6-terra")
+        );
+        assert_eq!(plan.node_meta["root"].effort.as_deref(), Some("xhigh"));
+
+        let mut graph = to_task_graph(&plan);
+        dispatch(&mut graph, "root", "worker");
+        expand_node(
+            &mut graph,
+            "root",
+            "worker",
+            vec![spec("child", NodeKind::Fix, "crates/child")],
+        )
+        .unwrap();
+        apply_task_graph(&mut plan, &graph);
+
+        let child = plan.items.iter().find(|item| item.id == "child").unwrap();
+        assert_eq!(child.file_scope, vec!["crates/child"]);
+        assert_eq!(plan.node_meta["child"].effort.as_deref(), Some("xhigh"));
+
+        let gate_id = plan
+            .node_meta
+            .iter()
+            .find_map(|(id, meta)| {
+                (meta.is_gate && meta.parent.as_deref() == Some("root")).then(|| id.clone())
+            })
+            .unwrap();
+        let mut graph = to_task_graph(&plan);
+        dispatch(&mut graph, "child", "worker");
+        complete_node(
+            &mut graph,
+            "child",
+            "worker",
+            HandoffArtifact {
+                findings: "fixed".to_string(),
+                what_i_did_not_check: vec!["nothing, fully covered".to_string()],
+                confidence: Some("high".to_string()),
+                ..HandoffArtifact::default()
+            },
+        )
+        .unwrap();
+        dispatch(&mut graph, &gate_id, "worker");
+        inject_from_gate(
+            &mut graph,
+            &gate_id,
+            "worker",
+            vec![spec("gap", NodeKind::Fix, "crates/gap")],
+        )
+        .unwrap();
+        apply_task_graph(&mut plan, &graph);
+
+        let gap = plan.items.iter().find(|item| item.id == "gap").unwrap();
+        assert_eq!(gap.file_scope, vec!["crates/gap"]);
+        assert_eq!(
+            plan.node_meta["gap"].model.as_deref(),
+            Some("openai-api:gpt-5.6-terra")
+        );
+        assert_eq!(plan.node_meta["gap"].effort.as_deref(), Some("xhigh"));
     }
 
     #[test]

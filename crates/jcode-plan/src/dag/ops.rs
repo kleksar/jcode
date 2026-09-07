@@ -21,7 +21,7 @@ pub fn seed(graph: &mut TaskGraph, specs: Vec<NodeSpec>) -> Result<(), DagError>
     // id with different declarative fields is still ambiguous and rejected.
     let mut unique_specs: Vec<NodeSpec> = Vec::with_capacity(specs.len());
     let mut indexes = std::collections::HashMap::<String, usize>::new();
-    for spec in specs {
+    for spec in normalize_and_validate_specs(specs, "seed")? {
         let id = validated_spec_id(&spec, "seed")?;
         if let Some(existing_index) = indexes.get(&id).copied() {
             if !seed_specs_equivalent(&unique_specs[existing_index], &spec) {
@@ -80,6 +80,10 @@ fn seed_specs_equivalent(left: &NodeSpec, right: &NodeSpec) -> bool {
         && left.content == right.content
         && left.kind == right.kind
         && left.priority == right.priority
+        && left.model == right.model
+        && left.effort == right.effort
+        && left.subsystem == right.subsystem
+        && left.file_scope == right.file_scope
         && dependency_sets_equal(&left.depends_on, &right.depends_on)
 }
 
@@ -93,6 +97,10 @@ fn seed_spec_matches_existing(graph: &TaskGraph, node: &TaskNode, spec: &NodeSpe
         || node.content != spec.content
         || node.kind != spec.kind
         || node.priority != spec.priority
+        || node.model != spec.model
+        || node.effort != spec.effort
+        || node.subsystem != spec.subsystem
+        || node.file_scope != spec.file_scope
     {
         return false;
     }
@@ -201,6 +209,10 @@ fn ensure_root_gate(graph: &mut TaskGraph) {
                 is_gate: true,
                 planner: None,
                 priority: 0,
+                model: None,
+                effort: None,
+                subsystem: None,
+                file_scope: Vec::new(),
                 output: None,
                 origin: Some(NodeOrigin::Gate),
             });
@@ -258,6 +270,8 @@ pub fn expand_node(
             ));
         }
     }
+
+    let children = normalize_and_validate_specs(children, "expand")?;
 
     // Validate child ids and dependency references. Collect the validated ids
     // once so later steps never re-unwrap `spec.id`.
@@ -324,6 +338,10 @@ pub fn expand_node(
             is_gate: true,
             planner: None,
             priority: 0,
+            model: None,
+            effort: None,
+            subsystem: None,
+            file_scope: Vec::new(),
             output: None,
             origin: Some(NodeOrigin::Gate),
         };
@@ -475,6 +493,8 @@ pub fn inject_from_gate(
         }
         gate.parent.clone()
     };
+
+    let new_nodes = normalize_and_validate_specs(new_nodes, "inject_from_gate")?;
 
     // Validate new node ids/deps.
     let mut seen = std::collections::HashSet::new();
@@ -643,6 +663,101 @@ fn validated_spec_id(spec: &NodeSpec, op: &str) -> Result<String, DagError> {
     Ok(id)
 }
 
+/// Normalize the externally supplied parts of a node declaration before any
+/// mutation can compare or persist it. `file_scope` is deliberately lexical:
+/// it describes repository paths, not files on the server filesystem, so do not
+/// consult the filesystem while validating it.
+fn normalize_and_validate_specs(specs: Vec<NodeSpec>, op: &str) -> Result<Vec<NodeSpec>, DagError> {
+    specs
+        .into_iter()
+        .map(|mut spec| {
+            let node = validated_spec_id(&spec, op)?;
+            spec.file_scope = normalize_file_scopes(&node, spec.file_scope)?;
+            validate_node_effort(&node, spec.effort.as_deref())?;
+            Ok(spec)
+        })
+        .collect()
+}
+
+fn normalize_file_scopes(node: &str, scopes: Vec<String>) -> Result<Vec<String>, DagError> {
+    let mut normalized_scopes = Vec::with_capacity(scopes.len());
+    let mut seen = std::collections::HashSet::new();
+
+    for scope in scopes {
+        let original = scope.clone();
+        let trimmed = scope.trim();
+        if is_absolute_file_scope(trimmed) {
+            return Err(invalid_file_scope(
+                node,
+                original,
+                "absolute paths are not allowed",
+            ));
+        }
+
+        let mut components = Vec::new();
+        for component in trimmed.split(['/', '\\']) {
+            match component {
+                "" | "." => continue,
+                ".." => {
+                    return Err(invalid_file_scope(
+                        node,
+                        original,
+                        "parent traversal '..' is not allowed",
+                    ));
+                }
+                component => components.push(component),
+            }
+        }
+        let normalized = components.join("/");
+        if normalized.is_empty() {
+            return Err(invalid_file_scope(
+                node,
+                original,
+                "scope normalizes to an empty path",
+            ));
+        }
+        if seen.insert(normalized.clone()) {
+            normalized_scopes.push(normalized);
+        }
+    }
+
+    Ok(normalized_scopes)
+}
+
+fn is_absolute_file_scope(scope: &str) -> bool {
+    scope.starts_with(['/', '\\'])
+        || scope.as_bytes().get(0..3).is_some_and(|prefix| {
+            prefix[0].is_ascii_alphabetic()
+                && prefix[1] == b':'
+                && matches!(prefix[2], b'/' | b'\\')
+        })
+}
+
+fn invalid_file_scope(node: &str, scope: String, reason: &str) -> DagError {
+    DagError::InvalidFileScope {
+        node: node.to_string(),
+        scope,
+        reason: reason.to_string(),
+    }
+}
+
+fn validate_node_effort(node: &str, effort: Option<&str>) -> Result<(), DagError> {
+    let Some(effort) = effort else {
+        return Ok(());
+    };
+    if matches!(
+        effort,
+        "none" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max"
+    ) {
+        Ok(())
+    } else {
+        Err(DagError::InvalidEffort {
+            node: node.to_string(),
+            effort: effort.to_string(),
+        })
+    }
+}
+
 fn spec_to_node(spec: NodeSpec, parent: Option<String>, origin: NodeOrigin) -> TaskNode {
     // Dedup dependencies (order-preserving). Agent-supplied specs sometimes
     // repeat a dep; duplicates carry no meaning and used to trip the cycle
@@ -665,6 +780,10 @@ fn spec_to_node(spec: NodeSpec, parent: Option<String>, origin: NodeOrigin) -> T
         is_gate: false,
         planner: None,
         priority: spec.priority,
+        model: spec.model,
+        effort: spec.effort,
+        subsystem: spec.subsystem,
+        file_scope: spec.file_scope,
         output: None,
         origin: Some(origin),
     }

@@ -22,6 +22,20 @@ pub struct TaskGraphNodeSpec {
     pub depends_on: Vec<String>,
     #[serde(default, skip_serializing_if = "is_zero_u8")]
     pub priority: u8,
+    /// Optional model override used only when a fresh worker is created.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    /// Optional reasoning-effort override used only when a fresh worker is created.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effort: Option<String>,
+    /// Optional subsystem affinity for assignment scoring and plan display.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subsystem: Option<String>,
+    /// Normalized repo-relative lexical exclusive write scopes for mutating
+    /// task-DAG nodes. DAG ingestion trims and normalizes separators, and
+    /// rejects absolute paths, empty normalized paths, and `..` traversal.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub file_scope: Vec<String>,
 }
 
 fn is_zero_u8(value: &u8) -> bool {

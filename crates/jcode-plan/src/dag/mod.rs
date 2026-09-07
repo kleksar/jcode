@@ -378,6 +378,18 @@ pub struct TaskNode {
     /// Priority used to order the ready set. Lower rank runs first.
     #[serde(default)]
     pub priority: u8,
+    /// Optional model override used only if dispatch creates a fresh worker.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    /// Optional reasoning-effort override used only if dispatch creates a fresh worker.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effort: Option<String>,
+    /// Optional subsystem affinity for dispatch and plan display.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subsystem: Option<String>,
+    /// Normalized repo-relative exclusive write scopes for mutating work.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub file_scope: Vec<String>,
     /// The typed handoff artifact, present once `Done`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub output: Option<HandoffArtifact>,
@@ -413,6 +425,17 @@ pub struct NodeSpec {
     pub depends_on: Vec<NodeId>,
     #[serde(default)]
     pub priority: u8,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effort: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subsystem: Option<String>,
+    /// Repo-relative lexical write scopes. Validated DAG mutations trim and
+    /// normalize these before persisting them: no absolute paths or `..`
+    /// traversal is allowed.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub file_scope: Vec<String>,
 }
 
 impl NodeSpec {
@@ -423,6 +446,10 @@ impl NodeSpec {
             kind,
             depends_on: Vec::new(),
             priority: 0,
+            model: None,
+            effort: None,
+            subsystem: None,
+            file_scope: Vec::new(),
         }
     }
 
@@ -468,6 +495,15 @@ pub enum DagError {
     StaleGateScope { gate: NodeId, pending: Vec<NodeId> },
     /// A gate kind was supplied as user work, or vice versa.
     GateMisuse(String),
+    /// A submitted file scope is not a normalized repo-relative lexical path.
+    InvalidFileScope {
+        node: NodeId,
+        scope: String,
+        reason: String,
+    },
+    /// A submitted per-node reasoning effort is not supported by fresh-worker
+    /// routing.
+    InvalidEffort { node: NodeId, effort: String },
 }
 
 impl std::fmt::Display for DagError {
@@ -527,6 +563,20 @@ impl std::fmt::Display for DagError {
                 )
             }
             DagError::GateMisuse(msg) => write!(f, "gate misuse: {msg}"),
+            DagError::InvalidFileScope {
+                node,
+                scope,
+                reason,
+            } => {
+                write!(
+                    f,
+                    "node '{node}' has invalid repo-relative file_scope '{scope}': {reason}"
+                )
+            }
+            DagError::InvalidEffort { node, effort } => write!(
+                f,
+                "node '{node}' has invalid effort '{effort}'; expected one of none, minimal, low, medium, high, xhigh, max"
+            ),
         }
     }
 }

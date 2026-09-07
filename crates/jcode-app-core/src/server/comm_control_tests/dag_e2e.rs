@@ -18,6 +18,10 @@ fn node_spec(id: &str, kind: &str, deps: &[&str]) -> TaskGraphNodeSpec {
         kind: Some(kind.to_string()),
         depends_on: deps.iter().map(|d| d.to_string()).collect(),
         priority: 0,
+        model: None,
+        effort: None,
+        subsystem: None,
+        file_scope: Vec::new(),
     }
 }
 
@@ -275,16 +279,23 @@ async fn e2e_identical_seed_replay_succeeds_without_version_or_node_churn() {
     drop(plans);
     let events: Vec<_> = std::iter::from_fn(|| fx.client_rx.try_recv().ok()).collect();
     assert!(
-        events.iter().all(|event| !matches!(event, ServerEvent::Error { .. })),
+        events
+            .iter()
+            .all(|event| !matches!(event, ServerEvent::Error { .. })),
         "an identical replay must acknowledge success: {events:?}"
     );
-    assert!(events.iter().any(|event| matches!(event, ServerEvent::Done { .. })));
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event, ServerEvent::Done { .. }))
+    );
 }
 
 #[tokio::test]
 async fn e2e_seed_rejects_conflicting_existing_definition_without_mutation() {
     let (_env, _runtime) = RuntimeEnvGuard::new();
-    let mut fx = graph_fixture_named("swarm-seed-conflict", "coord-conflict", "worker-conflict").await;
+    let mut fx =
+        graph_fixture_named("swarm-seed-conflict", "coord-conflict", "worker-conflict").await;
     fx.seed("light", vec![node_spec("shared", "explore", &[])])
         .await;
     while fx.client_rx.try_recv().is_ok() {}
@@ -354,6 +365,34 @@ async fn e2e_seed_rejects_cycle_without_mutating_plan() {
         }
     }
     assert!(saw_error, "cycle seed should surface an error");
+}
+
+#[tokio::test]
+async fn e2e_seed_rejects_invalid_node_effort_before_any_worker_dispatch() {
+    let (_env, _runtime) = RuntimeEnvGuard::new();
+    let mut fx = graph_fixture_named(
+        "swarm-invalid-node-effort",
+        "coord-invalid-node-effort",
+        "worker-invalid-node-effort",
+    )
+    .await;
+    let mut invalid = node_spec("write", "implement", &[]);
+    invalid.effort = Some("turbo".to_string());
+
+    fx.seed("light", vec![invalid]).await;
+
+    let plans = fx.swarm_plans.read().await;
+    assert!(
+        plans[&fx.swarm_id].items.is_empty(),
+        "invalid effort must reject the graph mutation before any task can dispatch"
+    );
+    drop(plans);
+    let events: Vec<_> = std::iter::from_fn(|| fx.client_rx.try_recv().ok()).collect();
+    assert!(events.iter().any(|event| matches!(
+        event,
+        ServerEvent::Error { message, .. }
+            if message.contains("invalid effort 'turbo'") && message.contains("none, minimal")
+    )));
 }
 
 #[tokio::test]
@@ -1314,7 +1353,10 @@ async fn e2e_seed_rejects_light_downgrade_of_nonempty_deep_plan() {
 
     let plans = fx.swarm_plans.read().await;
     let plan = &plans[&fx.swarm_id];
-    assert_eq!(plan.mode, "deep", "deep plan must not be downgraded to light");
+    assert_eq!(
+        plan.mode, "deep",
+        "deep plan must not be downgraded to light"
+    );
     assert!(
         plan.items.iter().all(|i| i.id != "b"),
         "the downgrade seed must be rejected wholesale"
