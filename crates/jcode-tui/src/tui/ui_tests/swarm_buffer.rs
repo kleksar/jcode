@@ -79,6 +79,10 @@ fn fact_test_state(input: String, scheduled: bool) -> TestState {
         provider_model: Some("gpt-5.6-sol".to_string()),
         working_dir: Some(format!("{home}/jcode")),
         info_widget_data,
+        footer_quota: Some(crate::tui::FooterQuota {
+            remaining_percent: 71,
+            reset_in: "6d 20h".to_string(),
+        }),
         suppress_info_widgets: true,
         display_messages: vec![DisplayMessage::assistant("last transcript line")],
         messages_version: 1,
@@ -295,7 +299,7 @@ fn pinned_session_footer_keeps_only_facts_and_context_in_one_stable_row() {
     let facts = &rows[29];
     assert!(facts.contains("~/jcode"), "facts row: {facts}");
     assert!(facts.contains("GPT-5.6 Sol/high"), "facts row: {facts}");
-    assert!(facts.contains("71% left"), "facts row: {facts}");
+    assert!(facts.contains("7-day 71%"), "facts row: {facts}");
     assert!(
         rows.iter().all(|row| {
             !row.contains("chat mode") && !row.contains("Enter send") && !row.contains("/ commands")
