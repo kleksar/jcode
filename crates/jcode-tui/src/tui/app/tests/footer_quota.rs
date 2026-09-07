@@ -19,12 +19,17 @@ fn test_footer_quota_hides_floating_diagnostics_but_preserves_model_effort() {
     assert!(floating.git_info.is_none() && floating.cache_hit_info.is_none());
     let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(140, 30)).unwrap();
     let text = render_and_snap(&app, &mut terminal);
-    let last_row = (0..140)
-        .map(|x| terminal.backend().buffer()[(x, 29)].symbol())
-        .collect::<String>();
+    let footer_rows = (28..30)
+        .map(|y| {
+            (0..140)
+                .map(|x| terminal.backend().buffer()[(x, y)].symbol())
+                .collect::<String>()
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
     assert!(
-        last_row.contains("/high"),
-        "model effort must stay in footer: {last_row}"
+        footer_rows.contains("/high"),
+        "model effort must stay in footer: {footer_rows}"
     );
     assert_eq!(
         text.matches("/high").count(),

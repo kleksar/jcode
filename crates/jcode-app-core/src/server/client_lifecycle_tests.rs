@@ -19,6 +19,74 @@ struct IsolatedReloadRecoveryEnv {
 }
 
 #[tokio::test]
+async fn closed_session_rejects_no_reply_context_message() {
+    let provider: Arc<dyn Provider> = Arc::new(PanicOnForkProvider {
+        forked: Arc::new(AtomicBool::new(false)),
+    });
+    let registry = Registry::new(Arc::clone(&provider)).await;
+    let mut session = crate::session::Session::create_with_id(
+        "session_closed_context".to_string(),
+        None,
+        None,
+    );
+    session.mark_closed();
+    let agent = Arc::new(Mutex::new(Agent::new_with_session(
+        provider, registry, session, None,
+    )));
+    agent.lock().await.mark_closed();
+    let (event_tx, mut event_rx) = mpsc::unbounded_channel();
+
+    append_context_message(
+        41,
+        "must not be appended",
+        Vec::new(),
+        "session_closed_context",
+        false,
+        &agent,
+        &event_tx,
+    )
+    .await;
+
+    assert!(matches!(
+        event_rx.recv().await,
+        Some(ServerEvent::Error { id: 41, message, .. }) if message == "Session is closed"
+    ));
+    assert_eq!(agent.lock().await.visible_conversation_message_count(), 0);
+}
+
+#[tokio::test]
+async fn resume_source_working_dir_does_not_wait_for_busy_agent_lock() {
+    let provider: Arc<dyn Provider> = Arc::new(PanicOnForkProvider {
+        forked: Arc::new(AtomicBool::new(false)),
+    });
+    let registry = Registry::new(Arc::clone(&provider)).await;
+    let mut session = crate::session::Session::create_with_id(
+        "session_busy_resume_source".to_string(),
+        None,
+        None,
+    );
+    session.working_dir = Some("/workspace/busy-resume-source".to_string());
+    let agent = Arc::new(Mutex::new(Agent::new_with_session(
+        provider, registry, session, None,
+    )));
+    let _busy_agent_lock = agent.lock().await;
+
+    let working_dir = tokio::time::timeout(
+        Duration::from_millis(100),
+        async {
+            resume_source_working_dir(
+                &agent,
+                Some("/workspace/busy-resume-source".to_string()),
+            )
+        },
+    )
+    .await
+    .expect("switching away from a busy session must not wait for its Agent mutex");
+
+    assert_eq!(working_dir.as_deref(), Some("/workspace/busy-resume-source"));
+}
+
+#[tokio::test]
 async fn session_control_handle_does_not_wait_for_busy_agent_lock() {
     let provider: Arc<dyn Provider> = Arc::new(PanicOnForkProvider {
         forked: Arc::new(AtomicBool::new(false)),

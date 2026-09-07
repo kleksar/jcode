@@ -200,6 +200,20 @@ impl Client {
             .await
     }
 
+    /// Explicitly close an idle session while retaining its transcript.
+    pub async fn close_session(&mut self, session_id: &str) -> Result<u64> {
+        let id = self.next_id;
+        self.next_id += 1;
+
+        let request = Request::CloseSession {
+            id,
+            session_id: session_id.to_string(),
+        };
+        let json = serde_json::to_string(&request)? + "\n";
+        self.writer.write_all(json.as_bytes()).await?;
+        Ok(id)
+    }
+
     pub async fn resume_session_with_options(
         &mut self,
         session_id: &str,

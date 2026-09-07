@@ -12,6 +12,7 @@ mod client_lifecycle;
 mod client_lifecycle_logging;
 mod client_lightweight_control;
 mod client_session;
+mod client_session_close;
 mod client_state;
 mod client_writer;
 mod comm_await;
@@ -109,6 +110,9 @@ use tokio::sync::{Mutex, OnceCell, RwLock, broadcast, mpsc};
 pub(super) type SessionAgents = Arc<RwLock<HashMap<String, Arc<Mutex<Agent>>>>>;
 pub(super) type ChannelSubscriptions =
     Arc<RwLock<HashMap<String, HashMap<String, HashSet<String>>>>>;
+
+#[cfg(test)]
+mod client_session_close_tests;
 
 fn idle_monitor_should_start(client_count: usize, has_live_headless_worker: bool) -> bool {
     client_count == 0 && !has_live_headless_worker

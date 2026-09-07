@@ -877,6 +877,166 @@ fn live_presence(session_id: &str, streaming: bool) -> crate::session::SessionPr
     }
 }
 
+fn select_session(picker: &mut SessionPicker, session_id: &str) {
+    let item_index = picker
+        .item_to_session
+        .iter()
+        .enumerate()
+        .find_map(|(item_index, visible_index)| {
+            visible_index
+                .and_then(|visible_index| picker.visible_sessions.get(visible_index).copied())
+                .and_then(|session_ref| picker.session_by_ref(session_ref))
+                .is_some_and(|session| session.id == session_id)
+                .then_some(item_index)
+        })
+        .expect("session should be selectable");
+    picker.list_state.select(Some(item_index));
+}
+
+#[test]
+fn session_picker_ctrl_a_toggles_active_and_all_recent_by_session_id() {
+    let working = make_session("working", "working", false, SessionStatus::Active);
+    let ready = make_session("ready", "ready", false, SessionStatus::Active);
+    let closed = make_session("closed", "closed", false, SessionStatus::Closed);
+    let crashed = make_session(
+        "crashed",
+        "crashed",
+        false,
+        SessionStatus::Crashed { message: None },
+    );
+    let mut external = make_session("external", "external", false, SessionStatus::Closed);
+    external.source = SessionSource::Codex;
+
+    let mut picker = SessionPicker::new(vec![working, ready, closed, crashed, external]);
+    picker.activate_active_filter();
+    picker.set_live_presence_for_test(vec![
+        live_presence("working", true),
+        live_presence("ready", false),
+    ]);
+
+    assert_eq!(picker.filter_mode, SessionFilterMode::Active);
+    assert_eq!(
+        picker
+            .visible_session_iter()
+            .map(|session| session.id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["ready", "working"]
+    );
+    select_session(&mut picker, "ready");
+
+    picker
+        .handle_overlay_key(KeyCode::Char('a'), KeyModifiers::CONTROL)
+        .expect("Ctrl+A should be handled");
+    assert_eq!(picker.filter_mode, SessionFilterMode::All);
+    assert_eq!(picker.visible_session_count(), 5);
+    assert_eq!(picker.selected_session().map(|session| session.id.as_str()), Some("ready"));
+
+    picker
+        .handle_overlay_key(KeyCode::Char('a'), KeyModifiers::CONTROL)
+        .expect("Ctrl+A should toggle back");
+    assert_eq!(picker.filter_mode, SessionFilterMode::Active);
+    assert_eq!(picker.selected_session().map(|session| session.id.as_str()), Some("ready"));
+}
+
+#[test]
+fn active_filter_shows_root_debug_sessions_but_keeps_debug_children_hidden() {
+    let mut root_debug = make_session("root-debug", "root debug", true, SessionStatus::Active);
+    root_debug.parent_id = None;
+    let mut child_debug = make_session("child-debug", "child debug", true, SessionStatus::Active);
+    child_debug.parent_id = Some("parent".to_string());
+    let mut picker = SessionPicker::new(vec![root_debug, child_debug]);
+    picker.activate_active_filter();
+    picker.set_live_presence_for_test(vec![
+        live_presence("root-debug", false),
+        live_presence("child-debug", false),
+    ]);
+
+    assert_eq!(picker.visible_session_count(), 1);
+    assert_eq!(picker.selected_session().map(|session| session.id.as_str()), Some("root-debug"));
+}
+
+#[test]
+fn active_filter_synthesizes_row_for_live_session_without_snapshot() {
+    let mut picker = SessionPicker::new(Vec::new());
+    picker.activate_active_filter();
+    picker.set_live_presence_for_test(vec![live_presence("session_swan_missing", false)]);
+
+    assert_eq!(picker.visible_session_count(), 1);
+    assert_eq!(
+        picker.selected_session().map(|session| session.id.as_str()),
+        Some("session_swan_missing")
+    );
+}
+
+#[test]
+fn session_picker_ctrl_x_requires_double_press_and_resets_when_selection_changes() {
+    let ready_one = make_session("ready_one", "ready one", false, SessionStatus::Active);
+    let ready_two = make_session("ready_two", "ready two", false, SessionStatus::Active);
+    let mut picker = SessionPicker::new(vec![ready_one, ready_two]);
+    picker.set_live_presence_for_test(vec![
+        live_presence("ready_one", false),
+        live_presence("ready_two", false),
+    ]);
+
+    select_session(&mut picker, "ready_one");
+    assert!(matches!(
+        picker
+            .handle_overlay_key(KeyCode::Char('x'), KeyModifiers::CONTROL)
+            .expect("first Ctrl+X should be handled"),
+        OverlayAction::Continue
+    ));
+    assert!(buffer_text(&mut picker, 120, 40).contains("Ctrl+X again"));
+
+    select_session(&mut picker, "ready_two");
+    assert!(matches!(
+        picker
+            .handle_overlay_key(KeyCode::Char('x'), KeyModifiers::CONTROL)
+            .expect("changed selection should arm a new confirmation"),
+        OverlayAction::Continue
+    ));
+    assert!(matches!(
+        picker
+            .handle_overlay_key(KeyCode::Char('x'), KeyModifiers::CONTROL)
+            .expect("second Ctrl+X should request a close"),
+        OverlayAction::Selected(_)
+    ));
+}
+
+#[test]
+fn session_picker_ctrl_x_refuses_working_current_closed_and_external_rows() {
+    let working = make_session("working", "working", false, SessionStatus::Active);
+    let current = make_session("current", "current", false, SessionStatus::Active);
+    let closed = make_session("closed", "closed", false, SessionStatus::Closed);
+    let mut external = make_session("external", "external", false, SessionStatus::Closed);
+    external.source = SessionSource::Codex;
+    let mut picker = SessionPicker::new(vec![working, current, closed, external]);
+    picker.filter_mode = SessionFilterMode::All;
+    picker.set_current_session_id(Some("current".to_string()));
+    picker.set_live_presence_for_test(vec![
+        live_presence("working", true),
+        live_presence("current", false),
+    ]);
+
+    for (session_id, expected_feedback) in [
+        ("working", "working"),
+        ("current", "current session"),
+        ("closed", "already closed"),
+        ("external", "External sessions"),
+    ] {
+        select_session(&mut picker, session_id);
+        assert!(matches!(
+            picker
+                .handle_overlay_key(KeyCode::Char('x'), KeyModifiers::CONTROL)
+                .expect("refusal should keep picker open"),
+            OverlayAction::Continue
+        ));
+        assert!(
+            buffer_text(&mut picker, 120, 40).contains(expected_feedback),
+            "expected {expected_feedback:?} for {session_id}"
+        );
+    }
+}
+
 #[test]
 fn test_active_filter_shows_only_live_sessions_ready_before_working() {
     let live_working = make_session("session_working", "alpha", false, SessionStatus::Active);

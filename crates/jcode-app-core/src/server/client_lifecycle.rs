@@ -21,6 +21,7 @@ use super::client_lightweight_control::{
 use super::client_session::{
     handle_clear_session, handle_reload, handle_resume_session, handle_subscribe,
 };
+use super::client_session_close::handle_close_session;
 use super::client_state::{
     handle_get_compacted_history, handle_get_history, handle_get_model_catalog, handle_get_state,
 };
@@ -148,6 +149,17 @@ async fn resolve_target_subscribe_working_dir(
         format!("Unknown session '{target}' or session has no working directory")
     })?);
     Ok(())
+}
+
+fn resume_source_working_dir(
+    agent: &Arc<Mutex<Agent>>,
+    fallback: Option<String>,
+) -> Option<String> {
+    agent
+        .try_lock()
+        .ok()
+        .and_then(|agent| agent.working_dir().map(str::to_string))
+        .or(fallback)
 }
 
 fn validated_subscribe_working_dir(
@@ -1838,10 +1850,14 @@ pub(super) async fn handle_client(
                 allow_session_takeover,
             } => {
                 let pre_resume_session_id = client_session_id.clone();
-                let resume_working_dir = {
-                    let agent_guard = agent.lock().await;
-                    agent_guard.working_dir().map(str::to_string)
-                };
+                let member_working_dir = swarm_members
+                    .read()
+                    .await
+                    .get(&client_session_id)
+                    .and_then(|member| member.working_dir.as_ref())
+                    .map(|path| path.to_string_lossy().into_owned());
+                let resume_working_dir =
+                    resume_source_working_dir(&agent, member_working_dir);
                 current_client_instance_id = client_instance_id.clone();
                 {
                     let mut connections = client_connections.write().await;
@@ -1901,6 +1917,19 @@ pub(super) async fn handle_client(
                 if let Some(snapshot) = try_available_models_snapshot(&agent) {
                     last_available_models_snapshot = Some(snapshot);
                 }
+            }
+
+            Request::CloseSession { id, session_id } => {
+                handle_close_session(
+                    id,
+                    &session_id,
+                    &client_session_id,
+                    &sessions,
+                    &client_connections,
+                    &swarm_members,
+                    &client_event_tx,
+                )
+                .await?;
             }
 
             Request::ResumeAllSessions { id } => {
@@ -2952,7 +2981,7 @@ pub(super) async fn handle_client(
     Ok(())
     }.await;
 
-    if continue_on_disconnect {
+    if continue_on_disconnect || processing_task.is_some() {
         // Retain the existing turn owner, not the socket. Its JoinHandle and
         // completion receiver stay alive so normal finalization still runs and
         // the daemon cannot idle-shutdown midway through remote work. New
@@ -2976,7 +3005,7 @@ pub(super) async fn handle_client(
         stdin_responses.lock().await.clear();
         if let Some(handle) = processing_task.take() {
             crate::logging::info(&format!(
-                "Retaining disconnected remote turn for session {}",
+                "Retaining disconnected turn for session {}",
                 client_session_id
             ));
             let _ = handle.await;
@@ -3126,6 +3155,17 @@ async fn append_context_message(
         );
         return;
     };
+    if matches!(
+        agent.session_for_split().status,
+        crate::session::SessionStatus::Closed
+    ) {
+        let _ = client_event_tx.send(ServerEvent::Error {
+            id,
+            message: "Session is closed".to_string(),
+            retry_after_secs: None,
+        });
+        return;
+    }
     let result = agent.append_user_context_message(content, images);
     let event = match result {
         Ok(()) => ServerEvent::ContextMessageAdded { id },
@@ -3169,6 +3209,18 @@ async fn start_processing_message(
         let _ = client_event_tx.send(ServerEvent::Error {
             id,
             message: "Already processing a message".to_string(),
+            retry_after_secs: None,
+        });
+        return;
+    }
+
+    if matches!(
+        agent.lock().await.session_for_split().status,
+        crate::session::SessionStatus::Closed
+    ) {
+        let _ = client_event_tx.send(ServerEvent::Error {
+            id,
+            message: "Session is closed".to_string(),
             retry_after_secs: None,
         });
         return;

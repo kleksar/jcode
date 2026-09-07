@@ -603,13 +603,17 @@ impl SessionPicker {
             ));
         }
 
-        let filter_label = self.filter_mode.label().unwrap_or("all");
+        let filter_label = match self.filter_mode {
+            jcode_tui_session_picker::SessionFilterMode::Active => "active",
+            jcode_tui_session_picker::SessionFilterMode::All => "all",
+            _ => self.filter_mode.label().unwrap_or("all"),
+        };
         title_parts.push(Span::styled(
             format!("  {}", filter_label),
             Style::default().fg(rgb(255, 180, 100)),
         ));
         title_parts.push(Span::styled(
-            " (s/S filter)",
+            " (Ctrl+A active/all · s/S filter)",
             Style::default().fg(rgb(80, 80, 80)),
         ));
 
@@ -643,15 +647,18 @@ impl SessionPicker {
         } else {
             match crate::config::config().keybindings.session_picker_enter {
                 crate::config::SessionPickerResumeAction::CurrentTerminal => {
-                    " Space select · Enter in place · Ctrl+Enter new terminal · d debug · / search · h/l focus · ↑↓ · q ".to_string()
+                    " Space select · Enter in place · Ctrl+Enter new terminal · Ctrl+X close · d debug · / search · h/l focus · ↑↓ · q ".to_string()
                 }
                 crate::config::SessionPickerResumeAction::NewTerminal => {
-                    " Space select · Enter new terminal · Ctrl+Enter in place · d debug · / search · h/l focus · ↑↓ · q ".to_string()
+                    " Space select · Enter new terminal · Ctrl+Enter in place · Ctrl+X close · d debug · / search · h/l focus · ↑↓ · q ".to_string()
                 }
             }
         };
         if self.selected_live_claude_target().is_some() && !self.search_active {
             help = format!(" T take over live Claude ·{}", help);
+        }
+        if let Some(feedback) = &self.close_feedback {
+            help = format!(" {feedback} ·{help}");
         }
 
         let border_dim: Color = rgb(70, 70, 70);

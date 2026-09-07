@@ -72,7 +72,10 @@ impl SessionPicker {
             .copied()
             .filter(|session_ref| {
                 self.session_by_ref(*session_ref).is_some_and(|session| {
-                    (show_test || !session.is_debug)
+                    (show_test
+                        || !session.is_debug
+                        || (filter_mode == SessionFilterMode::Active
+                            && session.parent_id.is_none()))
                         && self.session_matches_filter_mode(session, filter_mode)
                 })
             })
@@ -114,7 +117,10 @@ impl SessionPicker {
         refs.iter()
             .filter_map(|session_ref| self.session_by_ref(*session_ref))
             .filter(|session| {
-                session.is_debug && self.session_matches_filter_mode(session, filter_mode)
+                session.is_debug
+                    && !(filter_mode == SessionFilterMode::Active
+                        && session.parent_id.is_none())
+                    && self.session_matches_filter_mode(session, filter_mode)
             })
             .count()
     }

@@ -298,6 +298,41 @@ fn test_resume_session_defaults_sync_flags() -> Result<()> {
 }
 
 #[test]
+fn test_close_session_request_roundtrip_preserves_id_and_session_id() -> Result<()> {
+    let request = Request::CloseSession {
+        id: 93,
+        session_id: "sess_close".to_string(),
+    };
+    let json = serde_json::to_string(&request)?;
+    assert!(json.contains("\"type\":\"close_session\""));
+    let decoded = parse_request_json(&json)?;
+    assert_eq!(decoded.id(), 93);
+    let Request::CloseSession { id, session_id } = decoded else {
+        return Err(anyhow!("expected CloseSession"));
+    };
+    assert_eq!(id, 93);
+    assert_eq!(session_id, "sess_close");
+    Ok(())
+}
+
+#[test]
+fn test_session_closed_event_roundtrip_preserves_id_and_session_id() -> Result<()> {
+    let event = ServerEvent::SessionClosed {
+        id: 94,
+        session_id: "sess_close".to_string(),
+    };
+    let json = serde_json::to_string(&event)?;
+    assert!(json.contains("\"type\":\"session_closed\""));
+    let decoded = parse_event_json(&json)?;
+    let ServerEvent::SessionClosed { id, session_id } = decoded else {
+        return Err(anyhow!("expected SessionClosed"));
+    };
+    assert_eq!(id, 94);
+    assert_eq!(session_id, "sess_close");
+    Ok(())
+}
+
+#[test]
 fn test_message_request_roundtrip_preserves_images_and_system_reminder() -> Result<()> {
     let req = Request::Message {
         id: 88,

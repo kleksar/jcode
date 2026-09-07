@@ -116,8 +116,16 @@ impl Fixture {
     }
 
     async fn cleanup(&self, processing: bool, grace: Duration) {
+        self.cleanup_with_task(processing, None, grace).await;
+    }
+
+    async fn cleanup_with_task(
+        &self,
+        processing: bool,
+        mut task: Option<tokio::task::JoinHandle<()>>,
+        grace: Duration,
+    ) {
         let (swarm_events, _) = broadcast::channel(8);
-        let mut task = None;
         cleanup_client_connection(
             &self.sessions,
             &self.id,
@@ -215,18 +223,15 @@ async fn unsaved_idle_session_retains_same_agent_for_reattachment() {
 }
 
 #[tokio::test]
-async fn unsaved_idle_session_expires_without_persisting_or_leaking() {
+async fn unsaved_idle_disconnect_only_detaches_client_attachment() {
     let _lock = crate::storage::lock_test_env();
     let _home = Home::new();
     let fixture = Fixture::new(false).await;
-    let grace = Duration::from_millis(60);
-    let start = Instant::now();
-    timeout(Duration::from_secs(1), fixture.cleanup(false, grace))
+    timeout(Duration::from_secs(1), fixture.cleanup(false, Duration::from_millis(60)))
         .await
         .unwrap();
-    assert!(start.elapsed() >= grace);
-    assert!(!fixture.sessions.read().await.contains_key(&fixture.id));
-    assert!(!fixture.members.read().await.contains_key(&fixture.id));
+    assert!(fixture.sessions.read().await.contains_key(&fixture.id));
+    assert!(fixture.members.read().await.contains_key(&fixture.id));
     assert!(fixture.connections.read().await.is_empty());
     assert!(!crate::session::session_exists(&fixture.id));
 }
@@ -258,7 +263,7 @@ async fn old_grace_cannot_remove_successor_that_already_detached_again() {
 }
 
 #[tokio::test]
-async fn persisted_idle_session_does_not_wait_for_reconnect_grace() {
+async fn persisted_idle_disconnect_leaves_session_live_and_not_closed() {
     let _lock = crate::storage::lock_test_env();
     let _home = Home::new();
     let fixture = Fixture::new(true).await;
@@ -268,12 +273,17 @@ async fn persisted_idle_session_does_not_wait_for_reconnect_grace() {
     )
     .await
     .unwrap();
-    assert!(fixture.sessions.read().await.is_empty());
+    assert!(fixture.sessions.read().await.contains_key(&fixture.id));
+    assert!(fixture.members.read().await.contains_key(&fixture.id));
     assert!(crate::session::session_exists(&fixture.id));
+    assert!(!matches!(
+        fixture.agent.lock().await.session_for_split().status,
+        SessionStatus::Closed | SessionStatus::Crashed { .. }
+    ));
 }
 
 #[tokio::test]
-async fn interrupted_session_does_not_wait_for_reconnect_grace() {
+async fn sighup_equivalent_processing_disconnect_keeps_session_live() {
     let _lock = crate::storage::lock_test_env();
     let _home = Home::new();
     crate::server::clear_reload_marker();
@@ -284,9 +294,33 @@ async fn interrupted_session_does_not_wait_for_reconnect_grace() {
     )
     .await
     .unwrap();
-    assert!(fixture.sessions.read().await.is_empty());
-    assert!(matches!(
+    assert!(fixture.sessions.read().await.contains_key(&fixture.id));
+    assert!(fixture.members.read().await.contains_key(&fixture.id));
+    assert!(!matches!(
         fixture.agent.lock().await.session_for_split().status,
-        SessionStatus::Crashed { .. }
+        SessionStatus::Closed | SessionStatus::Crashed { .. }
     ));
+}
+
+#[tokio::test]
+async fn processing_disconnect_detaches_turn_handle_so_it_can_complete() {
+    let _lock = crate::storage::lock_test_env();
+    let _home = Home::new();
+    let fixture = Fixture::new(true).await;
+    let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+    let (complete_tx, complete_rx) = tokio::sync::oneshot::channel();
+    let task = tokio::spawn(async move {
+        let _ = release_rx.await;
+        let _ = complete_tx.send(());
+    });
+
+    fixture
+        .cleanup_with_task(true, Some(task), Duration::from_secs(30))
+        .await;
+    release_tx.send(()).unwrap();
+    timeout(Duration::from_secs(1), complete_rx)
+        .await
+        .expect("disconnect must not abort the server-owned turn")
+        .expect("turn completion signal must be delivered");
+    assert!(fixture.sessions.read().await.contains_key(&fixture.id));
 }

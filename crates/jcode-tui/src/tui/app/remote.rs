@@ -146,6 +146,19 @@ pub(super) async fn handle_tick(app: &mut App, remote: &mut RemoteConnection) ->
     let _ = check_debug_command(app, remote).await;
 
     if !app.is_processing {
+        if let Some(session_id) = app.workspace_client.take_pending_close_session() {
+            match remote.close_session(&session_id).await {
+                Ok(id) => {
+                    app.workspace_client.begin_close_request(id, session_id);
+                    app.set_status_notice("Closing session…");
+                    return true;
+                }
+                Err(error) => {
+                    app.set_status_notice(format!("Failed to close session: {error}"));
+                    needs_redraw = true;
+                }
+            }
+        }
         if let Some(request) = app.take_pending_catchup_resume() {
             match remote.resume_session(&request.target_session_id).await {
                 Ok(()) => {

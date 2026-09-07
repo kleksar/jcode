@@ -18,7 +18,7 @@ use ratatui::{
 };
 use std::collections::HashSet;
 use std::io::IsTerminal;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 pub use jcode_tui_session_picker::{
     PickerItem, PreviewMessage, ResumeTarget, ServerGroup, SessionFilterMode, SessionInfo,
@@ -57,6 +57,8 @@ pub enum PickerResult {
     StartNewSession,
     /// The onboarding read-only recent-project architecture review was chosen.
     ReviewRecentProject,
+    /// Explicit close request confirmed from the picker for an idle Jcode session.
+    CloseSession { session_id: String },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -286,6 +288,9 @@ pub struct SessionPicker {
     /// membership. Refreshed on load/reseed and periodically while the Active
     /// view is on screen.
     live_presence: std::collections::HashMap<String, crate::session::SessionPresence>,
+    /// Placeholder rows synthesized for live sessions that do not yet have a
+    /// persisted snapshot. Rebuilt with each presence refresh.
+    synthetic_live_session_ids: HashSet<String>,
     /// When `live_presence` was last snapshotted (throttles periodic refresh).
     live_presence_refreshed_at: Option<std::time::Instant>,
     /// ID of the session the picker was opened from, labeled "current" in the
@@ -295,6 +300,10 @@ pub struct SessionPicker {
     /// live Claude session never stops it; only confirming this prompt emits
     /// `PickerResult::TakeOverClaude`.
     pending_claude_takeover: Option<ResumeTarget>,
+    /// Picker-local two-press confirmation for closing an idle session.
+    pending_close: Option<(String, Instant)>,
+    /// Non-destructive close action feedback rendered in the picker footer.
+    close_feedback: Option<String>,
 }
 
 impl SessionPicker {
@@ -340,9 +349,12 @@ impl SessionPicker {
             preview_cache: None,
             current_dir: None,
             live_presence: std::collections::HashMap::new(),
+            synthetic_live_session_ids: HashSet::new(),
             live_presence_refreshed_at: None,
             current_session_id: None,
             pending_claude_takeover: None,
+            pending_close: None,
+            close_feedback: None,
         };
         picker.refresh_live_presence();
         picker.rebuild_items();
@@ -385,9 +397,12 @@ impl SessionPicker {
             preview_cache: None,
             current_dir: None,
             live_presence: std::collections::HashMap::new(),
+            synthetic_live_session_ids: HashSet::new(),
             live_presence_refreshed_at: None,
             current_session_id: None,
             pending_claude_takeover: None,
+            pending_close: None,
+            close_feedback: None,
         }
     }
 
@@ -462,9 +477,12 @@ impl SessionPicker {
             preview_cache: None,
             current_dir: None,
             live_presence: std::collections::HashMap::new(),
+            synthetic_live_session_ids: HashSet::new(),
             live_presence_refreshed_at: None,
             current_session_id: None,
             pending_claude_takeover: None,
+            pending_close: None,
+            close_feedback: None,
         };
         picker.refresh_live_presence();
         picker.rebuild_items();
@@ -512,6 +530,18 @@ impl SessionPicker {
 
     /// Snapshot the active-pid registry + streaming markers into the picker.
     pub(super) fn refresh_live_presence(&mut self) {
+        if !self.synthetic_live_session_ids.is_empty() {
+            self.all_sessions
+                .retain(|session| !self.synthetic_live_session_ids.contains(&session.id));
+            self.all_orphan_sessions
+                .retain(|session| !self.synthetic_live_session_ids.contains(&session.id));
+            for group in &mut self.all_server_groups {
+                group
+                    .sessions
+                    .retain(|session| !self.synthetic_live_session_ids.contains(&session.id));
+            }
+            self.synthetic_live_session_ids.clear();
+        }
         self.live_presence = crate::session::session_presence()
             .into_iter()
             .map(|presence| (presence.session_id.clone(), presence))
@@ -531,7 +561,72 @@ impl SessionPicker {
                 );
             }
         }
+        #[cfg(not(test))]
+        self.add_missing_live_session_rows();
         self.live_presence_refreshed_at = Some(std::time::Instant::now());
+    }
+
+    fn add_missing_live_session_rows(&mut self) {
+        let existing_ids: HashSet<String> = self
+            .all_sessions
+            .iter()
+            .chain(self.all_server_groups.iter().flat_map(|group| group.sessions.iter()))
+            .chain(self.all_orphan_sessions.iter())
+            .map(|session| session.id.clone())
+            .collect();
+        let missing: Vec<_> = self
+            .live_presence
+            .values()
+            .filter(|presence| !existing_ids.contains(&presence.session_id))
+            .cloned()
+            .collect();
+
+        for presence in missing {
+            let id = presence.session_id;
+            let short_name = crate::id::extract_session_name(&id)
+                .unwrap_or("live")
+                .to_string();
+            let now = chrono::Utc::now();
+            let session = SessionInfo {
+                id: id.clone(),
+                parent_id: None,
+                short_name: short_name.clone(),
+                icon: "●".to_string(),
+                title: short_name.clone(),
+                message_count: 0,
+                user_message_count: 0,
+                assistant_message_count: 0,
+                created_at: now,
+                last_message_time: now,
+                last_active_at: Some(now),
+                working_dir: None,
+                model: None,
+                provider_key: None,
+                is_canary: false,
+                is_debug: presence.internal,
+                saved: false,
+                save_label: None,
+                status: SessionStatus::Active,
+                needs_catchup: false,
+                estimated_tokens: 0,
+                first_user_prompt: None,
+                messages_preview: Vec::new(),
+                search_index: format!("{id} {short_name}"),
+                server_name: None,
+                server_icon: None,
+                source: SessionSource::Jcode,
+                resume_target: ResumeTarget::JcodeSession {
+                    session_id: id.clone(),
+                },
+                external_path: None,
+            };
+            if self.all_server_groups.is_empty() {
+                self.all_sessions.push(session);
+            } else {
+                self.all_orphan_sessions.push(session);
+            }
+            self.synthetic_live_session_ids.insert(id);
+        }
     }
 
     /// Periodically re-snapshot live presence while the picker is on screen so
@@ -644,6 +739,7 @@ impl SessionPicker {
             .into_iter()
             .map(|presence| (presence.session_id.clone(), presence))
             .collect();
+        self.add_missing_live_session_rows();
         self.live_presence_refreshed_at = Some(std::time::Instant::now());
         self.rebuild_items();
     }
@@ -797,6 +893,85 @@ impl SessionPicker {
                 .copied()
                 .and_then(|session_ref| self.session_by_ref(session_ref))
         })
+    }
+
+    fn clear_close_confirmation(&mut self) {
+        self.pending_close = None;
+    }
+
+    fn toggle_active_all_filter(&mut self) {
+        self.clear_close_confirmation();
+        self.close_feedback = None;
+        self.filter_mode = if self.filter_mode == SessionFilterMode::Active {
+            SessionFilterMode::All
+        } else {
+            SessionFilterMode::Active
+        };
+        self.rebuild_items();
+    }
+
+    fn handle_close_key(&mut self) -> OverlayAction {
+        const CLOSE_CONFIRMATION_WINDOW: Duration = Duration::from_secs(2);
+
+        let Some(session) = self.selected_session().cloned() else {
+            return OverlayAction::Continue;
+        };
+        self.close_feedback = None;
+        if session.source != SessionSource::Jcode {
+            self.clear_close_confirmation();
+            self.close_feedback = Some("External sessions cannot be closed by Jcode".to_string());
+            return OverlayAction::Continue;
+        }
+        if self.current_session_id.as_deref() == Some(session.id.as_str()) {
+            self.clear_close_confirmation();
+            self.close_feedback = Some("Cannot close the current session".to_string());
+            return OverlayAction::Continue;
+        }
+        if matches!(session.status, SessionStatus::Closed) {
+            self.clear_close_confirmation();
+            self.close_feedback = Some("Session is already closed".to_string());
+            return OverlayAction::Continue;
+        }
+        if !self.session_is_live(&session) || self.session_is_streaming(&session) {
+            self.clear_close_confirmation();
+            self.close_feedback = Some("Cannot close a working session".to_string());
+            return OverlayAction::Continue;
+        }
+
+        let now = Instant::now();
+        if self.pending_close.as_ref().is_some_and(|(id, armed_at)| {
+            id == &session.id && now.duration_since(*armed_at) <= CLOSE_CONFIRMATION_WINDOW
+        }) {
+            self.clear_close_confirmation();
+            return OverlayAction::Selected(PickerResult::CloseSession {
+                session_id: session.id,
+            });
+        }
+
+        self.pending_close = Some((session.id, now));
+        self.close_feedback = Some("Press Ctrl+X again within 2s to close this session".to_string());
+        OverlayAction::Continue
+    }
+
+    pub(crate) fn apply_session_closed(&mut self, session_id: &str) {
+        if let Some(session_ref) = self.session_ref_for_id(session_id)
+            && let Some(session) = self.session_by_ref_mut(session_ref)
+        {
+            session.status = SessionStatus::Closed;
+        }
+        self.clear_close_confirmation();
+        self.close_feedback = Some("Session closed".to_string());
+        self.rebuild_items();
+    }
+
+    pub(crate) fn set_close_feedback(&mut self, feedback: impl Into<String>) {
+        self.clear_close_confirmation();
+        self.close_feedback = Some(feedback.into());
+    }
+
+    #[cfg(test)]
+    pub(crate) fn close_feedback_for_test(&self) -> Option<String> {
+        self.close_feedback.clone()
     }
 
     pub fn session_for_target(&self, target: &ResumeTarget) -> Option<&SessionInfo> {
@@ -1200,6 +1375,14 @@ impl SessionPicker {
                 }
                 _ => Ok(OverlayAction::Continue),
             };
+        }
+
+        if code == KeyCode::Char('a') && modifiers.contains(KeyModifiers::CONTROL) {
+            self.toggle_active_all_filter();
+            return Ok(OverlayAction::Continue);
+        }
+        if code == KeyCode::Char('x') && modifiers.contains(KeyModifiers::CONTROL) {
+            return Ok(self.handle_close_key());
         }
 
         if self.search_active {
