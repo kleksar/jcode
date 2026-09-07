@@ -26,7 +26,7 @@ fn test_side_diagram_uses_left_splitter_instead_of_rounded_box() {
 }
 
 #[test]
-fn test_tool_side_panel_focus_supports_horizontal_pan_keys() {
+fn test_tool_side_panel_focus_preserves_hl_horizontal_pan_keys() {
     let mut app = create_test_app();
     app.diff_mode = crate::config::DiffDisplayMode::Inline;
     app.side_panel = crate::side_panel::SidePanelSnapshot {
@@ -45,12 +45,12 @@ fn test_tool_side_panel_focus_supports_horizontal_pan_keys() {
     assert!(app.handle_diagram_ctrl_key(KeyCode::Char('l'), false));
     assert!(app.diff_pane_focus);
 
-    app.handle_key(KeyCode::Right, KeyModifiers::empty())
+    app.handle_key(KeyCode::Char('l'), KeyModifiers::empty())
         .unwrap();
     assert_eq!(app.diff_pane_scroll_x, 4);
     assert!(app.input.is_empty());
 
-    app.handle_key(KeyCode::Left, KeyModifiers::empty())
+    app.handle_key(KeyCode::Char('h'), KeyModifiers::empty())
         .unwrap();
     assert_eq!(app.diff_pane_scroll_x, 0);
 }

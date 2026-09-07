@@ -302,6 +302,12 @@ async fn handle_remote_key_internal(
     }
 
     if app.session_picker_overlay.is_some() {
+        if code == KeyCode::Right && modifiers.is_empty() {
+            app.session_picker_overlay = None;
+            app.session_picker_mode = super::super::SessionPickerMode::Resume;
+            app.set_status_notice("Focus: chat");
+            return Ok(());
+        }
         return app.handle_session_picker_key(code, modifiers);
     }
 
@@ -891,16 +897,15 @@ async fn handle_remote_key_internal(
             }
         }
         KeyCode::Left => {
-            if app.cursor_pos > 0 {
+            if !input::handle_empty_composer_horizontal_navigation(app, code) && app.cursor_pos > 0
+            {
                 app.cursor_pos = core::prev_char_boundary(&app.input, app.cursor_pos);
-            } else {
-                // Opt-in: Left on an empty input opens the active sessions
-                // manager (unless display.active_sessions_manager is disabled).
-                app.maybe_open_active_sessions_on_left();
             }
         }
         KeyCode::Right => {
-            if app.cursor_pos < app.input.len() {
+            if !input::handle_empty_composer_horizontal_navigation(app, code)
+                && app.cursor_pos < app.input.len()
+            {
                 app.cursor_pos = core::next_char_boundary(&app.input, app.cursor_pos);
             }
         }

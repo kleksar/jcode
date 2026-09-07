@@ -569,6 +569,26 @@ impl App {
             return false;
         }
 
+        // Plain arrows traverse the ordered workspace views. This deliberately
+        // takes precedence over side-pane panning and Files tree navigation;
+        // h/l retain those respective local actions.
+        match code {
+            KeyCode::Left if self.worktree_files_tab_active() => {
+                self.set_worktree_pane_tab(super::worktree_pane::WorktreePaneTab::Diff);
+                return true;
+            }
+            KeyCode::Left => {
+                self.set_diff_pane_focus(false);
+                return true;
+            }
+            KeyCode::Right if !self.worktree_files_tab_active() => {
+                self.set_worktree_pane_tab(super::worktree_pane::WorktreePaneTab::Files);
+                return true;
+            }
+            KeyCode::Right => return true,
+            _ => {}
+        }
+
         self.note_worktree_pane_activity();
         if let Some(layout) = crate::tui::ui::worktree_pane_layout() {
             match code {

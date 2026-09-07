@@ -2545,6 +2545,15 @@ pub(super) fn handle_modal_key(
     }
 
     if app.session_picker_overlay.is_some() {
+        // The active Sessions view is the one intentional modal exception to
+        // ordinary overlay ownership: Right restores the chat context that
+        // opened it. Its normal Up/Down/Enter/Esc handling remains local.
+        if code == KeyCode::Right && modifiers.is_empty() {
+            app.session_picker_overlay = None;
+            app.session_picker_mode = super::SessionPickerMode::Resume;
+            app.set_status_notice("Focus: chat");
+            return Ok(true);
+        }
         app.handle_session_picker_key(code, modifiers)?;
         return Ok(true);
     }
@@ -2685,6 +2694,28 @@ pub(super) fn handle_enter(app: &mut App) -> bool {
     true
 }
 
+/// Route the two plain-arrow workspace transitions available from an empty
+/// composer. Both local and remote TUI input paths use this so their view
+/// navigation stays identical.
+pub(super) fn handle_empty_composer_horizontal_navigation(app: &mut App, code: KeyCode) -> bool {
+    if !app.input.is_empty() {
+        return false;
+    }
+
+    match code {
+        KeyCode::Left => {
+            app.maybe_open_active_sessions_on_left();
+            true
+        }
+        KeyCode::Right => {
+            app.set_worktree_pane_tab(super::worktree_pane::WorktreePaneTab::Diff);
+            app.set_diff_pane_focus(true);
+            true
+        }
+        _ => false,
+    }
+}
+
 pub(super) fn handle_basic_key(app: &mut App, code: KeyCode) -> bool {
     match code {
         KeyCode::Char(c) => handle_text_input(app, &c.to_string()),
@@ -2710,17 +2741,15 @@ pub(super) fn handle_basic_key(app: &mut App, code: KeyCode) -> bool {
             true
         }
         KeyCode::Left => {
-            if app.cursor_pos > 0 {
+            if !handle_empty_composer_horizontal_navigation(app, code) && app.cursor_pos > 0 {
                 app.cursor_pos = crate::tui::core::prev_char_boundary(&app.input, app.cursor_pos);
-            } else {
-                // Opt-in: Left on an empty input opens the active sessions
-                // manager (unless display.active_sessions_manager is disabled).
-                app.maybe_open_active_sessions_on_left();
             }
             true
         }
         KeyCode::Right => {
-            if app.cursor_pos < app.input.len() {
+            if !handle_empty_composer_horizontal_navigation(app, code)
+                && app.cursor_pos < app.input.len()
+            {
                 app.cursor_pos = crate::tui::core::next_char_boundary(&app.input, app.cursor_pos);
             }
             true

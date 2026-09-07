@@ -141,7 +141,7 @@ fn test_files_tree_expands_and_tab_returns_to_diff() {
         "children start hidden: {collapsed}"
     );
 
-    assert!(app.handle_diff_pane_focus_key(KeyCode::Right, KeyModifiers::NONE));
+    assert!(app.handle_diff_pane_focus_key(KeyCode::Char('l'), KeyModifiers::NONE));
     let expanded = render_and_snap(&app, &mut terminal);
     assert!(expanded.contains("▾ src"), "expanded tree: {expanded}");
     assert!(expanded.contains("lib.rs"), "expanded child: {expanded}");
