@@ -1250,6 +1250,86 @@ async fn authorized_stop_busy_a_then_resume_b_does_not_leak_a_stream() {
     assert!(!sessions.read().await.contains_key(&session_a));
     assert!(!state.swarm_members.read().await.contains_key(&session_a));
 
+    send_request(
+        &mut client_writer,
+        &Request::ResumeSession {
+            id: 9,
+            session_id: session_b.clone(),
+            client_instance_id: None,
+            client_has_local_history: false,
+            allow_session_takeover: false,
+        },
+    )
+    .await;
+    let mut resume_b_events = Vec::new();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let event = recv_event(&mut client_reader).await;
+            assert!(
+                !matches!(
+                    &event,
+                    ServerEvent::TextDelta { text }
+                        if text == BUSY_SOCKET_ORACLE_INITIAL
+                            || text == BUSY_SOCKET_ORACLE_RESPONSE
+                ),
+                "A stream leaked while Resume B was completing: {event:?}"
+            );
+            assert!(
+                !matches!(
+                    &event,
+                    ServerEvent::MessageEnd { .. } | ServerEvent::Done { id: 7 }
+                ),
+                "A terminal frame leaked while Resume B was completing: {event:?}"
+            );
+            let done = matches!(event, ServerEvent::Done { id: 9 });
+            resume_b_events.push(event);
+            if done {
+                break;
+            }
+        }
+    })
+    .await
+    .expect("Resume B must complete while A provider remains gated");
+    assert!(matches!(
+        resume_b_events.last(),
+        Some(ServerEvent::Done { id: 9 })
+    ));
+
+    let stale_frame =
+        tokio::time::timeout(Duration::from_millis(500), recv_event(&mut client_reader)).await;
+    if let Ok(event) = stale_frame {
+        panic!("unexpected frame before gated A release: {event:?}");
+    }
+
+    send_request(&mut client_writer, &Request::GetHistory { id: 10 }).await;
+    let ServerEvent::History {
+        session_id,
+        messages,
+        ..
+    } = recv_until(&mut client_reader, |event| {
+        matches!(event, ServerEvent::History { id: 10, .. })
+    })
+    .await
+    else {
+        unreachable!()
+    };
+    assert_eq!(session_id, session_b);
+    assert!(
+        messages
+            .iter()
+            .any(|message| message.content.contains(prompt_b))
+    );
+    assert!(
+        !messages
+            .iter()
+            .any(|message| message.content.contains(BUSY_SOCKET_ORACLE_INITIAL))
+    );
+    assert!(
+        !messages
+            .iter()
+            .any(|message| message.content.contains(BUSY_SOCKET_ORACLE_RESPONSE))
+    );
+
     provider.release_a.notify_one();
     tokio::time::timeout(Duration::from_secs(5), async {
         loop {
@@ -1262,33 +1342,19 @@ async fn authorized_stop_busy_a_then_resume_b_does_not_leak_a_stream() {
     .await
     .expect("stopped A provider stream must positively terminate");
 
-    send_request(
-        &mut client_writer,
-        &Request::ResumeSession {
-            id: 9,
-            session_id: session_b.clone(),
-            client_instance_id: None,
-            client_has_local_history: false,
-            allow_session_takeover: false,
-        },
-    )
-    .await;
-    recv_until(&mut client_reader, |event| {
-        matches!(event, ServerEvent::Done { id: 9 })
-    })
-    .await;
     let stale_frame =
         tokio::time::timeout(Duration::from_millis(500), recv_event(&mut client_reader)).await;
     if let Ok(event) = stale_frame {
         panic!("stopped A stream or terminal frame leaked after B Resume completed: {event:?}");
     }
-    send_request(&mut client_writer, &Request::GetHistory { id: 10 }).await;
+
+    send_request(&mut client_writer, &Request::GetHistory { id: 11 }).await;
     let ServerEvent::History {
         session_id,
         messages,
         ..
     } = recv_until(&mut client_reader, |event| {
-        matches!(event, ServerEvent::History { id: 10, .. })
+        matches!(event, ServerEvent::History { id: 11, .. })
     })
     .await
     else {
