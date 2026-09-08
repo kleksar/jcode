@@ -358,7 +358,16 @@ impl NewSessionComposer {
                 // Preserve the typed draft after a rejected create. A later
                 // Enter is an explicit fresh validation and retry, never an
                 // automatic resend of an ambiguous create request.
-                draft.phase = NewSessionComposerPhase::EditingPath;
+                // A server-provided chooser selection is already authoritative,
+                // so return to the prompt state where Enter creates with the
+                // preserved choice. Manual paths must instead return to path
+                // editing, which requires fresh server validation on retry.
+                draft.phase = match draft.confirmed_working_dir.as_ref() {
+                    Some(choice) if choice.source != WorkingDirectorySource::Manual => {
+                        NewSessionComposerPhase::EditingPrompt
+                    }
+                    _ => NewSessionComposerPhase::EditingPath,
+                };
                 draft.validation_error = Some(message);
             }
             return true;
