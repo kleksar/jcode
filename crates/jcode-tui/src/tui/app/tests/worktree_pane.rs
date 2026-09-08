@@ -316,6 +316,86 @@ fn test_files_preview_has_independent_keyboard_scroll() {
 }
 
 #[test]
+fn test_files_tree_opens_markdown_documents_case_insensitively_and_deduplicates() {
+    let _lock = scroll_render_test_lock();
+    let repo = init_worktree_pane_test_repo();
+    std::fs::write(repo.path().join("README.md"), "# Read me\n").expect("write Markdown");
+    std::fs::write(repo.path().join("NOTES.MD"), "# Notes\n").expect("write uppercase Markdown");
+    crate::tui::ui::prime_project_tree_for_tests(repo.path());
+    let mut app = create_test_app();
+    app.session.working_dir = Some(repo.path().to_string_lossy().into_owned());
+    app.open_project_files_pane();
+    let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(140, 30)).unwrap();
+
+    app.worktree_pane.tree_selected_path = Some("README.md".into());
+    render_and_snap(&app, &mut terminal);
+    assert!(app.handle_diff_pane_focus_key(KeyCode::Enter, KeyModifiers::NONE));
+    assert_eq!(
+        app.worktree_pane.tab,
+        super::worktree_pane::WorktreePaneTab::Documents
+    );
+    assert_eq!(app.side_panel.pages.len(), 1);
+    assert_eq!(
+        app.focused_markdown_document_mode(),
+        super::worktree_pane::MarkdownDocumentMode::Read
+    );
+
+    app.set_worktree_pane_tab(super::worktree_pane::WorktreePaneTab::Files);
+    app.worktree_pane.tree_selected_path = Some("README.md".into());
+    render_and_snap(&app, &mut terminal);
+    assert!(app.handle_diff_pane_focus_key(KeyCode::Char('l'), KeyModifiers::NONE));
+    assert_eq!(
+        app.side_panel.pages.len(),
+        1,
+        "reopening must update the existing page"
+    );
+
+    app.set_worktree_pane_tab(super::worktree_pane::WorktreePaneTab::Files);
+    render_and_snap(&app, &mut terminal);
+    assert!(app.handle_diff_pane_focus_key(KeyCode::Right, KeyModifiers::NONE));
+    assert_eq!(
+        app.side_panel.pages.len(),
+        1,
+        "Right must reuse the existing page"
+    );
+
+    app.set_worktree_pane_tab(super::worktree_pane::WorktreePaneTab::Files);
+    app.worktree_pane.tree_selected_path = Some("NOTES.MD".into());
+    render_and_snap(&app, &mut terminal);
+    assert!(app.handle_diff_pane_focus_key(KeyCode::Char(' '), KeyModifiers::NONE));
+    assert_eq!(app.side_panel.pages.len(), 2);
+    assert_eq!(
+        app.worktree_pane.tab,
+        super::worktree_pane::WorktreePaneTab::Documents
+    );
+    assert_eq!(
+        app.focused_markdown_document_mode(),
+        super::worktree_pane::MarkdownDocumentMode::Read
+    );
+}
+
+#[test]
+fn test_files_tree_non_markdown_activation_keeps_inline_preview_focus() {
+    let _lock = scroll_render_test_lock();
+    let repo = init_worktree_pane_test_repo();
+    crate::tui::ui::prime_project_tree_for_tests(repo.path());
+    let mut app = create_test_app();
+    app.session.working_dir = Some(repo.path().to_string_lossy().into_owned());
+    app.open_project_files_pane();
+    app.worktree_pane.tree_selected_path = Some("demo.rs".into());
+    let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(140, 30)).unwrap();
+
+    render_and_snap(&app, &mut terminal);
+    assert!(app.handle_diff_pane_focus_key(KeyCode::Right, KeyModifiers::NONE));
+    assert!(app.worktree_pane.tree_preview_focused);
+    assert!(app.side_panel.pages.is_empty());
+    assert_eq!(
+        app.worktree_pane.tab,
+        super::worktree_pane::WorktreePaneTab::Files
+    );
+}
+
+#[test]
 fn test_worktree_filter_expires_at_exactly_sixty_idle_seconds() {
     let _lock = scroll_render_test_lock();
     let (_repo, mut app, mut terminal) = worktree_filter_fixture();

@@ -387,6 +387,11 @@ impl App {
             KeyCode::Enter | KeyCode::Char(' ') | KeyCode::Char('l') | KeyCode::Right => {
                 if row.is_dir {
                     self.toggle_project_tree_dir(&row.path, row.expanded);
+                } else if std::path::Path::new(&row.path)
+                    .extension()
+                    .is_some_and(|extension| extension.eq_ignore_ascii_case("md"))
+                {
+                    self.try_open_repository_markdown_link(&row.path);
                 } else if layout.preview_area.is_some() {
                     self.worktree_pane.tree_preview_focused = true;
                     self.set_status_notice("Files: preview focus (j/k scroll, Left returns)");
