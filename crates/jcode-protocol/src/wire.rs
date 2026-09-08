@@ -160,6 +160,34 @@ pub enum Request {
     #[serde(rename = "get_history")]
     GetHistory { id: u64 },
 
+    /// Get a bounded, server-authoritative transcript tail for a live session.
+    #[serde(rename = "get_session_preview")]
+    GetSessionPreview {
+        id: u64,
+        session_id: String,
+        limit: u16,
+    },
+
+    /// Get server-authoritative directory choices for clean session creation.
+    #[serde(rename = "get_session_creation_context")]
+    GetSessionCreationContext { id: u64 },
+
+    /// Validate and canonicalize an explicit server-side working directory.
+    #[serde(rename = "resolve_working_directory")]
+    ResolveWorkingDirectory { id: u64, path: String },
+
+    /// Complete a server-side absolute or home-relative working directory.
+    #[serde(rename = "complete_working_directory")]
+    CompleteWorkingDirectory { id: u64, path: String, limit: usize },
+
+    /// Create a clean session. Its first prompt is sent later after attach.
+    #[serde(rename = "create_session")]
+    CreateSession {
+        id: u64,
+        working_dir: String,
+        runtime: SessionRuntimeSelection,
+    },
+
     /// Get only provider/model metadata and available models.
     #[serde(rename = "get_model_catalog")]
     GetModelCatalog { id: u64 },
@@ -1066,6 +1094,15 @@ pub enum ServerEvent {
         /// Omitted by older daemons, which a new SSH bridge must reject.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         native_ssh_protocol: Option<u32>,
+        /// Version of the server-authoritative live session preview protocol.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        session_preview_protocol: Option<u32>,
+        /// Version of the clean-session creation protocol.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        clean_session_protocol: Option<u32>,
+        /// Version of the server-side directory completion protocol.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        directory_completion_protocol: Option<u32>,
     },
 
     /// Current state (debug)
@@ -1111,6 +1148,50 @@ pub enum ServerEvent {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         title: Option<String>,
         display_title: String,
+    },
+
+    /// Bounded server-authoritative transcript tail for a live session.
+    #[serde(rename = "session_preview")]
+    SessionPreview {
+        id: u64,
+        session_id: String,
+        revision: u64,
+        messages: Vec<HistoryMessage>,
+        activity: SessionActivitySnapshot,
+    },
+
+    /// Server-authoritative choices for clean session creation.
+    #[serde(rename = "session_creation_context")]
+    SessionCreationContext {
+        id: u64,
+        home_dir: String,
+        recent_working_dirs: Vec<String>,
+    },
+
+    /// A validated and canonical server-side working directory.
+    #[serde(rename = "working_directory_resolved")]
+    WorkingDirectoryResolved {
+        id: u64,
+        input: String,
+        absolute_path: String,
+    },
+
+    /// Bounded directory-path completions retaining the client's input spelling.
+    #[serde(rename = "working_directory_completions")]
+    WorkingDirectoryCompletions {
+        id: u64,
+        input: String,
+        candidates: Vec<String>,
+        truncated: bool,
+    },
+
+    /// A stable clean session created before its first prompt is delivered.
+    #[serde(rename = "session_created")]
+    SessionCreated {
+        id: u64,
+        session_id: String,
+        session_name: String,
+        working_dir: String,
     },
 
     /// Full conversation history (response to GetHistory)

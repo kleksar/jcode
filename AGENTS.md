@@ -17,28 +17,27 @@
 - On Windows, the equivalents are `%LOCALAPPDATA%\\jcode\\bin\\jcode.exe` for the launcher, `%LOCALAPPDATA%\\jcode\\builds\\stable\\jcode.exe` for stable, and `%LOCALAPPDATA%\\jcode\\builds\\versions\\<version>\\jcode.exe` for immutable installs; `scripts/install.ps1` currently installs the stable channel.
 - Ensure `~/.local/bin` is **before** `~/.cargo/bin` in `PATH`.
 
-## Verifying a change at runtime
+## Local deployment and runtime verification
 
-`cargo build` alone proves nothing about behavior. `jcode run` and interactive
-sessions are served by the long-lived daemon at
-`~/.jcode/builds/shared-server/jcode`, which is a symlink into
-`~/.jcode/builds/versions/<version>/`. Until that symlink is repointed and the
-daemon restarted (`jcode self-dev --build`), a freshly built binary is inert and
-every runtime check silently measures the old code.
+Before replacing any local artifact, follow the mandatory provenance and
+rollback gate in [`docs/LOCAL_DEVELOPMENT.md`](docs/LOCAL_DEVELOPMENT.md).
+Identify the loaded client and daemon independently: checkout `HEAD`, channel
+symlinks, and daemon version do not establish the client baseline. Do not deploy
+when provenance or preservation of local customizations is unresolved.
 
-To test a change without disturbing the shared daemon or the caller's session,
-run your build against its own socket:
+`cargo build` alone proves neither runtime behavior nor the TUI being displayed.
+An executable swap or symlink change does not replace an already-running client;
+verify the loaded client binary after an explicitly approved switch. Isolated
+socket builds are permitted for testing and must not implicitly promote or reload
+the shared client or daemon.
 
-```bash
-cargo build --profile selfdev
-./target/selfdev/jcode run --no-update --socket /run/user/1000/jcode-mytest.sock '<prompt>'
-```
+### Recovered custom UI baseline
 
-Two things that waste time otherwise:
-
-- `crate::logging::info` writes to a log file, not stderr, so instrumenting a
-  code path with it produces no visible output under `--trace`. Use `eprintln!`
-  for throwaway diagnostics and delete it before committing.
-- Confirm which binary you are actually inspecting. `strings` on
-  `builds/shared-server/jcode` reads a 70-byte symlink, not a program; resolve it
-  with `readlink -f` first.
+The user-approved custom baseline was recovered from user-owned GitHub ref
+`archive/combined-ui-lifecycle` at exact commit
+`e4d87f2151b773141801618e1078fe2bf69102aa`, cloned at
+`/Users/diplomat/jcode-custom` on `jcode/session-manager-archive-integration`.
+It is an integration baseline only. The migration has not yet received build,
+visual, deployment, or runtime acceptance certification. Preserve the factual
+2026-09-08 incident record in `docs/LOCAL_DEVELOPMENT.md`; do not infer that
+recovery authorizes installation, reload, channel changes, or a client swap.

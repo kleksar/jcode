@@ -932,7 +932,38 @@ pub(in crate::tui::app) fn handle_server_event(
             app.update_terminal_title();
             false
         }
-        ServerEvent::Pong { .. } => false,
+        ServerEvent::Pong {
+            id,
+            session_preview_protocol,
+            clean_session_protocol,
+            directory_completion_protocol,
+            ..
+        } => {
+            let directory_completion_changed = remote
+                .record_directory_completion_capability_pong(id, directory_completion_protocol);
+            let clean_session_changed =
+                remote.record_clean_session_capability_pong(id, clean_session_protocol);
+            if remote.record_session_preview_capability_pong(id, session_preview_protocol) {
+                if let Some(picker) = app.session_picker_overlay.as_ref() {
+                    picker
+                        .borrow_mut()
+                        .set_active_preview_capability(session_preview_protocol);
+                    return true;
+                }
+            }
+            clean_session_changed || directory_completion_changed
+        }
+        ServerEvent::SessionPreview {
+            id,
+            session_id,
+            revision,
+            messages,
+            activity,
+        } => app.session_picker_overlay.as_ref().is_some_and(|picker| {
+            picker
+                .borrow_mut()
+                .apply_active_preview(id, &session_id, revision, messages, activity)
+        }),
         ServerEvent::ConnectionPhase { phase } => {
             let cp = match phase.as_str() {
                 "authenticating" => crate::message::ConnectionPhase::Authenticating,
@@ -1221,11 +1252,164 @@ pub(in crate::tui::app) fn handle_server_event(
             }
             false
         }
+        ServerEvent::SessionCreationContext {
+            id,
+            home_dir,
+            recent_working_dirs,
+        } if app.in_flight_session_creation_context == Some(id) => {
+            app.in_flight_session_creation_context = None;
+            if !app.active_sessions_manager_open() {
+                return false;
+            }
+            if let Some(picker) = app.session_picker_overlay.as_ref() {
+                picker
+                    .borrow_mut()
+                    .set_session_creation_context(home_dir, recent_working_dirs);
+            }
+            true
+        }
+        ServerEvent::WorkingDirectoryResolved {
+            id,
+            input,
+            absolute_path,
+        } if app
+            .in_flight_working_dir_resolution
+            .as_ref()
+            .is_some_and(|(expected, path)| *expected == id && path == &input) =>
+        {
+            app.in_flight_working_dir_resolution = None;
+            if !app.active_sessions_manager_open() {
+                return false;
+            }
+            let create = app.session_picker_overlay.as_ref().and_then(|picker| {
+                picker
+                    .borrow_mut()
+                    .apply_resolved_working_directory(id, &input, absolute_path)
+            });
+            if let Some((prompt, working_dir)) = create {
+                app.queue_clean_session_create(prompt, working_dir);
+                true
+            } else {
+                false
+            }
+        }
+        ServerEvent::WorkingDirectoryCompletions {
+            id,
+            input,
+            candidates,
+            truncated,
+        } if app
+            .in_flight_working_dir_completion
+            .as_ref()
+            .is_some_and(|(expected, path, _)| *expected == id && path == &input) =>
+        {
+            app.in_flight_working_dir_completion = None;
+            if !app.active_sessions_manager_open() {
+                return false;
+            }
+            app.session_picker_overlay.as_ref().is_some_and(|picker| {
+                picker
+                    .borrow_mut()
+                    .apply_working_directory_completions(&input, candidates, truncated)
+            })
+        }
+        ServerEvent::SessionCreated {
+            id,
+            session_id,
+            session_name,
+            ..
+        } if app
+            .in_flight_clean_session_create
+            .as_ref()
+            .is_some_and(|(expected, _)| *expected == id) =>
+        {
+            let Some((_, create)) = app.in_flight_clean_session_create.take() else {
+                return false;
+            };
+            // SessionCreated is the server's publication boundary. Never undo
+            // this state on an attach or Message socket-write failure: the
+            // visible tile is the recoverable representation of that stable
+            // server session.
+            if !app.workspace_client.is_enabled() {
+                app.workspace_client
+                    .enable(app.remote_session_id.as_deref(), &[]);
+            }
+            let _ = app
+                .workspace_client
+                .handle_clean_session_created(&session_id);
+            app.session_picker_overlay = None;
+            app.pending_session_start_prompt = Some(PendingSessionStartPrompt {
+                target_session_id: Some(session_id.clone()),
+                content: create.prompt,
+                images: Vec::new(),
+                origin: PendingSessionStartOrigin::CleanCreate,
+            });
+            app.set_status_notice(format!("Created {session_name}. Attaching…"));
+            true
+        }
         ServerEvent::Error {
             id,
             message,
             retry_after_secs,
         } => {
+            if app.in_flight_session_creation_context == Some(id) {
+                app.in_flight_session_creation_context = None;
+                app.set_status_notice(format!("Failed to request session locations: {message}"));
+                return true;
+            }
+            if app
+                .in_flight_working_dir_resolution
+                .as_ref()
+                .is_some_and(|(expected, _)| *expected == id)
+            {
+                app.in_flight_working_dir_resolution = None;
+                if app.active_sessions_manager_open()
+                    && let Some(picker) = app.session_picker_overlay.as_ref()
+                {
+                    picker
+                        .borrow_mut()
+                        .fail_creation_action(id, message.clone());
+                }
+                return true;
+            }
+            if app
+                .in_flight_working_dir_completion
+                .as_ref()
+                .is_some_and(|(expected, _, _)| *expected == id)
+            {
+                let Some((_, input, _)) = app.in_flight_working_dir_completion.take() else {
+                    return false;
+                };
+                if app.active_sessions_manager_open()
+                    && let Some(picker) = app.session_picker_overlay.as_ref()
+                {
+                    picker
+                        .borrow_mut()
+                        .fail_working_directory_completion(&input, message.clone());
+                }
+                return true;
+            }
+            if app
+                .in_flight_clean_session_create
+                .as_ref()
+                .is_some_and(|(expected, _)| *expected == id)
+            {
+                app.in_flight_clean_session_create = None;
+                if let Some(picker) = app.session_picker_overlay.as_ref() {
+                    picker
+                        .borrow_mut()
+                        .fail_creation_action(id, message.clone());
+                }
+                app.set_status_notice(message);
+                return true;
+            }
+            if let Some(picker) = app.session_picker_overlay.as_ref()
+                && picker
+                    .borrow_mut()
+                    .fail_active_preview(id, message.clone(), Instant::now())
+            {
+                return true;
+            }
             if app.workspace_client.finish_close_request(id).is_some()
                 && let Some(picker) = app.session_picker_overlay.as_ref()
             {
@@ -1957,6 +2141,26 @@ pub(in crate::tui::app) fn handle_server_event(
                             fingerprint,
                         );
                     }
+                }
+
+                let clean_start_for_this_history = app
+                    .pending_session_start_prompt
+                    .as_ref()
+                    .is_some_and(|prompt| {
+                        matches!(prompt.origin, PendingSessionStartOrigin::CleanCreate)
+                            && prompt.target_session_id.as_deref() == Some(session_id.as_str())
+                    });
+                if clean_start_for_this_history {
+                    let prompt = app
+                        .pending_session_start_prompt
+                        .take()
+                        .expect("pending clean start was checked above");
+                    app.input = prompt.content;
+                    app.cursor_pos = app.input.len();
+                    app.pending_images = prompt.images;
+                    app.submit_input_on_startup = true;
+                    app.startup_submit_deferred_reason = None;
+                    app.set_status_notice("Created session attached. Sending first prompt…");
                 }
 
                 if history_matches_pending_startup_prompt(app) {
@@ -2764,7 +2968,7 @@ pub(in crate::tui::app) fn handle_server_event(
                 app.pending_split_request = false;
                 app.pending_split_startup_message = None;
                 app.pending_split_parent_session_id = None;
-                app.pending_split_prompt = None;
+                app.pending_session_start_prompt = None;
                 app.pending_split_model_override = None;
                 app.pending_split_provider_key_override = None;
                 app.pending_split_label = None;
@@ -2786,7 +2990,7 @@ pub(in crate::tui::app) fn handle_server_event(
             app.pending_split_request = false;
             let startup_message = app.pending_split_startup_message.take();
             let parent_session_id_override = app.pending_split_parent_session_id.take();
-            let startup_prompt = app.pending_split_prompt.take();
+            let startup_prompt = app.pending_session_start_prompt.take();
             let model_override = app.pending_split_model_override.take();
             let provider_key_override = app.pending_split_provider_key_override.take();
             let split_label = app.pending_split_label.take();

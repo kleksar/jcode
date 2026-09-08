@@ -22,6 +22,11 @@ use super::client_session::{
     handle_clear_session, handle_reload, handle_resume_session, handle_subscribe,
 };
 use super::client_session_close::handle_close_session;
+use super::client_session_create::{
+    handle_complete_working_directory, handle_create_session, handle_get_session_creation_context,
+    handle_resolve_working_directory,
+};
+use super::client_session_preview::handle_get_session_preview;
 use super::client_state::{
     handle_get_compacted_history, handle_get_history, handle_get_model_catalog, handle_get_state,
 };
@@ -1226,6 +1231,7 @@ pub(super) async fn handle_client(
                         active_skill,
                     },
                     &client_session_id,
+                    &client_connection_id,
                     &mut ProcessingState {
                         client_is_processing: &mut client_is_processing,
                         message_id: &mut processing_message_id,
@@ -1236,6 +1242,7 @@ pub(super) async fn handle_client(
                     &client_event_tx,
                     &processing_done_tx,
                     active_terminal_env.clone(),
+                    &client_connections,
                     &SwarmStatusRefs {
                         members: &swarm_members,
                         swarms_by_id: &swarms_by_id,
@@ -1320,6 +1327,7 @@ pub(super) async fn handle_client(
                             active_skill: None,
                         },
                         &client_session_id,
+                        &client_connection_id,
                         &mut ProcessingState {
                             client_is_processing: &mut client_is_processing,
                             message_id: &mut processing_message_id,
@@ -1330,6 +1338,7 @@ pub(super) async fn handle_client(
                         &client_event_tx,
                         &processing_done_tx,
                         active_terminal_env.clone(),
+                        &client_connections,
                         &SwarmStatusRefs {
                             members: &swarm_members,
                             swarms_by_id: &swarms_by_id,
@@ -1533,7 +1542,18 @@ pub(super) async fn handle_client(
             }
 
             Request::Ping { id } => {
-                let json = encode_event(&ServerEvent::Pong { id, native_ssh_protocol: Some(1) });
+                let json = encode_event(&ServerEvent::Pong {
+                    id,
+                    native_ssh_protocol: Some(1),
+                    // GetSessionPreview is dispatched below on the initialized
+                    // client connection.
+                    session_preview_protocol: Some(1),
+                    // This initialized main-daemon endpoint dispatches all
+                    // clean-session protocol handlers. Lightweight and debug
+                    // endpoints intentionally continue to report None.
+                    clean_session_protocol: Some(1),
+                    directory_completion_protocol: Some(1),
+                });
                 let mut w = writer.lock().await;
                 if w.write_all(json.as_bytes()).await.is_err() {
                     break;
@@ -1621,6 +1641,7 @@ pub(super) async fn handle_client(
                                 client_instance_id.as_deref(),
                                 client_has_local_history,
                                 allow_session_takeover,
+                                provisional_session,
                                 &mut client_selfdev,
                                 &mut client_session_id,
                                 &client_connection_id,
@@ -1792,6 +1813,48 @@ pub(super) async fn handle_client(
                 }
             }
 
+            Request::GetSessionPreview {
+                id,
+                session_id,
+                limit,
+            } => {
+                if handle_get_session_preview(
+                    id,
+                    &session_id,
+                    limit,
+                    &sessions,
+                    &client_connections,
+                    &client_event_tx,
+                )
+                .await
+                .is_err()
+                {
+                    break;
+                }
+            }
+
+            Request::GetSessionCreationContext { id } => {
+                if handle_get_session_creation_context(id, &client_event_tx)
+                    .await
+                    .is_err()
+                {
+                    break;
+                }
+            }
+
+            Request::ResolveWorkingDirectory { id, path } => {
+                if handle_resolve_working_directory(id, &path, &client_event_tx)
+                    .await
+                    .is_err()
+                {
+                    break;
+                }
+            }
+
+            Request::CompleteWorkingDirectory { id, path, limit } => {
+                handle_complete_working_directory(id, path, limit, client_event_tx.clone());
+            }
+
             Request::GetModelCatalog { id } => {
                 if handle_get_model_catalog(id, &client_session_id, &agent, &provider, &writer)
                     .await
@@ -1874,6 +1937,7 @@ pub(super) async fn handle_client(
                         client_instance_id.as_deref(),
                         client_has_local_history,
                         allow_session_takeover,
+                        false,
                         &mut client_selfdev,
                         &mut client_session_id,
                         &client_connection_id,
@@ -2950,6 +3014,25 @@ pub(super) async fn handle_client(
                 .await;
             }
 
+            Request::CreateSession {
+                id,
+                working_dir,
+                runtime,
+            } => {
+                handle_create_session(
+                    id,
+                    working_dir,
+                    runtime,
+                    &provider_template,
+                    &sessions,
+                    &shutdown_signals,
+                    &soft_interrupt_queues,
+                    &mcp_pool,
+                    &client_event_tx,
+                )
+                .await?;
+            }
+
             // These are handled via channels, not direct requests from TUI
             Request::ClientDebugCommand { id, .. } => {
                 handle_client_debug_command(id, &client_event_tx).await;
@@ -3182,11 +3265,13 @@ async fn append_context_message(
 async fn start_processing_message(
     message: ProcessingMessage,
     client_session_id: &str,
+    client_connection_id: &str,
     state: &mut ProcessingState<'_>,
     agent: &Arc<Mutex<Agent>>,
     client_event_tx: &mpsc::UnboundedSender<ServerEvent>,
     processing_done_tx: &mpsc::UnboundedSender<(u64, Result<()>, Option<String>)>,
     client_terminal_env: Vec<(String, String)>,
+    client_connections: &Arc<RwLock<HashMap<String, ClientConnectionInfo>>>,
     swarm: &SwarmStatusRefs<'_>,
 ) {
     let ProcessingMessage {
@@ -3279,6 +3364,8 @@ async fn start_processing_message(
         client_session_id.to_string(),
         Arc::clone(swarm.members),
         client_event_tx.clone(),
+        client_connection_id.to_string(),
+        Arc::clone(client_connections),
     );
     let done_tx = processing_done_tx.clone();
     crate::logging::info(&format!("Processing message id={} spawning task", id));

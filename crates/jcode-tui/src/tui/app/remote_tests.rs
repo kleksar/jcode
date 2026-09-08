@@ -1,7 +1,7 @@
 use super::reconnect;
 use super::{
     RemoteRunState, auth_provider_hint_for_login_provider, handle_post_connect,
-    handle_server_event, process_remote_followups,
+    handle_server_event, handle_tick, process_remote_followups,
 };
 use crate::protocol::{
     MemoryActivitySnapshot, MemoryPipelineSnapshot, MemoryStateSnapshot, MemoryStepStatusSnapshot,
@@ -51,6 +51,367 @@ fn create_test_app() -> crate::tui::app::App {
     app.queue_mode = false;
     app.diff_mode = crate::config::DiffDisplayMode::Inline;
     app
+}
+
+#[test]
+fn clean_composer_app_keys_paste_and_server_error_preserve_one_retryable_prompt() {
+    use crossterm::event::{KeyCode, KeyModifiers};
+    use std::cell::RefCell;
+
+    let mut app = create_test_app();
+    let mut picker = crate::tui::session_picker::SessionPicker::new(Vec::new());
+    picker.set_current_dir(Some("/server/here".into()));
+    picker.set_new_session_composer_enabled(true);
+    app.session_picker_overlay = Some(RefCell::new(picker));
+
+    app.handle_session_picker_key(KeyCode::Char('d'), KeyModifiers::NONE)
+        .expect("typing should reach the clean composer");
+    app.handle_paste("raft".into());
+    app.handle_session_picker_key(KeyCode::Enter, KeyModifiers::NONE)
+        .expect("prompt enter should choose a directory");
+    app.handle_session_picker_key(KeyCode::Enter, KeyModifiers::NONE)
+        .expect("directory enter should queue clean creation");
+
+    let create = app
+        .pending_clean_session_create
+        .take()
+        .expect("app key path must queue the pasted prompt exactly once");
+    assert_eq!(create.prompt, "draft");
+    assert_eq!(create.working_dir, "/server/here");
+    app.in_flight_clean_session_create = Some((77, create));
+    app.session_picker_overlay
+        .as_ref()
+        .expect("picker remains available until SessionCreated")
+        .borrow_mut()
+        .begin_clean_session_creation(77);
+
+    let rt = tokio::runtime::Runtime::new().expect("runtime");
+    let _guard = rt.enter();
+    let mut remote = crate::tui::backend::RemoteConnection::dummy();
+    assert!(app.handle_server_event(
+        ServerEvent::Error {
+            id: 77,
+            message: "create rejected".into(),
+            retry_after_secs: None,
+        },
+        &mut remote,
+    ));
+    assert!(app.in_flight_clean_session_create.is_none());
+
+    app.handle_session_picker_key(KeyCode::Enter, KeyModifiers::NONE)
+        .expect("retry enter should return through App key handling");
+    let retry = app
+        .pending_clean_session_create
+        .as_ref()
+        .expect("server error must preserve a retryable create request");
+    assert_eq!(retry.prompt, "draft");
+    assert_eq!(retry.working_dir, "/server/here");
+}
+
+#[test]
+fn clean_capability_tick_only_promotes_explicit_active_sessions_manager() {
+    use crossterm::event::{KeyCode, KeyModifiers};
+    use std::cell::RefCell;
+
+    for mode in [
+        crate::tui::app::SessionPickerMode::Resume,
+        crate::tui::app::SessionPickerMode::Onboarding,
+    ] {
+        // App construction initializes a short-lived Tokio runtime. Keep it
+        // outside the runtime used to drive the actual tick.
+        let mut app = create_test_app();
+        app.session_picker_mode = mode;
+        app.session_picker_overlay = Some(RefCell::new(
+            crate::tui::session_picker::SessionPicker::new(Vec::new()),
+        ));
+        let runtime = tokio::runtime::Runtime::new().expect("runtime");
+        runtime.block_on(async {
+            let mut remote = crate::tui::backend::RemoteConnection::dummy();
+            let probe_id = remote
+                .request_clean_session_capability()
+                .await
+                .expect("dummy control connection accepts capability probe");
+            assert!(app.handle_server_event(
+                ServerEvent::Pong {
+                    id: probe_id,
+                    native_ssh_protocol: None,
+                    session_preview_protocol: None,
+                    clean_session_protocol: Some(1),
+                    directory_completion_protocol: None,
+                },
+                &mut remote,
+            ));
+
+            handle_tick(&mut app, &mut remote).await;
+            let picker = app.session_picker_overlay.as_ref().expect("picker stays open").borrow();
+            assert!(
+                !picker.clean_composer_enabled_for_test(),
+                "{mode:?} picker must retain its legacy input behavior"
+            );
+            drop(picker);
+            app.handle_session_picker_key(KeyCode::Char('p'), KeyModifiers::NONE)
+                .expect("generic picker key dispatch");
+            assert!(
+                !app
+                    .session_picker_overlay
+                    .as_ref()
+                    .expect("picker stays open")
+                    .borrow()
+                    .clean_composer_active_for_test(),
+                "capability traffic must not turn a generic picker keystroke into a new-session draft"
+            );
+            assert!(!app.pending_session_creation_context);
+        });
+    }
+}
+
+#[test]
+fn active_sessions_composer_resolves_paths_and_preserves_invalid_manual_draft() {
+    use crossterm::event::{KeyCode, KeyModifiers};
+    use std::cell::RefCell;
+
+    // As above, construct the app before entering this test's tick runtime.
+    let mut app = create_test_app();
+    app.session_picker_mode = crate::tui::app::SessionPickerMode::ActiveSessions;
+    app.pending_session_creation_context = true;
+    let mut picker = crate::tui::session_picker::SessionPicker::new(Vec::new());
+    picker.set_current_dir(Some("/server/here".into()));
+    app.session_picker_overlay = Some(RefCell::new(picker));
+    let runtime = tokio::runtime::Runtime::new().expect("runtime");
+    runtime.block_on(async {
+        let mut remote = crate::tui::backend::RemoteConnection::dummy();
+        let probe_id = remote
+            .request_clean_session_capability()
+            .await
+            .expect("probe");
+        assert!(app.handle_server_event(
+            ServerEvent::Pong {
+                id: probe_id,
+                native_ssh_protocol: None,
+                session_preview_protocol: None,
+                clean_session_protocol: Some(1),
+                directory_completion_protocol: None,
+            },
+            &mut remote,
+        ));
+
+        handle_tick(&mut app, &mut remote).await;
+        assert!(
+            app.session_picker_overlay
+                .as_ref()
+                .expect("active picker")
+                .borrow()
+                .clean_composer_enabled_for_test()
+        );
+        let context_id = app
+            .in_flight_session_creation_context
+            .expect("active manager requests server directory context");
+        assert!(app.handle_server_event(
+            ServerEvent::SessionCreationContext {
+                id: context_id,
+                home_dir: "/server/home".into(),
+                recent_working_dirs: Vec::new(),
+            },
+            &mut remote,
+        ));
+
+        app.handle_session_picker_key(KeyCode::Char('p'), KeyModifiers::NONE)
+            .unwrap();
+        app.handle_session_picker_key(KeyCode::Enter, KeyModifiers::NONE)
+            .unwrap();
+        // Here, Home, then Type path.
+        app.handle_session_picker_key(KeyCode::Down, KeyModifiers::NONE)
+            .unwrap();
+        app.handle_session_picker_key(KeyCode::Down, KeyModifiers::NONE)
+            .unwrap();
+        app.handle_session_picker_key(KeyCode::Enter, KeyModifiers::NONE)
+            .unwrap();
+        for ch in "bad_path".chars() {
+            app.handle_session_picker_key(KeyCode::Char(ch), KeyModifiers::NONE)
+                .unwrap();
+        }
+        app.handle_session_picker_key(KeyCode::Enter, KeyModifiers::NONE)
+            .unwrap();
+        handle_tick(&mut app, &mut remote).await;
+        let bad_id = app
+            .in_flight_working_dir_resolution
+            .as_ref()
+            .map(|(id, path)| (*id, path.clone()))
+            .expect("manual Enter sends ResolveWorkingDirectory through the app tick");
+        assert_ne!(bad_id.0, 0);
+        assert_eq!(bad_id.1, "bad_path");
+        assert!(app.handle_server_event(
+            ServerEvent::Error {
+                id: bad_id.0,
+                message: "invalid path".into(),
+                retry_after_secs: None,
+            },
+            &mut remote,
+        ));
+        {
+            let picker = app.session_picker_overlay.as_ref().unwrap().borrow();
+            assert_eq!(
+                picker.clean_composer_feedback_for_test(),
+                Some("invalid path")
+            );
+        }
+
+        for _ in 0.."bad_path".len() {
+            app.handle_session_picker_key(KeyCode::Backspace, KeyModifiers::NONE)
+                .unwrap();
+        }
+        for ch in "~/".chars() {
+            app.handle_session_picker_key(KeyCode::Char(ch), KeyModifiers::NONE)
+                .unwrap();
+        }
+        app.handle_session_picker_key(KeyCode::Enter, KeyModifiers::NONE)
+            .unwrap();
+        handle_tick(&mut app, &mut remote).await;
+        let home_id = app.in_flight_working_dir_resolution.as_ref().unwrap().0;
+        assert!(app.handle_server_event(
+            ServerEvent::WorkingDirectoryResolved {
+                id: home_id,
+                input: "~/".into(),
+                absolute_path: "/server/home".into(),
+            },
+            &mut remote,
+        ));
+        assert_eq!(
+            app.pending_clean_session_create
+                .as_ref()
+                .map(|create| (create.prompt.as_str(), create.working_dir.as_str())),
+            Some(("p", "/server/home")),
+            "the correlated canonical reply queues exactly the Enter-intended create"
+        );
+        // Repeated Enter while creating cannot queue a duplicate request.
+        app.handle_session_picker_key(KeyCode::Enter, KeyModifiers::NONE)
+            .unwrap();
+        handle_tick(&mut app, &mut remote).await;
+        let create_id = app
+            .in_flight_clean_session_create
+            .as_ref()
+            .map(|(id, create)| (*id, create.prompt.clone(), create.working_dir.clone()))
+            .expect("canonical resolution creates without another key");
+        assert_eq!(create_id.1, "p");
+        assert_eq!(create_id.2, "/server/home");
+        assert!(app.pending_clean_session_create.is_none());
+        assert!(app.handle_server_event(
+            ServerEvent::SessionCreated {
+                id: create_id.0,
+                session_id: "created-session".into(),
+                session_name: "Created session".into(),
+                working_dir: "/server/home".into(),
+            },
+            &mut remote,
+        ));
+        assert!(app.in_flight_clean_session_create.is_none());
+        assert_eq!(
+            app.pending_session_start_prompt
+                .as_ref()
+                .map(|prompt| (prompt.target_session_id.as_deref(), prompt.content.as_str())),
+            Some((Some("created-session"), "p")),
+            "SessionCreated retains the original prompt exactly once for attach/send"
+        );
+    });
+}
+
+#[test]
+fn active_sessions_path_completion_edits_inline_and_ignores_stale_replies() {
+    use crossterm::event::{KeyCode, KeyModifiers};
+    use std::cell::RefCell;
+    use std::time::Duration;
+
+    let mut app = create_test_app();
+    app.session_picker_mode = crate::tui::app::SessionPickerMode::ActiveSessions;
+    let mut picker = crate::tui::session_picker::SessionPicker::new(Vec::new());
+    picker.set_current_dir(Some("/server/here".into()));
+    picker.set_new_session_composer_enabled(true);
+    picker.set_session_creation_context("/server/home".into(), vec!["/recent/one".into()]);
+    app.session_picker_overlay = Some(RefCell::new(picker));
+
+    let runtime = tokio::runtime::Runtime::new().expect("runtime");
+    runtime.block_on(async {
+        let mut remote = crate::tui::backend::RemoteConnection::dummy();
+        let probe_id = remote
+            .request_clean_session_capability()
+            .await
+            .expect("probe");
+        assert!(app.handle_server_event(
+            ServerEvent::Pong {
+                id: probe_id,
+                native_ssh_protocol: None,
+                session_preview_protocol: None,
+                clean_session_protocol: Some(1),
+                directory_completion_protocol: Some(1),
+            },
+            &mut remote,
+        ));
+
+        app.handle_session_picker_key(KeyCode::Char('p'), KeyModifiers::NONE)
+            .unwrap();
+        app.handle_session_picker_key(KeyCode::Enter, KeyModifiers::NONE)
+            .unwrap();
+        // Here is selected by default. A first printable character and a paste
+        // must enter the path editor directly, without moving to Type path.
+        app.handle_session_picker_key(KeyCode::Char('~'), KeyModifiers::NONE)
+            .unwrap();
+        app.handle_paste("/project space".into());
+        assert_eq!(
+            app.session_picker_overlay
+                .as_ref()
+                .unwrap()
+                .borrow()
+                .clean_composer_manual_path_for_test(),
+            Some("~/project space")
+        );
+
+        std::thread::sleep(Duration::from_millis(130));
+        handle_tick(&mut app, &mut remote).await;
+        let first = app
+            .in_flight_working_dir_completion
+            .as_ref()
+            .expect("debounced path edit requests server completion")
+            .clone();
+
+        app.handle_session_picker_key(KeyCode::Char('s'), KeyModifiers::NONE)
+            .unwrap();
+        std::thread::sleep(Duration::from_millis(130));
+        handle_tick(&mut app, &mut remote).await;
+        let second = app
+            .in_flight_working_dir_completion
+            .as_ref()
+            .expect("new edit replaces completion request")
+            .clone();
+        assert_ne!(first.0, second.0);
+        assert!(!app.handle_server_event(
+            ServerEvent::WorkingDirectoryCompletions {
+                id: first.0,
+                input: first.1,
+                candidates: vec!["~/stale/".into()],
+                truncated: false,
+            },
+            &mut remote,
+        ));
+        assert!(app.handle_server_event(
+            ServerEvent::WorkingDirectoryCompletions {
+                id: second.0,
+                input: second.1,
+                candidates: vec!["~/project spaces/".into()],
+                truncated: false,
+            },
+            &mut remote,
+        ));
+        app.handle_session_picker_key(KeyCode::Tab, KeyModifiers::NONE)
+            .unwrap();
+        app.handle_session_picker_key(KeyCode::Enter, KeyModifiers::NONE)
+            .unwrap();
+        assert_eq!(
+            app.in_flight_working_dir_resolution
+                .as_ref()
+                .map(|(_, path)| path.as_str()),
+            Some("~/project spaces/")
+        );
+    });
 }
 
 /// Point JCODE_HOME at a per-process temp dir when the environment does not

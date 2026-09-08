@@ -1478,7 +1478,7 @@ async fn handle_remote_key_internal(
                             finish_remote_split_launch(app);
                             app.pending_split_startup_message = None;
                             app.pending_split_parent_session_id = None;
-                            app.pending_split_prompt = None;
+                            app.pending_session_start_prompt = None;
                             app.pending_split_model_override = None;
                             app.pending_split_provider_key_override = None;
                             app.pending_split_label = None;
@@ -1536,7 +1536,7 @@ async fn handle_remote_key_internal(
                             finish_remote_split_launch(app);
                             app.pending_split_startup_message = None;
                             app.pending_split_parent_session_id = None;
-                            app.pending_split_prompt = None;
+                            app.pending_session_start_prompt = None;
                             app.pending_split_model_override = None;
                             app.pending_split_provider_key_override = None;
                             app.pending_split_label = None;
@@ -1576,7 +1576,7 @@ async fn handle_remote_key_internal(
                             finish_remote_split_launch(app);
                             app.pending_split_startup_message = None;
                             app.pending_split_parent_session_id = None;
-                            app.pending_split_prompt = None;
+                            app.pending_session_start_prompt = None;
                             app.pending_split_model_override = None;
                             app.pending_split_provider_key_override = None;
                             app.pending_split_label = None;
@@ -1616,7 +1616,7 @@ async fn handle_remote_key_internal(
                             finish_remote_split_launch(app);
                             app.pending_split_startup_message = None;
                             app.pending_split_parent_session_id = None;
-                            app.pending_split_prompt = None;
+                            app.pending_session_start_prompt = None;
                             app.pending_split_model_override = None;
                             app.pending_split_provider_key_override = None;
                             app.pending_split_label = None;

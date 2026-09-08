@@ -108,6 +108,13 @@ pub(super) async fn handle_lightweight_control_request(
             &ServerEvent::Pong {
                 id,
                 native_ssh_protocol: Some(1),
+                // Preserve the Ping connection so the following request can
+                // enter the initialized lifecycle and dispatch GetSessionPreview.
+                session_preview_protocol: Some(1),
+                // Deferred until the initialized lifecycle dispatches the full
+                // clean-session request family.
+                clean_session_protocol: None,
+                directory_completion_protocol: Some(1),
             },
         )
         .await?;

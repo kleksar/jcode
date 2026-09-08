@@ -78,7 +78,6 @@ mod local;
 mod misc_ui;
 mod model_context;
 mod navigation;
-mod worktree_pane;
 mod observe;
 pub(crate) mod onboarding_flow;
 mod onboarding_flow_control;
@@ -97,6 +96,7 @@ mod split_view;
 mod state_ui;
 mod state_ui_input_helpers;
 mod update_sim;
+mod worktree_pane;
 pub(crate) use state_ui_input_helpers::registered_command_entries;
 mod state_ui_maintenance;
 mod state_ui_messages;
@@ -143,9 +143,30 @@ struct PendingRemoteMessage {
 }
 
 #[derive(Debug, Clone)]
-struct PendingSplitPrompt {
+enum PendingSessionStartOrigin {
+    Split,
+    CleanCreate,
+}
+
+#[derive(Debug, Clone)]
+struct PendingSessionStartPrompt {
+    /// Split startup prompts acquire their target from SplitResponse. Clean
+    /// creation binds the authoritative SessionCreated identity before attach.
+    target_session_id: Option<String>,
     content: String,
     images: Vec<(String, String)>,
+    origin: PendingSessionStartOrigin,
+}
+
+/// The server-authoritative clean-session request has been accepted for
+/// transport but not yet answered. The prompt deliberately remains here until
+/// a correlated terminal result so an ambiguous connection loss cannot create
+/// a second session or erase the user's draft.
+#[derive(Debug, Clone)]
+struct PendingCleanSessionCreate {
+    prompt: String,
+    working_dir: String,
+    runtime: crate::protocol::SessionRuntimeSelection,
 }
 
 struct PendingLocalTransfer {
@@ -1525,7 +1546,7 @@ pub struct App {
     // Parent/original session that feedback flows should report back to after a split launch.
     pending_split_parent_session_id: Option<String>,
     // Startup user prompt to auto-submit in the next spawned split window.
-    pending_split_prompt: Option<PendingSplitPrompt>,
+    pending_session_start_prompt: Option<PendingSessionStartPrompt>,
     // Optional model override to apply before opening the next spawned split window.
     pending_split_model_override: Option<String>,
     // Optional provider key override to persist into the next spawned split window.
@@ -1639,6 +1660,16 @@ pub struct App {
     session_picker_overlay: Option<RefCell<super::session_picker::SessionPicker>>,
     session_picker_mode: SessionPickerMode,
     pending_session_picker_load: Option<PendingSessionPickerLoad>,
+    /// Queue one context request when the Active Sessions manager opens on a
+    /// supported server. These detached controls are never gated by a source turn.
+    pending_session_creation_context: bool,
+    in_flight_session_creation_context: Option<u64>,
+    in_flight_working_dir_resolution: Option<(u64, String)>,
+    /// One bounded server completion request, correlated to the exact editable
+    /// path and deadline so stale replies cannot affect a replacement picker.
+    in_flight_working_dir_completion: Option<(u64, String, std::time::Instant)>,
+    pending_clean_session_create: Option<PendingCleanSessionCreate>,
+    in_flight_clean_session_create: Option<(u64, PendingCleanSessionCreate)>,
     catchup_return_stack: Vec<String>,
     pending_catchup_resume: Option<PendingCatchupResume>,
     in_flight_catchup_resume: Option<PendingCatchupResume>,

@@ -111,11 +111,13 @@ fn session_picker_enter_queues_current_terminal_resume_and_closes_overlay() {
         }
     };
     app.handle_session_picker_key(crossterm::event::KeyCode::Enter, modifiers)
-    .expect("session picker enter should succeed");
+        .expect("session picker enter should succeed");
 
     assert!(app.session_picker_overlay.is_none());
     assert_eq!(
-        app.workspace_client.take_pending_resume_session().as_deref(),
+        app.workspace_client
+            .take_pending_resume_session()
+            .as_deref(),
         Some("session_here_123")
     );
 }
@@ -175,10 +177,11 @@ fn session_closed_event_refreshes_picker_and_keeps_it_open() {
         &mut remote,
     ));
     assert!(app.session_picker_overlay.is_some());
-    assert!(app
-        .status_notice
-        .as_ref()
-        .is_some_and(|(notice, _)| notice.contains("Session closed")));
+    assert!(
+        app.status_notice
+            .as_ref()
+            .is_some_and(|(notice, _)| notice.contains("Session closed"))
+    );
 }
 
 #[test]
@@ -203,10 +206,11 @@ fn close_session_error_keeps_picker_open_and_shows_server_reason() {
         &mut remote,
     ));
     assert!(app.session_picker_overlay.is_some());
-    assert!(app
-        .status_notice
-        .as_ref()
-        .is_some_and(|(notice, _)| notice.contains("session is still working")));
+    assert!(
+        app.status_notice
+            .as_ref()
+            .is_some_and(|(notice, _)| notice.contains("session is still working"))
+    );
 }
 
 #[test]
@@ -501,10 +505,7 @@ fn slash_provider_test_coverage_with_args_shows_provider_detail() {
             .starts_with("# Provider test coverage")
     );
     assert!(app.model_status_content.contains("Provider: fpt"));
-    assert!(
-        app.model_status_content
-            .contains("Model: FPT.AI-KIE-v1.7")
-    );
+    assert!(app.model_status_content.contains("Model: FPT.AI-KIE-v1.7"));
 }
 
 #[test]
@@ -770,9 +771,11 @@ fn test_fast_release_command_starts_synthetic_user_turn() {
         .last()
         .expect("missing launch notice");
     assert_eq!(notice.role, "system");
-    assert!(notice
-        .content
-        .contains("Starting logical commits + push + fast local release"));
+    assert!(
+        notice
+            .content
+            .contains("Starting logical commits + push + fast local release")
+    );
 }
 
 #[test]
@@ -878,9 +881,11 @@ fn test_remote_release_command_uses_tag_only_ci_path() {
         .last()
         .expect("missing launch notice");
     assert_eq!(notice.role, "system");
-    assert!(notice
-        .content
-        .contains("Starting logical commits + push + remote release"));
+    assert!(
+        notice
+            .content
+            .contains("Starting logical commits + push + remote release")
+    );
 
     let prompt = super::commands::build_remote_release_prompt();
     assert!(prompt.contains("quick-release.sh --remote"));
@@ -905,9 +910,11 @@ fn test_commit_push_release_alias_starts_synthetic_user_turn() {
         .last()
         .expect("missing launch notice");
     assert_eq!(notice.role, "system");
-    assert!(notice
-        .content
-        .contains("Starting logical commits + push + fast local release"));
+    assert!(
+        notice
+            .content
+            .contains("Starting logical commits + push + fast local release")
+    );
 }
 
 #[test]
@@ -1374,10 +1381,7 @@ fn test_fork_command_with_prompt_forks_session() {
     app.input = "/fork try the other approach".to_string();
     app.submit_input();
 
-    let msg = app
-        .display_messages()
-        .last()
-        .expect("missing fork message");
+    let msg = app.display_messages().last().expect("missing fork message");
     assert_eq!(msg.role, "system");
     assert!(msg.content.contains("created for the next prompt"));
     let session_id = msg
@@ -1410,10 +1414,7 @@ fn test_fork_command_without_prompt_forks_idle_session() {
     app.input = "/fork".to_string();
     app.submit_input();
 
-    let msg = app
-        .display_messages()
-        .last()
-        .expect("missing fork message");
+    let msg = app.display_messages().last().expect("missing fork message");
     assert_eq!(msg.role, "system");
     assert!(msg.content.contains("✂ Fork →"));
     let session_id = msg
@@ -1692,7 +1693,9 @@ fn test_observe_updates_latest_tool_context_only() {
         id: "tool_1".to_string(),
         name: "read".to_string(),
         input: serde_json::json!({"file_path": "src/main.rs", "start_line": 1, "end_line": 10}),
-        intent: None, thought_signature: None, };
+        intent: None,
+        thought_signature: None,
+    };
     app.observe_tool_call(&tool_call);
 
     let page = app.side_panel.focused_page().expect("missing observe page");
@@ -1731,7 +1734,9 @@ fn test_observe_ignores_noise_tools_and_preserves_latest_useful_context() {
         id: "tool_read".to_string(),
         name: "read".to_string(),
         input: serde_json::json!({"file_path": "src/main.rs"}),
-        intent: None, thought_signature: None, };
+        intent: None,
+        thought_signature: None,
+    };
     app.observe_tool_result(&read_tool, "fn main() {}", false, Some("read"));
     let before = app
         .side_panel
@@ -1744,7 +1749,9 @@ fn test_observe_ignores_noise_tools_and_preserves_latest_useful_context() {
         id: "tool_side_panel".to_string(),
         name: "side_panel".to_string(),
         input: serde_json::json!({"action": "write", "page_id": "plan"}),
-        intent: None, thought_signature: None, };
+        intent: None,
+        thought_signature: None,
+    };
     app.observe_tool_call(&noise_tool);
     app.observe_tool_result(&noise_tool, "ok", false, Some("side_panel"));
 
@@ -1849,4 +1856,91 @@ fn test_fast_on_while_processing_mentions_next_request_locally() {
         app.status_notice(),
         Some("Fast: on (next request)".to_string())
     );
+}
+
+#[test]
+fn active_session_preview_response_is_scoped_to_its_loading_request() {
+    let mut app = create_test_app();
+    let session_id = "active_preview_target".to_string();
+    let mut picker = crate::tui::session_picker::SessionPicker::new(vec![
+        crate::tui::session_picker::SessionInfo {
+            id: session_id.clone(),
+            parent_id: None,
+            short_name: "preview".to_string(),
+            icon: "p".to_string(),
+            title: "Preview target".to_string(),
+            message_count: 1,
+            user_message_count: 1,
+            assistant_message_count: 0,
+            created_at: chrono::Utc::now(),
+            last_message_time: chrono::Utc::now(),
+            last_active_at: None,
+            working_dir: None,
+            model: None,
+            provider_key: None,
+            is_canary: false,
+            is_debug: false,
+            saved: false,
+            save_label: None,
+            status: crate::session::SessionStatus::Active,
+            needs_catchup: false,
+            estimated_tokens: 0,
+            first_user_prompt: None,
+            messages_preview: Vec::new(),
+            search_index: "preview target".to_string(),
+            server_name: None,
+            server_icon: None,
+            source: crate::tui::session_picker::SessionSource::Jcode,
+            resume_target: crate::tui::session_picker::ResumeTarget::JcodeSession {
+                session_id: session_id.clone(),
+            },
+            external_path: None,
+        },
+    ]);
+    picker.set_live_presence_for_test(vec![crate::session::SessionPresence {
+        session_id: session_id.clone(),
+        pid: std::process::id(),
+        streaming: true,
+        streaming_since: None,
+        internal: false,
+    }]);
+    picker.set_active_preview_capability(Some(1));
+    assert_eq!(
+        picker.take_pending_active_preview(),
+        Some(session_id.clone())
+    );
+    picker.mark_active_preview_loading(&session_id, 44);
+    app.session_picker_overlay = Some(RefCell::new(picker));
+
+    let runtime = tokio::runtime::Runtime::new().expect("test runtime");
+    let _guard = runtime.enter();
+    let mut remote = crate::tui::backend::RemoteConnection::dummy();
+    assert!(app.handle_server_event(
+        crate::protocol::ServerEvent::SessionPreview {
+            id: 44,
+            session_id: session_id.clone(),
+            revision: 1,
+            messages: vec![crate::protocol::HistoryMessage {
+                role: "user".to_string(),
+                content: "authoritative preview".to_string(),
+                tool_calls: None,
+                tool_data: None,
+            }],
+            activity: crate::protocol::SessionActivitySnapshot {
+                is_processing: true,
+                current_tool_name: None,
+            },
+        },
+        &mut remote,
+    ));
+    // A later generic error with the consumed preview ID must preserve normal
+    // error routing rather than overwrite a successful preview state.
+    assert!(!app.handle_server_event(
+        crate::protocol::ServerEvent::Error {
+            id: 44,
+            message: "stale preview failure".to_string(),
+            retry_after_secs: None,
+        },
+        &mut remote,
+    ));
 }

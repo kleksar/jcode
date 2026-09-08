@@ -657,6 +657,13 @@ pub(super) fn handle_paste(app: &mut App, text: String) {
     if app.append_ssh_login_input(&text) {
         return;
     }
+    if app
+        .session_picker_overlay
+        .as_ref()
+        .is_some_and(|picker| picker.borrow_mut().append_clean_session_prompt_paste(&text))
+    {
+        return;
+    }
     paste_guard::note_paste();
     if crate::tui::is_ssh_remote() {
         // Text paths refer to the remote machine. Do not stat/read laptop
@@ -2931,7 +2938,10 @@ fn paste_placeholder(content: &str) -> String {
 impl App {
     pub(super) fn handle_key_event(&mut self, event: crossterm::event::KeyEvent) {
         if self.remote_login.is_some() {
-            if matches!(event.kind, crossterm::event::KeyEventKind::Press | crossterm::event::KeyEventKind::Repeat) {
+            if matches!(
+                event.kind,
+                crossterm::event::KeyEventKind::Press | crossterm::event::KeyEventKind::Repeat
+            ) {
                 let _ = self.handle_key_press_event(event);
             }
             return;

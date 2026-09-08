@@ -1,8 +1,9 @@
 #![cfg_attr(test, allow(clippy::items_after_test_module))]
 
 use super::{
-    App, DisplayMessage, PendingReloadReconnectStatus, ProcessingStatus, RemoteResumeActivity,
-    SendAction, ctrl_bracket_fallback_to_esc, input, parse_rate_limit_error,
+    App, DisplayMessage, PendingReloadReconnectStatus, PendingSessionStartOrigin,
+    PendingSessionStartPrompt, ProcessingStatus, RemoteResumeActivity, SendAction,
+    ctrl_bracket_fallback_to_esc, input, parse_rate_limit_error,
     remote_notifications::present_swarm_notification, spawn_in_new_terminal,
 };
 use crate::bus::BusEvent;
@@ -145,6 +146,245 @@ pub(super) async fn handle_tick(app: &mut App, remote: &mut RemoteConnection) ->
 
     let _ = check_debug_command(app, remote).await;
 
+    // Live-preview control traffic is intentionally independent from the source
+    // session's turn. A busy source must never prevent browsing another active
+    // session, and each request remains scoped by its own server-issued ID.
+    let active_sessions_manager_open = app.active_sessions_manager_open();
+    if !active_sessions_manager_open {
+        // Context and path resolution are meaningful only to the manager that
+        // requested them. Do not let a late tick promote a replacement
+        // `/resume` or onboarding picker into a composer.
+        app.pending_session_creation_context = false;
+        app.in_flight_session_creation_context = None;
+        app.in_flight_working_dir_resolution = None;
+        app.in_flight_working_dir_completion = None;
+    }
+    if active_sessions_manager_open {
+        // Clean-session support is a separate explicitly-correlated Ping/Pong
+        // handshake. Do not infer it from the preview handshake or an ambient
+        // keepalive, because both can be served by an older daemon.
+        if remote.expire_clean_session_capability_probe() {
+            if let Some(picker) = app.session_picker_overlay.as_ref() {
+                let mut picker = picker.borrow_mut();
+                picker.set_new_session_composer_enabled(false);
+                picker.set_new_session_composer_unavailable(
+                    "Server update required for clean session creation".to_string(),
+                );
+            }
+            app.pending_session_creation_context = false;
+            needs_redraw = true;
+        }
+        if let Some(protocol) = remote.clean_session_capability() {
+            if let Some(picker) = app.session_picker_overlay.as_ref() {
+                let mut picker = picker.borrow_mut();
+                if protocol == Some(1) {
+                    picker.set_new_session_composer_enabled(true);
+                } else {
+                    picker.set_new_session_composer_enabled(false);
+                    picker.set_new_session_composer_unavailable(
+                        "Server update required for clean session creation".to_string(),
+                    );
+                    app.pending_session_creation_context = false;
+                }
+            }
+        } else if remote.needs_clean_session_capability_probe()
+            && remote.request_clean_session_capability().await.is_err()
+        {
+            // The next tick may retry the finite handshake. Do not change the
+            // picker to Unsupported until a correlated response or timeout.
+            needs_redraw = true;
+        }
+
+        // These detached control requests intentionally sit outside
+        // `!app.is_processing`: the source session can keep streaming while a
+        // user browses or creates another session.
+        if remote.clean_session_capability() == Some(Some(1)) {
+            if app.pending_session_creation_context
+                && app.in_flight_session_creation_context.is_none()
+            {
+                match remote.request_session_creation_context().await {
+                    Ok(id) => {
+                        app.pending_session_creation_context = false;
+                        app.in_flight_session_creation_context = Some(id);
+                        needs_redraw = true;
+                    }
+                    Err(error) => {
+                        app.set_status_notice(format!(
+                            "Failed to request session locations: {error}"
+                        ));
+                        needs_redraw = true;
+                    }
+                }
+            }
+
+            if let Some((0, path)) = app.in_flight_working_dir_resolution.clone() {
+                match remote.resolve_working_directory(&path).await {
+                    Ok(id) => {
+                        app.in_flight_working_dir_resolution = Some((id, path.clone()));
+                        if let Some(picker) = app.session_picker_overlay.as_ref() {
+                            picker
+                                .borrow_mut()
+                                .begin_working_directory_resolution(id, path);
+                        }
+                        needs_redraw = true;
+                    }
+                    Err(error) => {
+                        app.in_flight_working_dir_resolution = None;
+                        app.set_status_notice(format!(
+                            "Failed to validate working directory: {error}"
+                        ));
+                        needs_redraw = true;
+                    }
+                }
+            }
+
+            // Completion is optional. A clean-session v1 daemon without this
+            // advertised capability continues to use the existing manual
+            // ResolveWorkingDirectory flow unchanged.
+            if remote.directory_completion_capability() == Some(Some(1)) {
+                let now = Instant::now();
+                let current_input = app.session_picker_overlay.as_ref().and_then(|picker| {
+                    picker
+                        .borrow()
+                        .working_directory_completion_input()
+                        .map(str::to_owned)
+                });
+                if app
+                    .in_flight_working_dir_completion
+                    .as_ref()
+                    .is_some_and(|(_, path, _)| current_input.as_deref() != Some(path.as_str()))
+                {
+                    app.in_flight_working_dir_completion = None;
+                    needs_redraw = true;
+                }
+                if app
+                    .in_flight_working_dir_completion
+                    .as_ref()
+                    .is_some_and(|(_, _, deadline)| *deadline <= now)
+                {
+                    if let Some((_, input, _)) = app.in_flight_working_dir_completion.take()
+                        && let Some(picker) = app.session_picker_overlay.as_ref()
+                    {
+                        picker.borrow_mut().fail_working_directory_completion(
+                            &input,
+                            "Directory suggestions timed out".to_string(),
+                        );
+                    }
+                    needs_redraw = true;
+                }
+                let due_input = if app.in_flight_working_dir_completion.is_none() {
+                    app.session_picker_overlay.as_ref().and_then(|picker| {
+                        picker
+                            .borrow_mut()
+                            .take_due_working_directory_completion(now)
+                    })
+                } else {
+                    None
+                };
+                if let Some(path) = due_input {
+                    match remote.complete_working_directory(&path, 32).await {
+                        Ok(id) => {
+                            if let Some(picker) = app.session_picker_overlay.as_ref()
+                                && picker
+                                    .borrow_mut()
+                                    .begin_working_directory_completion(id, &path)
+                            {
+                                app.in_flight_working_dir_completion =
+                                    Some((id, path, now + std::time::Duration::from_secs(2)));
+                                needs_redraw = true;
+                            }
+                        }
+                        Err(error) => {
+                            if let Some(picker) = app.session_picker_overlay.as_ref() {
+                                picker.borrow_mut().fail_working_directory_completion(
+                                    &path,
+                                    format!("Failed to request directory suggestions: {error}"),
+                                );
+                            }
+                            needs_redraw = true;
+                        }
+                    }
+                }
+            }
+
+            if app.in_flight_clean_session_create.is_none()
+                && let Some(create) = app.pending_clean_session_create.take()
+            {
+                match remote
+                    .create_session(&create.working_dir, create.runtime.clone())
+                    .await
+                {
+                    Ok(id) => {
+                        if let Some(picker) = app.session_picker_overlay.as_ref() {
+                            picker.borrow_mut().begin_clean_session_creation(id);
+                        }
+                        app.in_flight_clean_session_create = Some((id, create));
+                        needs_redraw = true;
+                    }
+                    Err(error) => {
+                        // Retain the exact payload for explicit retry. Never
+                        // re-send automatically after an ambiguous write.
+                        app.pending_clean_session_create = Some(create);
+                        app.set_status_notice(format!("Failed to create session: {error}"));
+                        needs_redraw = true;
+                    }
+                }
+            }
+        }
+
+        if remote.expire_session_preview_capability_probe() {
+            if let Some(picker) = app.session_picker_overlay.as_ref() {
+                picker.borrow_mut().set_active_preview_capability(None);
+            }
+            needs_redraw = true;
+        }
+
+        if let Some(protocol) = remote.session_preview_capability() {
+            if let Some(picker) = app.session_picker_overlay.as_ref() {
+                picker.borrow_mut().set_active_preview_capability(protocol);
+            }
+        } else if remote.needs_session_preview_capability_probe() {
+            if let Some(picker) = app.session_picker_overlay.as_ref() {
+                picker.borrow_mut().reset_active_preview_connection();
+            }
+            if remote.request_session_preview_capability().await.is_err() {
+                // Leave this connection Unknown on a write failure. The picker
+                // never infers emptiness from a failed control request.
+                needs_redraw = true;
+            }
+        }
+
+        let pending_preview = app
+            .session_picker_overlay
+            .as_ref()
+            .and_then(|picker| picker.borrow_mut().take_pending_active_preview());
+        if let Some(session_id) = pending_preview {
+            match remote.request_session_preview(&session_id, 20).await {
+                Ok(request_id) => {
+                    if let Some(picker) = app.session_picker_overlay.as_ref() {
+                        picker
+                            .borrow_mut()
+                            .mark_active_preview_loading(&session_id, request_id);
+                    }
+                    needs_redraw = true;
+                }
+                Err(error) => {
+                    // No request ID exists on a failed write, so restore the
+                    // row to its retryable queued state rather than treating
+                    // it as an authoritative empty preview.
+                    if let Some(picker) = app.session_picker_overlay.as_ref() {
+                        picker.borrow_mut().clear_pending_active_preview(
+                            &session_id,
+                            format!("Preview request failed: {error}"),
+                            Instant::now(),
+                        );
+                    }
+                    needs_redraw = true;
+                }
+            }
+        }
+    }
+
     if !app.is_processing {
         if let Some(session_id) = app.workspace_client.take_pending_close_session() {
             match remote.close_session(&session_id).await {
@@ -195,6 +435,27 @@ pub(super) async fn handle_tick(app: &mut App, remote: &mut RemoteConnection) ->
                     return true;
                 }
                 Err(err) => {
+                    if app
+                        .pending_session_start_prompt
+                        .as_ref()
+                        .is_some_and(|prompt| {
+                            matches!(prompt.origin, PendingSessionStartOrigin::CleanCreate)
+                                && prompt.target_session_id.as_deref()
+                                    == Some(target_session.as_str())
+                        })
+                    {
+                        let prompt = app
+                            .pending_session_start_prompt
+                            .take()
+                            .expect("pending clean start was checked above");
+                        app.input = prompt.content;
+                        app.cursor_pos = app.input.len();
+                        app.pending_images = prompt.images;
+                        app.submit_input_on_startup = false;
+                        app.set_status_notice(
+                            "Created session remains open. First prompt was not sent.",
+                        );
+                    }
                     app.push_display_message(DisplayMessage::error(format!(
                         "Failed to switch workspace session: {}",
                         err
@@ -1396,13 +1657,19 @@ pub(super) async fn process_remote_followups(app: &mut App, remote: &mut RemoteC
                 app.pending_images.len(),
             ));
             let prepared = input::take_prepared_input(app);
+            let retry = input::PreparedInput {
+                raw_input: prepared.raw_input.clone(),
+                expanded: prepared.expanded.clone(),
+                images: prepared.images.clone(),
+            };
             if let Err(error) = submit_prepared_remote_input(app, remote, prepared).await {
                 crate::logging::warn(&format!("Startup auto-submit failed: {error}"));
+                input_dispatch::restore_prepared_remote_input(app, retry);
                 app.push_display_message(DisplayMessage::error(format!(
                     "Failed to submit startup prompt: {}",
                     error
                 )));
-                app.set_status_notice("Startup prompt failed");
+                app.set_status_notice("First prompt was not sent. It was restored for retry.");
             }
             return;
         } else {
@@ -1430,7 +1697,7 @@ pub(super) async fn process_remote_followups(app: &mut App, remote: &mut RemoteC
             finish_remote_split_launch(app);
             let had_startup = app.pending_split_startup_message.take().is_some();
             app.pending_split_parent_session_id = None;
-            let had_prompt = app.pending_split_prompt.take().is_some();
+            let had_prompt = app.pending_session_start_prompt.take().is_some();
             let label = app.pending_split_label.take();
             app.pending_split_model_override = None;
             app.pending_split_provider_key_override = None;

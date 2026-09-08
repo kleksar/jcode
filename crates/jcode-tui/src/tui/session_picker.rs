@@ -16,7 +16,7 @@ use ratatui::{
     text::{Line, Span},
     widgets::{Block, BorderType, Borders, Clear, List, ListItem, ListState, Paragraph},
 };
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::io::IsTerminal;
 use std::time::{Duration, Instant};
 
@@ -25,6 +25,7 @@ pub use jcode_tui_session_picker::{
     SessionSource,
 };
 
+mod composer;
 mod filter;
 mod loading;
 mod memory;
@@ -43,6 +44,25 @@ const SEARCH_CONTENT_BUDGET_BYTES: usize = 12_000;
 const DEFAULT_SESSION_SCAN_LIMIT: usize = 100;
 const MIN_SESSION_SCAN_LIMIT: usize = 50;
 const MAX_SESSION_SCAN_LIMIT: usize = 10_000;
+const ACTIVE_PREVIEW_RETRY_INITIAL: Duration = Duration::from_secs(1);
+const ACTIVE_PREVIEW_RETRY_MAX: Duration = Duration::from_secs(5);
+const ACTIVE_PREVIEW_TIMEOUT: Duration = Duration::from_secs(5);
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum ActivePreviewState {
+    NotRequested,
+    Loading { request_id: u64, session_id: String },
+    Loaded { revision: u64 },
+    Empty { revision: u64 },
+    Failed { message: String, retry_at: Instant },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ActivePreviewCapability {
+    Unknown,
+    Supported(u32),
+    Unsupported,
+}
 
 #[derive(Clone, Debug)]
 pub enum PickerResult {
@@ -58,7 +78,18 @@ pub enum PickerResult {
     /// The onboarding read-only recent-project architecture review was chosen.
     ReviewRecentProject,
     /// Explicit close request confirmed from the picker for an idle Jcode session.
-    CloseSession { session_id: String },
+    CloseSession {
+        session_id: String,
+    },
+    /// Validate a manually entered server-side directory for a clean session.
+    ResolveWorkingDirectory {
+        path: String,
+    },
+    /// Create a clean session after an explicit, server-authoritative cwd choice.
+    CreateSession {
+        prompt: String,
+        working_dir: String,
+    },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -266,7 +297,13 @@ pub struct SessionPicker {
     /// Lightweight placeholder shown while the picker list is loading.
     loading_message: Option<String>,
     pending_preview_load: Option<PendingSessionPreviewLoad>,
-    preview_load_failures: HashSet<String>,
+    /// Server-authoritative state for live Jcode rows, keyed by stable session ID.
+    active_preview_states: HashMap<String, ActivePreviewState>,
+    active_preview_capability: ActivePreviewCapability,
+    active_preview_queued: HashSet<String>,
+    active_preview_deadlines: HashMap<String, Instant>,
+    active_preview_failure_counts: HashMap<String, u8>,
+    active_preview_activity: HashMap<String, crate::protocol::SessionActivitySnapshot>,
     /// Onboarding banner shown at the top of the picker (first-run "resume or
     /// start new" experience). When set, the picker reserves space at the top
     /// for the formatted onboarding prompt and shows selectable action rows
@@ -304,6 +341,7 @@ pub struct SessionPicker {
     pending_close: Option<(String, Instant)>,
     /// Non-destructive close action feedback rendered in the picker footer.
     close_feedback: Option<String>,
+    new_session_composer: composer::NewSessionComposer,
 }
 
 impl SessionPicker {
@@ -343,7 +381,12 @@ impl SessionPicker {
             cached_search_refs: Vec::new(),
             loading_message: None,
             pending_preview_load: None,
-            preview_load_failures: HashSet::new(),
+            active_preview_states: HashMap::new(),
+            active_preview_capability: ActivePreviewCapability::Unknown,
+            active_preview_queued: HashSet::new(),
+            active_preview_deadlines: HashMap::new(),
+            active_preview_failure_counts: HashMap::new(),
+            active_preview_activity: HashMap::new(),
             onboarding_banner: None,
             onboarding_action: None,
             preview_cache: None,
@@ -355,6 +398,7 @@ impl SessionPicker {
             pending_claude_takeover: None,
             pending_close: None,
             close_feedback: None,
+            new_session_composer: composer::NewSessionComposer::default(),
         };
         picker.refresh_live_presence();
         picker.rebuild_items();
@@ -391,7 +435,12 @@ impl SessionPicker {
             cached_search_refs: Vec::new(),
             loading_message: Some("Loading sessions…".to_string()),
             pending_preview_load: None,
-            preview_load_failures: HashSet::new(),
+            active_preview_states: HashMap::new(),
+            active_preview_capability: ActivePreviewCapability::Unknown,
+            active_preview_queued: HashSet::new(),
+            active_preview_deadlines: HashMap::new(),
+            active_preview_failure_counts: HashMap::new(),
+            active_preview_activity: HashMap::new(),
             onboarding_banner: None,
             onboarding_action: None,
             preview_cache: None,
@@ -403,6 +452,7 @@ impl SessionPicker {
             pending_claude_takeover: None,
             pending_close: None,
             close_feedback: None,
+            new_session_composer: composer::NewSessionComposer::default(),
         }
     }
 
@@ -471,7 +521,12 @@ impl SessionPicker {
             cached_search_refs: Vec::new(),
             loading_message: None,
             pending_preview_load: None,
-            preview_load_failures: HashSet::new(),
+            active_preview_states: HashMap::new(),
+            active_preview_capability: ActivePreviewCapability::Unknown,
+            active_preview_queued: HashSet::new(),
+            active_preview_deadlines: HashMap::new(),
+            active_preview_failure_counts: HashMap::new(),
+            active_preview_activity: HashMap::new(),
             onboarding_banner: None,
             onboarding_action: None,
             preview_cache: None,
@@ -483,6 +538,7 @@ impl SessionPicker {
             pending_claude_takeover: None,
             pending_close: None,
             close_feedback: None,
+            new_session_composer: composer::NewSessionComposer::default(),
         };
         picker.refresh_live_presence();
         picker.rebuild_items();
@@ -498,6 +554,128 @@ impl SessionPicker {
     /// share it can be visually highlighted in the list.
     pub fn set_current_dir(&mut self, dir: Option<String>) {
         self.current_dir = dir.map(|d| normalize_dir(&d));
+        self.new_session_composer
+            .set_source_dir(self.current_dir.clone());
+    }
+
+    /// Enables the clean-session composer only for the explicitly opened Active
+    /// Sessions manager. Ordinary `/sessions` and `/resume` retain their legacy
+    /// shortcut behavior.
+    pub(crate) fn set_new_session_composer_enabled(&mut self, enabled: bool) {
+        self.new_session_composer.set_enabled(enabled);
+    }
+
+    pub(crate) fn set_new_session_composer_unavailable(&mut self, message: String) {
+        self.new_session_composer.unavailable(message);
+    }
+
+    /// Bracketed paste belongs to the active clean-session draft, not to the
+    /// generic picker search or the underlying chat input.
+    pub(crate) fn append_clean_session_prompt_paste(&mut self, text: &str) -> bool {
+        self.new_session_composer.append_prompt_paste(text)
+    }
+
+    pub(crate) fn take_due_working_directory_completion(
+        &mut self,
+        now: std::time::Instant,
+    ) -> Option<String> {
+        self.new_session_composer.take_due_completion(now)
+    }
+
+    pub(crate) fn working_directory_completion_input(&self) -> Option<&str> {
+        self.new_session_composer.completion_input()
+    }
+
+    pub(crate) fn begin_working_directory_completion(&mut self, id: u64, input: &str) -> bool {
+        self.new_session_composer.begin_completion(id, input)
+    }
+
+    pub(crate) fn apply_working_directory_completions(
+        &mut self,
+        input: &str,
+        candidates: Vec<String>,
+        truncated: bool,
+    ) -> bool {
+        self.new_session_composer
+            .apply_completions(input, candidates, truncated)
+    }
+
+    pub(crate) fn fail_working_directory_completion(
+        &mut self,
+        input: &str,
+        message: String,
+    ) -> bool {
+        self.new_session_composer.fail_completion(input, message)
+    }
+
+    pub(crate) fn set_session_creation_context(
+        &mut self,
+        home_dir: String,
+        recent_working_dirs: Vec<String>,
+    ) {
+        self.new_session_composer
+            .set_context(home_dir, recent_working_dirs);
+    }
+
+    pub(crate) fn begin_working_directory_resolution(&mut self, request_id: u64, input: String) {
+        self.new_session_composer
+            .begin_resolution(request_id, input);
+    }
+
+    pub(crate) fn begin_clean_session_creation(&mut self, request_id: u64) {
+        self.new_session_composer.begin_creation(request_id);
+    }
+
+    pub(crate) fn apply_resolved_working_directory(
+        &mut self,
+        request_id: u64,
+        input: &str,
+        absolute_path: String,
+    ) -> Option<(String, String)> {
+        self.new_session_composer
+            .apply_resolved(request_id, input, absolute_path)
+            .map(|action| match action {
+                composer::ComposerAction::Create {
+                    prompt,
+                    working_dir,
+                } => (prompt, working_dir),
+                composer::ComposerAction::Resolve { .. } => {
+                    unreachable!("resolution cannot issue another resolution")
+                }
+            })
+    }
+
+    pub(crate) fn fail_creation_action(&mut self, request_id: u64, message: String) -> bool {
+        self.new_session_composer.fail(request_id, message)
+    }
+
+    pub(crate) fn complete_clean_session_creation(&mut self, request_id: u64) -> bool {
+        self.new_session_composer.complete_creation(request_id)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn clean_composer_enabled_for_test(&self) -> bool {
+        self.new_session_composer.enabled()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn clean_composer_active_for_test(&self) -> bool {
+        self.new_session_composer.is_active()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn clean_composer_feedback_for_test(&self) -> Option<&str> {
+        self.new_session_composer.feedback()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn clean_composer_resolved_path_for_test(&self) -> Option<&str> {
+        self.new_session_composer.resolved_path()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn clean_composer_manual_path_for_test(&self) -> Option<&str> {
+        self.new_session_composer.manual_path()
     }
 
     /// Whether the given session's working directory matches the directory the
@@ -530,6 +708,7 @@ impl SessionPicker {
 
     /// Snapshot the active-pid registry + streaming markers into the picker.
     pub(super) fn refresh_live_presence(&mut self) {
+        let previous_presence = self.live_presence.clone();
         if !self.synthetic_live_session_ids.is_empty() {
             self.all_sessions
                 .retain(|session| !self.synthetic_live_session_ids.contains(&session.id));
@@ -564,13 +743,59 @@ impl SessionPicker {
         #[cfg(not(test))]
         self.add_missing_live_session_rows();
         self.live_presence_refreshed_at = Some(std::time::Instant::now());
+        self.prune_active_preview_state();
+        // A completed turn changes the authoritative tail, but streaming token
+        // updates do not. Re-request exactly once at this meaningful boundary
+        // for the row currently being viewed.
+        if let Some(session_id) = self.selected_session().map(|session| session.id.clone())
+            && previous_presence
+                .get(&session_id)
+                .is_some_and(|presence| presence.streaming)
+            && self
+                .live_presence
+                .get(&session_id)
+                .is_some_and(|presence| !presence.streaming)
+        {
+            self.active_preview_states
+                .insert(session_id.clone(), ActivePreviewState::NotRequested);
+            self.active_preview_queued.remove(&session_id);
+            self.active_preview_deadlines.remove(&session_id);
+        }
+    }
+
+    fn prune_active_preview_state(&mut self) {
+        let session_ids: HashSet<String> = self
+            .all_sessions
+            .iter()
+            .chain(self.all_orphan_sessions.iter())
+            .chain(
+                self.all_server_groups
+                    .iter()
+                    .flat_map(|group| group.sessions.iter()),
+            )
+            .map(|session| session.id.clone())
+            .collect();
+        self.active_preview_states
+            .retain(|session_id, _| session_ids.contains(session_id));
+        self.active_preview_queued
+            .retain(|session_id| session_ids.contains(session_id));
+        self.active_preview_deadlines
+            .retain(|session_id, _| session_ids.contains(session_id));
+        self.active_preview_failure_counts
+            .retain(|session_id, _| session_ids.contains(session_id));
+        self.active_preview_activity
+            .retain(|session_id, _| session_ids.contains(session_id));
     }
 
     fn add_missing_live_session_rows(&mut self) {
         let existing_ids: HashSet<String> = self
             .all_sessions
             .iter()
-            .chain(self.all_server_groups.iter().flat_map(|group| group.sessions.iter()))
+            .chain(
+                self.all_server_groups
+                    .iter()
+                    .flat_map(|group| group.sessions.iter()),
+            )
             .chain(self.all_orphan_sessions.iter())
             .map(|session| session.id.clone())
             .collect();
@@ -949,7 +1174,8 @@ impl SessionPicker {
         }
 
         self.pending_close = Some((session.id, now));
-        self.close_feedback = Some("Press Ctrl+X again within 2s to close this session".to_string());
+        self.close_feedback =
+            Some("Press Ctrl+X again within 2s to close this session".to_string());
         OverlayAction::Continue
     }
 
@@ -1149,6 +1375,255 @@ impl SessionPicker {
         }
     }
 
+    fn is_live_jcode_session(&self, session: &SessionInfo) -> bool {
+        session.source == SessionSource::Jcode && self.session_is_live(session)
+    }
+
+    fn active_preview_state(&self, session_id: &str) -> ActivePreviewState {
+        self.active_preview_states
+            .get(session_id)
+            .cloned()
+            .unwrap_or(ActivePreviewState::NotRequested)
+    }
+
+    fn retry_delay(failures: u8) -> Duration {
+        let multiplier = 1_u32 << u32::from(failures.saturating_sub(1).min(2));
+        ACTIVE_PREVIEW_RETRY_INITIAL
+            .checked_mul(multiplier)
+            .unwrap_or(ACTIVE_PREVIEW_RETRY_MAX)
+            .min(ACTIVE_PREVIEW_RETRY_MAX)
+    }
+
+    fn fail_active_preview_for_session(
+        &mut self,
+        session_id: String,
+        message: String,
+        now: Instant,
+    ) {
+        let failures = self
+            .active_preview_failure_counts
+            .entry(session_id.clone())
+            .and_modify(|count| *count = count.saturating_add(1))
+            .or_insert(1);
+        let retry_at = now + Self::retry_delay(*failures);
+        self.active_preview_states.insert(
+            session_id.clone(),
+            ActivePreviewState::Failed { message, retry_at },
+        );
+        self.active_preview_queued.remove(&session_id);
+        self.active_preview_deadlines.remove(&session_id);
+    }
+
+    fn expire_active_preview_requests(&mut self, now: Instant) {
+        let expired: Vec<String> = self
+            .active_preview_deadlines
+            .iter()
+            .filter_map(|(session_id, deadline)| (*deadline <= now).then_some(session_id.clone()))
+            .collect();
+        for session_id in expired {
+            if matches!(
+                self.active_preview_state(&session_id),
+                ActivePreviewState::Loading { .. }
+            ) {
+                self.fail_active_preview_for_session(
+                    session_id,
+                    "Preview request timed out".to_string(),
+                    now,
+                );
+            }
+        }
+    }
+
+    /// Update the daemon capability advertised by Pong. A later stream-keepalive
+    /// Pong that omits the capability must not erase observed support.
+    pub(crate) fn set_active_preview_capability(&mut self, protocol: Option<u32>) {
+        match protocol {
+            Some(1) => self.active_preview_capability = ActivePreviewCapability::Supported(1),
+            Some(_) => self.active_preview_capability = ActivePreviewCapability::Unsupported,
+            None if self.active_preview_capability != ActivePreviewCapability::Supported(1) => {
+                self.active_preview_capability = ActivePreviewCapability::Unsupported;
+            }
+            None => {}
+        }
+    }
+
+    /// A new socket has a new daemon identity. Discard any prior connection's
+    /// capability conclusion and in-flight request state before probing again.
+    pub(crate) fn reset_active_preview_connection(&mut self) {
+        self.active_preview_capability = ActivePreviewCapability::Unknown;
+        self.active_preview_queued.clear();
+        self.active_preview_deadlines.clear();
+        self.active_preview_states.clear();
+    }
+
+    pub(crate) fn active_preview_capability(&self) -> ActivePreviewCapability {
+        self.active_preview_capability
+    }
+
+    /// Take the one queued server-authoritative request for the selected live
+    /// Jcode row. App owns transport and must call `mark_active_preview_loading`
+    /// only after its request has been written.
+    pub(crate) fn take_pending_active_preview(&mut self) -> Option<String> {
+        self.take_pending_active_preview_at(Instant::now())
+    }
+
+    pub(crate) fn take_pending_active_preview_at(&mut self, now: Instant) -> Option<String> {
+        self.expire_active_preview_requests(now);
+        if self.active_preview_capability != ActivePreviewCapability::Supported(1) {
+            return None;
+        }
+        let session = self.selected_session()?;
+        if !self.is_live_jcode_session(session) {
+            return None;
+        }
+        let session_id = session.id.clone();
+        let requestable = match self.active_preview_state(&session_id) {
+            ActivePreviewState::NotRequested => true,
+            ActivePreviewState::Failed { retry_at, .. } => retry_at <= now,
+            _ => false,
+        };
+        if requestable && self.active_preview_queued.insert(session_id.clone()) {
+            Some(session_id)
+        } else {
+            None
+        }
+    }
+
+    pub(crate) fn mark_active_preview_loading(&mut self, session_id: &str, request_id: u64) {
+        self.mark_active_preview_loading_at(session_id, request_id, Instant::now());
+    }
+
+    pub(crate) fn mark_active_preview_loading_at(
+        &mut self,
+        session_id: &str,
+        request_id: u64,
+        now: Instant,
+    ) {
+        if self.session_ref_for_id(session_id).is_none() {
+            return;
+        }
+        self.active_preview_states.insert(
+            session_id.to_string(),
+            ActivePreviewState::Loading {
+                request_id,
+                session_id: session_id.to_string(),
+            },
+        );
+        self.active_preview_queued.remove(session_id);
+        self.active_preview_deadlines
+            .insert(session_id.to_string(), now + ACTIVE_PREVIEW_TIMEOUT);
+    }
+
+    /// An outbound write failed before the daemon assigned a request identity.
+    /// Clear the local queue marker and retain an explicit retryable failure.
+    pub(crate) fn clear_pending_active_preview(
+        &mut self,
+        session_id: &str,
+        message: String,
+        now: Instant,
+    ) {
+        if self.session_ref_for_id(session_id).is_some() {
+            self.fail_active_preview_for_session(session_id.to_string(), message, now);
+        }
+    }
+
+    pub(crate) fn apply_active_preview(
+        &mut self,
+        request_id: u64,
+        session_id: &str,
+        revision: u64,
+        messages: Vec<crate::protocol::HistoryMessage>,
+        activity: crate::protocol::SessionActivitySnapshot,
+    ) -> bool {
+        if self.session_ref_for_id(session_id).is_none()
+            || !matches!(
+                self.active_preview_states.get(session_id),
+                Some(ActivePreviewState::Loading { request_id: expected, session_id: expected_id })
+                    if *expected == request_id && expected_id == session_id
+            )
+        {
+            return false;
+        }
+
+        let preview = messages
+            .into_iter()
+            .map(|message| PreviewMessage {
+                role: message.role,
+                content: message.content,
+                tool_calls: message.tool_calls.unwrap_or_default(),
+                tool_data: message.tool_data,
+                timestamp: None,
+            })
+            .collect::<Vec<_>>();
+        // A zero-limit response can legitimately carry no messages for a
+        // nonempty session. Its empty vector is not evidence of an empty session.
+        let is_authoritatively_empty = preview.is_empty()
+            && self
+                .session_ref_for_id(session_id)
+                .and_then(|session_ref| self.session_by_ref(session_ref))
+                .is_some_and(|session| session.message_count == 0);
+        self.apply_session_preview(session_id, preview);
+        self.active_preview_states.insert(
+            session_id.to_string(),
+            if is_authoritatively_empty {
+                ActivePreviewState::Empty { revision }
+            } else {
+                ActivePreviewState::Loaded { revision }
+            },
+        );
+        self.active_preview_activity
+            .insert(session_id.to_string(), activity);
+        self.active_preview_failure_counts.remove(session_id);
+        self.active_preview_queued.remove(session_id);
+        self.active_preview_deadlines.remove(session_id);
+        true
+    }
+
+    pub(crate) fn fail_active_preview(
+        &mut self,
+        request_id: u64,
+        message: String,
+        now: Instant,
+    ) -> bool {
+        let session_id = self.active_preview_states.iter().find_map(|(session_id, state)| {
+            matches!(state, ActivePreviewState::Loading { request_id: expected, .. } if *expected == request_id)
+                .then_some(session_id.clone())
+        });
+        let Some(session_id) = session_id else {
+            return false;
+        };
+        self.fail_active_preview_for_session(session_id, message, now);
+        true
+    }
+
+    fn active_preview_placeholder(&self, session: &SessionInfo) -> Option<String> {
+        if !self.is_live_jcode_session(session) {
+            return None;
+        }
+        match self.active_preview_capability {
+            ActivePreviewCapability::Unknown => Some("Checking live-preview support…".to_string()),
+            ActivePreviewCapability::Unsupported => {
+                Some("Server update required for live preview".to_string())
+            }
+            ActivePreviewCapability::Supported(_) => match self.active_preview_state(&session.id) {
+                ActivePreviewState::NotRequested | ActivePreviewState::Loading { .. } => {
+                    Some("Loading preview…".to_string())
+                }
+                ActivePreviewState::Empty { .. } => Some("(empty session)".to_string()),
+                ActivePreviewState::Loaded { .. } if session.messages_preview.is_empty() => {
+                    Some("No preview messages requested".to_string())
+                }
+                ActivePreviewState::Loaded { .. } => None,
+                ActivePreviewState::Failed { retry_at, .. } if retry_at > Instant::now() => {
+                    Some("Preview unavailable · retrying…".to_string())
+                }
+                ActivePreviewState::Failed { .. } => {
+                    Some("Preview unavailable · select/refresh to retry".to_string())
+                }
+            },
+        }
+    }
+
     fn poll_preview_load(&mut self) -> bool {
         let recv_result = {
             let Some(pending) = self.pending_preview_load.as_ref() else {
@@ -1165,20 +1640,28 @@ impl SessionPicker {
                     .map(|pending| pending.session_id.clone())
                     .unwrap_or_default();
                 self.pending_preview_load = None;
-                self.preview_load_failures.remove(&session_id);
+                self.active_preview_states.remove(&session_id);
                 self.apply_session_preview(&session_id, preview);
                 true
             }
             Ok(None) => {
                 if let Some(pending) = self.pending_preview_load.take() {
-                    self.preview_load_failures.insert(pending.session_id);
+                    self.fail_active_preview_for_session(
+                        pending.session_id,
+                        "Preview unavailable".to_string(),
+                        Instant::now(),
+                    );
                 }
                 true
             }
             Err(std::sync::mpsc::TryRecvError::Empty) => false,
             Err(std::sync::mpsc::TryRecvError::Disconnected) => {
                 if let Some(pending) = self.pending_preview_load.take() {
-                    self.preview_load_failures.insert(pending.session_id);
+                    self.fail_active_preview_for_session(
+                        pending.session_id,
+                        "Preview unavailable".to_string(),
+                        Instant::now(),
+                    );
                 }
                 true
             }
@@ -1189,10 +1672,13 @@ impl SessionPicker {
         let Some(session_ref) = self.selected_session_ref() else {
             return;
         };
-        let needs_preview = self
-            .session_by_ref(session_ref)
-            .map(|s| s.messages_preview.is_empty())
-            .unwrap_or(false);
+        let needs_preview = self.session_by_ref(session_ref).is_some_and(|s| {
+            s.messages_preview.is_empty()
+                && !matches!(
+                    self.active_preview_state(&s.id),
+                    ActivePreviewState::Empty { .. }
+                )
+        });
         if !needs_preview {
             return;
         }
@@ -1209,11 +1695,20 @@ impl SessionPicker {
             return;
         };
 
-        if self.preview_load_failures.contains(&cache_session_id)
-            || self
-                .pending_preview_load
-                .as_ref()
-                .is_some_and(|pending| pending.session_id == cache_session_id)
+        if self
+            .session_by_ref(session_ref)
+            .is_some_and(|session| self.is_live_jcode_session(session))
+        {
+            return;
+        }
+
+        if matches!(
+            self.active_preview_state(&cache_session_id),
+            ActivePreviewState::Failed { retry_at, .. } if retry_at > Instant::now()
+        ) || self
+            .pending_preview_load
+            .as_ref()
+            .is_some_and(|pending| pending.session_id == cache_session_id)
         {
             return;
         }
@@ -1385,8 +1880,47 @@ impl SessionPicker {
             return Ok(self.handle_close_key());
         }
 
+        // Ctrl+F always means search, including while the Active Sessions clean
+        // composer is editing a prompt or a path.
+        if code == KeyCode::Char('f') && modifiers.contains(KeyModifiers::CONTROL) {
+            self.search_active = true;
+            return Ok(OverlayAction::Continue);
+        }
+
         if self.search_active {
             return self.handle_search_key(code, modifiers);
+        }
+
+        // The composer is deliberately opt-in and is enabled only by the Active
+        // Sessions opener. Once it owns a nonempty draft, its Esc/Enter/path
+        // transitions must win over generic picker actions. With no draft, only
+        // unmodified printable input starts composition, leaving navigation and
+        // empty Enter/Esc exactly as they were.
+        let composer_can_handle = (self.new_session_composer.is_active()
+            && !(code == KeyCode::Enter
+                && self
+                    .new_session_composer
+                    .prompt()
+                    .is_some_and(str::is_empty)))
+            || (self.new_session_composer.enabled()
+                && matches!(code, KeyCode::Char(_))
+                && !modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT));
+        if composer_can_handle {
+            if let Some(action) = self.new_session_composer.handle_key(code, modifiers) {
+                return Ok(match action {
+                    composer::ComposerAction::Resolve { path } => {
+                        OverlayAction::Selected(PickerResult::ResolveWorkingDirectory { path })
+                    }
+                    composer::ComposerAction::Create {
+                        prompt,
+                        working_dir,
+                    } => OverlayAction::Selected(PickerResult::CreateSession {
+                        prompt,
+                        working_dir,
+                    }),
+                });
+            }
+            return Ok(OverlayAction::Continue);
         }
 
         // The first-run choice is deliberately simpler than the full session
@@ -1518,6 +2052,7 @@ impl SessionPicker {
         }
 
         let _ = self.poll_preview_load();
+        self.expire_active_preview_requests(Instant::now());
         self.ensure_selected_preview_loading();
 
         let Some(session) = self.selected_session().cloned() else {
@@ -2081,11 +2616,23 @@ impl SessionPicker {
                     .pending_preview_load
                     .as_ref()
                     .is_some_and(|pending| pending.session_id == session.id);
-            let text = if preview_loading {
-                "Loading preview…"
-            } else {
-                "(empty session)"
-            };
+            let text = self.active_preview_placeholder(session).unwrap_or_else(|| {
+                if preview_loading {
+                    "Loading preview…".to_string()
+                } else if matches!(
+                    self.active_preview_state(&session.id),
+                    ActivePreviewState::Failed { retry_at, .. } if retry_at > Instant::now()
+                ) {
+                    "Preview unavailable · retrying…".to_string()
+                } else if matches!(
+                    self.active_preview_state(&session.id),
+                    ActivePreviewState::Failed { .. }
+                ) {
+                    "Preview unavailable · select/refresh to retry".to_string()
+                } else {
+                    "(empty session)".to_string()
+                }
+            });
             lines.push(
                 Line::from(vec![Span::styled(text, Style::default().fg(dim_color))])
                     .alignment(align),
@@ -2379,12 +2926,33 @@ impl SessionPicker {
         let has_banner = self.crashed_sessions.is_some();
         let has_search = self.search_active || !self.search_query.is_empty();
         let has_onboarding = self.onboarding_banner.is_some();
+        // Reserve real vertical space for the composer footer rather than
+        // painting it over the session-list shortcut row. The directory chooser
+        // remains a modal and deliberately reserves no footer space.
+        let composer_footer_height = if self.new_session_composer.is_active()
+            && !self.new_session_composer.choosing_directory()
+            && self.new_session_composer.manual_path().is_none()
+        {
+            if frame.area().height >= 3 { 3 } else { 1 }
+        } else {
+            0
+        };
         // The first-run picker is action-only. Do not render the session list or
         // preview panes underneath it, which would make this look like `/resume`.
         if has_onboarding && self.visible_sessions.is_empty() {
             self.last_list_area = None;
             self.last_preview_area = None;
             self.render_onboarding_band(frame, frame.area());
+            return;
+        }
+
+        // The normal picker needs eight rows for its two bordered panes. On a
+        // smaller terminal, prioritize the active composer instead of allowing
+        // layout minimums to starve its reserved footer to zero height.
+        if composer_footer_height > 0 && frame.area().height < composer_footer_height + 8 {
+            self.last_list_area = None;
+            self.last_preview_area = None;
+            self.render_new_session_composer(frame, Some(frame.area()));
             return;
         }
 
@@ -2404,6 +2972,9 @@ impl SessionPicker {
             v_constraints.push(Constraint::Length(1));
         }
         v_constraints.push(Constraint::Min(8));
+        if composer_footer_height > 0 {
+            v_constraints.push(Constraint::Length(composer_footer_height));
+        }
 
         let v_chunks = Layout::default()
             .direction(Direction::Vertical)
@@ -2451,6 +3022,12 @@ impl SessionPicker {
         }
 
         let main_area = v_chunks[chunk_idx];
+        chunk_idx += 1;
+        let composer_footer = if composer_footer_height > 0 {
+            Some(v_chunks[chunk_idx])
+        } else {
+            None
+        };
 
         // Split main area horizontally for list and preview
         let chunks = Layout::default()
@@ -2464,6 +3041,7 @@ impl SessionPicker {
         self.render_session_list(frame, chunks[0]);
         self.render_preview(frame, chunks[1]);
         self.render_claude_takeover_confirmation(frame);
+        self.render_new_session_composer(frame, composer_footer);
     }
 
     fn render_claude_takeover_confirmation(&self, frame: &mut Frame) {

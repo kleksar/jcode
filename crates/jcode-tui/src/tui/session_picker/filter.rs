@@ -118,8 +118,7 @@ impl SessionPicker {
             .filter_map(|session_ref| self.session_by_ref(*session_ref))
             .filter(|session| {
                 session.is_debug
-                    && !(filter_mode == SessionFilterMode::Active
-                        && session.parent_id.is_none())
+                    && !(filter_mode == SessionFilterMode::Active && session.parent_id.is_none())
                     && self.session_matches_filter_mode(session, filter_mode)
             })
             .count()

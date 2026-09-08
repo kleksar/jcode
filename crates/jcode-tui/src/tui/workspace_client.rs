@@ -127,11 +127,7 @@ impl WorkspaceClientState {
         None
     }
 
-    pub(crate) fn finish_close_request_for_session(
-        &mut self,
-        id: u64,
-        session_id: &str,
-    ) -> bool {
+    pub(crate) fn finish_close_request_for_session(&mut self, id: u64, session_id: &str) -> bool {
         if self
             .in_flight_close_request
             .as_ref()
@@ -162,6 +158,20 @@ impl WorkspaceClientState {
             WorkspaceSessionTile::new(new_session_id.to_string()),
         );
         let _ = self.map.focus_session_by_id(new_session_id);
+        self.pending_resume_session = Some(new_session_id.to_string());
+        true
+    }
+
+    /// Place a server-created clean session beside the tile the user was
+    /// working from. This deliberately does not consume a split target: clean
+    /// creation is independent of fork/split placement and history semantics.
+    pub(crate) fn handle_clean_session_created(&mut self, new_session_id: &str) -> bool {
+        if !self.enabled {
+            return false;
+        }
+        let _ = self
+            .map
+            .add_session_to_current_workspace(WorkspaceSessionTile::new(new_session_id));
         self.pending_resume_session = Some(new_session_id.to_string());
         true
     }
@@ -295,9 +305,45 @@ mod tests {
         state.queue_resume_session("resume_target".to_string());
         state.queue_close_session("close_target".to_string());
 
-        assert_eq!(state.take_pending_close_session().as_deref(), Some("close_target"));
+        assert_eq!(
+            state.take_pending_close_session().as_deref(),
+            Some("close_target")
+        );
         assert!(state.take_pending_close_session().is_none());
-        assert_eq!(state.take_pending_resume_session().as_deref(), Some("resume_target"));
+        assert_eq!(
+            state.take_pending_resume_session().as_deref(),
+            Some("resume_target")
+        );
+    }
+
+    #[test]
+    fn clean_session_workspace_inserts_immediately_right_of_focus_and_queues_resume() {
+        let mut state = WorkspaceClientState::default();
+        state.enable(
+            Some("focused"),
+            &[
+                "left".to_string(),
+                "focused".to_string(),
+                "right".to_string(),
+            ],
+        );
+
+        assert!(state.handle_clean_session_created("created"));
+        let rows = state.visible_rows(1, None, false);
+        assert_eq!(
+            rows[0]
+                .sessions
+                .iter()
+                .map(|tile| tile.session_id.as_str())
+                .collect::<Vec<_>>(),
+            ["left", "focused", "created", "right"],
+        );
+        assert_eq!(state.map.current_focused_session_id(), Some("created"));
+        assert_eq!(
+            state.take_pending_resume_session().as_deref(),
+            Some("created")
+        );
+        assert!(state.pending_split_target.is_none());
     }
 
     #[test]

@@ -1,3 +1,4 @@
+use super::active_picker_action_unsupported;
 #[cfg(unix)]
 use super::{
     resumed_window_title, should_show_server_spawning, spawn_resume_in_new_terminal,
@@ -233,4 +234,15 @@ async fn keeps_server_spawning_phase_while_listener_is_not_live() {
         !should_show_server_spawning(false).await,
         "server startup banner should stay hidden when client did not request it"
     );
+}
+
+#[test]
+fn standalone_picker_rejects_active_only_clean_session_actions() {
+    for action in ["Working-directory resolution", "Clean-session creation"] {
+        let error = active_picker_action_unsupported(action).expect_err("must be rejected");
+        let message = error.to_string();
+        assert!(message.contains(action));
+        assert!(message.contains("active sessions manager"));
+        assert!(message.contains("cannot create or resolve a clean session"));
+    }
 }

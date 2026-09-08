@@ -69,6 +69,7 @@ async fn restore_for_concurrency_test(
         None,
         false,
         false,
+        true,
         &mut client_selfdev,
         &mut client_session_id,
         "concurrency-test-connection",

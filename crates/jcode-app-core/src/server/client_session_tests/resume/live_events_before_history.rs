@@ -126,6 +126,7 @@ async fn handle_resume_session_registers_live_events_before_history_replay() -> 
                 None,
                 false,
                 false,
+                true,
                 &mut client_selfdev,
                 &mut client_session_id,
                 "conn_restore",

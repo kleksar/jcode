@@ -477,6 +477,12 @@ pub use crate::session_launch::{
     spawn_selfdev_in_new_terminal, spawn_selfdev_in_new_terminal_with_provider,
 };
 
+fn active_picker_action_unsupported(action: &str) -> Result<()> {
+    anyhow::bail!(
+        "{action} is only available from the active sessions manager; standalone session picking cannot create or resolve a clean session"
+    )
+}
+
 pub fn list_sessions() -> Result<()> {
     fn build_resume_target_command(
         exe: &std::path::Path,
@@ -779,6 +785,12 @@ pub fn list_sessions() -> Result<()> {
             }
 
             Ok(())
+        }
+        Some(tui::session_picker::PickerResult::ResolveWorkingDirectory { .. }) => {
+            active_picker_action_unsupported("Working-directory resolution")
+        }
+        Some(tui::session_picker::PickerResult::CreateSession { .. }) => {
+            active_picker_action_unsupported("Clean-session creation")
         }
         None
         | Some(tui::session_picker::PickerResult::CloseSession { .. })

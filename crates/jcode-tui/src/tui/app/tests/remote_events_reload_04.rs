@@ -82,6 +82,71 @@ fn test_remote_debug_frame_commands_request_a_fresh_draw() {
 }
 
 #[test]
+fn pending_session_start_prompt_waits_for_its_created_session_history_once() {
+    let runtime = tokio::runtime::Runtime::new().expect("runtime");
+    let _guard = runtime.enter();
+    let mut app = create_test_app();
+    let mut remote = crate::tui::backend::RemoteConnection::dummy();
+    app.is_remote = true;
+    app.remote_session_id = Some("source".to_string());
+    app.workspace_client.enable(
+        Some("source"),
+        &["left".to_string(), "source".to_string(), "right".to_string()],
+    );
+    app.is_processing = true;
+    app.in_flight_clean_session_create = Some((
+        41,
+        PendingCleanSessionCreate {
+            prompt: "first clean prompt".to_string(),
+            working_dir: "/server/project".to_string(),
+            runtime: crate::protocol::SessionRuntimeSelection::default(),
+        },
+    ));
+
+    app.handle_server_event(
+        crate::protocol::ServerEvent::SessionCreated {
+            id: 41,
+            session_id: "created".to_string(),
+            session_name: "created".to_string(),
+            working_dir: "/server/project".to_string(),
+        },
+        &mut remote,
+    );
+
+    assert!(app.is_processing, "creation does not cancel the source turn");
+    assert!(app.in_flight_clean_session_create.is_none());
+    assert_eq!(
+        app.workspace_client.take_pending_resume_session().as_deref(),
+        Some("created")
+    );
+    assert_eq!(
+        app.pending_session_start_prompt
+            .as_ref()
+            .and_then(|prompt| prompt.target_session_id.as_deref()),
+        Some("created")
+    );
+
+    for session_id in ["unrelated", "created", "created"] {
+        let history = serde_json::from_value(serde_json::json!({
+            "type": "history",
+            "id": 1,
+            "session_id": session_id,
+            "messages": []
+        }))
+        .expect("history fixture");
+        app.handle_server_event(history, &mut remote);
+        if session_id == "unrelated" {
+            assert!(app.pending_session_start_prompt.is_some());
+            assert!(!app.submit_input_on_startup);
+        }
+    }
+
+    assert!(app.pending_session_start_prompt.is_none());
+    assert!(app.submit_input_on_startup);
+    assert_eq!(app.input, "first clean prompt");
+}
+
+#[test]
 fn test_remote_error_without_retry_recovers_pending_followups() {
     let mut app = create_test_app();
     let rt = tokio::runtime::Runtime::new().unwrap();
@@ -2117,7 +2182,7 @@ fn test_remote_super_space_routes_next_prompt_to_new_session() {
             .expect("armed prompt should launch split request immediately");
 
         assert!(!app.route_next_prompt_to_new_session);
-        assert!(app.pending_split_prompt.is_some());
+        assert!(app.pending_session_start_prompt.is_some());
         assert_eq!(app.pending_split_label.as_deref(), Some("Prompt"));
         assert!(!app.pending_split_request);
         assert!(app.is_processing);
@@ -2139,7 +2204,7 @@ fn test_remote_super_space_routes_next_prompt_to_new_session() {
         assert_eq!(restored.input, "hello from split");
         assert!(restored.submit_on_restore);
         assert!(restored.pending_images.is_empty());
-        assert!(app.pending_split_prompt.is_none());
+        assert!(app.pending_session_start_prompt.is_none());
         assert!(app.pending_split_label.is_none());
     });
 }
@@ -2322,7 +2387,7 @@ fn test_remote_fork_with_prompt_stages_split_prompt() {
         rt.block_on(app.handle_remote_key(KeyCode::Enter, KeyModifiers::empty(), &mut remote))
             .expect("/fork <prompt> should launch split request");
 
-        assert!(app.pending_split_prompt.is_some());
+        assert!(app.pending_session_start_prompt.is_some());
         assert_eq!(app.pending_split_label.as_deref(), Some("Prompt"));
         assert!(!app.pending_split_request);
 
@@ -2339,7 +2404,7 @@ fn test_remote_fork_with_prompt_stages_split_prompt() {
             .expect("forked session should stage the prompt");
         assert_eq!(restored.input, "explore plan b");
         assert!(restored.submit_on_restore);
-        assert!(app.pending_split_prompt.is_none());
+        assert!(app.pending_session_start_prompt.is_none());
     });
 }
 
@@ -2359,7 +2424,7 @@ fn test_remote_btw_stages_question_in_forked_session() {
         rt.block_on(app.handle_remote_key(KeyCode::Enter, KeyModifiers::empty(), &mut remote))
             .expect("/btw should launch split request");
 
-        assert!(app.pending_split_prompt.is_some());
+        assert!(app.pending_session_start_prompt.is_some());
 
         app.handle_server_event(
             crate::protocol::ServerEvent::SplitResponse {
@@ -2392,7 +2457,7 @@ fn test_remote_fork_without_prompt_splits_immediately() {
     rt.block_on(app.handle_remote_key(KeyCode::Enter, KeyModifiers::empty(), &mut remote))
         .expect("/fork should send split request");
 
-    assert!(app.pending_split_prompt.is_none());
+    assert!(app.pending_session_start_prompt.is_none());
     assert!(
         app.display_messages()
             .iter()

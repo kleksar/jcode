@@ -6,7 +6,7 @@
 //! Also provides debug socket events for exposing full TUI state.
 
 use crate::message::ToolCall;
-use crate::protocol::{AuthChanged, FeatureToggle, Request, ServerEvent};
+use crate::protocol::{AuthChanged, FeatureToggle, Request, ServerEvent, SessionRuntimeSelection};
 use crate::server;
 use crate::transport::{Stream, WriteHalf};
 use crate::tui::remote_diff::RemoteDiffTracker;
@@ -259,9 +259,16 @@ pub struct RemoteConnection {
     protocol_bytes_scanned: usize,
     has_loaded_history: bool,
     call_output_tokens_seen: u64,
+    session_preview_capability_probe: Option<(u64, Instant)>,
+    session_preview_capability: Option<Option<u32>>,
+    clean_session_capability_probe: Option<(u64, Instant)>,
+    clean_session_capability: Option<Option<u32>>,
+    directory_completion_capability: Option<Option<u32>>,
 }
 
 const DETACHED_REQUEST_TIMEOUT: Duration = Duration::from_secs(2);
+const SESSION_PREVIEW_CAPABILITY_TIMEOUT: Duration = Duration::from_secs(3);
+const CLEAN_SESSION_CAPABILITY_TIMEOUT: Duration = Duration::from_secs(3);
 const MAX_STRAY_REMOTE_PROTOCOL_LINES: usize = 32;
 /// Hard cap for one newline-delimited server event. History events can be large
 /// because they may contain images, but an authenticated or compromised peer
@@ -295,6 +302,25 @@ pub(crate) trait RemoteEventState {
     fn set_session_id(&mut self, id: String);
     fn has_loaded_history(&self) -> bool;
     fn mark_history_loaded(&mut self);
+    /// Returns true only for the Pong that answers this connection's explicit
+    /// live-preview capability probe, never for stream keepalives.
+    fn record_session_preview_capability_pong(&mut self, _id: u64, _protocol: Option<u32>) -> bool {
+        false
+    }
+    /// Returns true only for the Pong that answers this connection's explicit
+    /// clean-session capability probe, never for stream keepalives.
+    fn record_clean_session_capability_pong(&mut self, _id: u64, _protocol: Option<u32>) -> bool {
+        false
+    }
+    /// Returns true only for the Pong that answers this connection's explicit
+    /// directory-completion capability probe, never for stream keepalives.
+    fn record_directory_completion_capability_pong(
+        &mut self,
+        _id: u64,
+        _protocol: Option<u32>,
+    ) -> bool {
+        false
+    }
 }
 
 #[derive(Default)]
@@ -348,6 +374,11 @@ impl RemoteConnection {
             protocol_bytes_scanned: 0,
             has_loaded_history: false,
             call_output_tokens_seen: 0,
+            session_preview_capability_probe: None,
+            session_preview_capability: None,
+            clean_session_capability_probe: None,
+            clean_session_capability: None,
+            directory_completion_capability: None,
         };
 
         // Subscribe to events
@@ -653,6 +684,166 @@ impl RemoteConnection {
         self.next_request_id += 1;
         self.send_request(Request::GetHistory { id }).await?;
         Ok(id)
+    }
+
+    /// Request a bounded server-authoritative transcript tail for a live session.
+    pub async fn request_session_preview(&mut self, session_id: &str, limit: usize) -> Result<u64> {
+        let id = self.next_request_id;
+        let request = Request::GetSessionPreview {
+            id,
+            session_id: session_id.to_string(),
+            limit: limit.min(u16::MAX as usize) as u16,
+        };
+        self.next_request_id += 1;
+        self.send_request(request).await?;
+        Ok(id)
+    }
+
+    /// Request server-authoritative directory choices for clean session creation.
+    pub async fn request_session_creation_context(&mut self) -> Result<u64> {
+        let id = self.next_request_id;
+        self.next_request_id += 1;
+        self.send_request(Request::GetSessionCreationContext { id })
+            .await?;
+        Ok(id)
+    }
+
+    /// Ask the server to validate and canonicalize an explicit working directory.
+    pub async fn resolve_working_directory(&mut self, path: &str) -> Result<u64> {
+        let id = self.next_request_id;
+        let request = Request::ResolveWorkingDirectory {
+            id,
+            path: path.to_string(),
+        };
+        self.next_request_id += 1;
+        self.send_request(request).await?;
+        Ok(id)
+    }
+
+    /// Request bounded server-authoritative directory suggestions. This never
+    /// reads or canonicalizes paths on the client.
+    pub async fn complete_working_directory(&mut self, path: &str, limit: usize) -> Result<u64> {
+        let id = self.next_request_id;
+        self.next_request_id += 1;
+        self.send_request(Request::CompleteWorkingDirectory {
+            id,
+            path: path.to_string(),
+            limit: limit.min(32),
+        })
+        .await?;
+        Ok(id)
+    }
+
+    /// Create a clean session. The initial prompt remains client-side until attach.
+    pub async fn create_session(
+        &mut self,
+        working_dir: &str,
+        runtime: SessionRuntimeSelection,
+    ) -> Result<u64> {
+        let id = self.next_request_id;
+        let request = Request::CreateSession {
+            id,
+            working_dir: working_dir.to_string(),
+            runtime,
+        };
+        self.next_request_id += 1;
+        self.send_request(request).await?;
+        Ok(id)
+    }
+
+    /// Probe a newly connected daemon for the live-preview protocol. Pong
+    /// capability fields are accepted only when they answer this Ping ID.
+    pub async fn request_session_preview_capability(&mut self) -> Result<u64> {
+        let id = self.next_request_id;
+        self.next_request_id += 1;
+        self.send_request(Request::Ping { id }).await?;
+        self.session_preview_capability_probe =
+            Some((id, Instant::now() + SESSION_PREVIEW_CAPABILITY_TIMEOUT));
+        Ok(id)
+    }
+
+    /// Returns the result recorded for this connection's explicit capability
+    /// probe. `None` means the probe has not resolved yet.
+    pub fn session_preview_capability(&self) -> Option<Option<u32>> {
+        self.session_preview_capability
+    }
+
+    pub fn needs_session_preview_capability_probe(&self) -> bool {
+        self.session_preview_capability.is_none() && self.session_preview_capability_probe.is_none()
+    }
+
+    /// Turns a finite probe timeout into an explicit unsupported result. This
+    /// prevents an old or unresponsive daemon from leaving the picker in an
+    /// indefinite checking state.
+    pub fn expire_session_preview_capability_probe(&mut self) -> bool {
+        if self
+            .session_preview_capability_probe
+            .is_some_and(|(_, deadline)| deadline <= Instant::now())
+        {
+            self.session_preview_capability_probe = None;
+            self.session_preview_capability = Some(None);
+            return true;
+        }
+        false
+    }
+
+    /// Probe this connection for clean-session support. Only the Pong carrying
+    /// this request ID is authoritative, so unrelated keepalive Pongs cannot
+    /// change the conclusion.
+    pub async fn request_clean_session_capability(&mut self) -> Result<u64> {
+        let id = self.next_request_id;
+        self.next_request_id += 1;
+        self.send_request(Request::Ping { id }).await?;
+        self.clean_session_capability_probe =
+            Some((id, Instant::now() + CLEAN_SESSION_CAPABILITY_TIMEOUT));
+        Ok(id)
+    }
+
+    /// `None` means this connection's explicit probe has not completed.
+    pub fn clean_session_capability(&self) -> Option<Option<u32>> {
+        self.clean_session_capability
+    }
+
+    /// Completion is advertised by the same explicitly-correlated Ping as the
+    /// clean-session capability. Older servers retain manual path resolution.
+    pub fn directory_completion_capability(&self) -> Option<Option<u32>> {
+        self.directory_completion_capability
+    }
+
+    /// Accept directory-completion capability only from the Ping that is
+    /// already tracked for clean-session support. This avoids treating ambient
+    /// keepalive Pongs as feature negotiation.
+    pub fn record_directory_completion_capability_pong(
+        &mut self,
+        id: u64,
+        protocol: Option<u32>,
+    ) -> bool {
+        if self
+            .clean_session_capability_probe
+            .is_some_and(|(expected, _)| expected == id)
+        {
+            self.directory_completion_capability = Some(protocol);
+            return true;
+        }
+        false
+    }
+
+    pub fn needs_clean_session_capability_probe(&self) -> bool {
+        self.clean_session_capability.is_none() && self.clean_session_capability_probe.is_none()
+    }
+
+    /// A finite probe timeout treats an old or unresponsive daemon as
+    /// unsupported. A reconnect constructs a fresh state and probes again.
+    pub fn expire_clean_session_capability_probe(&mut self) -> bool {
+        if self
+            .clean_session_capability_probe
+            .is_some_and(|(_, deadline)| deadline <= Instant::now())
+        {
+            self.clean_session_capability_probe = None;
+            self.clean_session_capability = Some(None);
+            return true;
+        }
+        false
     }
 
     /// Ask the server for the fully route-expanded model catalog.
@@ -1346,6 +1537,11 @@ impl RemoteConnection {
             protocol_bytes_scanned: 0,
             has_loaded_history: false,
             call_output_tokens_seen: 0,
+            session_preview_capability_probe: None,
+            session_preview_capability: None,
+            clean_session_capability_probe: None,
+            clean_session_capability: None,
+            directory_completion_capability: None,
         }
     }
 
@@ -1467,6 +1663,38 @@ impl RemoteEventState for RemoteConnection {
     fn mark_history_loaded(&mut self) {
         Self::mark_history_loaded(self);
     }
+
+    fn record_session_preview_capability_pong(&mut self, id: u64, protocol: Option<u32>) -> bool {
+        if self
+            .session_preview_capability_probe
+            .is_some_and(|(expected, _)| expected == id)
+        {
+            self.session_preview_capability_probe = None;
+            self.session_preview_capability = Some(protocol);
+            return true;
+        }
+        false
+    }
+
+    fn record_clean_session_capability_pong(&mut self, id: u64, protocol: Option<u32>) -> bool {
+        if self
+            .clean_session_capability_probe
+            .is_some_and(|(expected, _)| expected == id)
+        {
+            self.clean_session_capability_probe = None;
+            self.clean_session_capability = Some(protocol);
+            return true;
+        }
+        false
+    }
+
+    fn record_directory_completion_capability_pong(
+        &mut self,
+        id: u64,
+        protocol: Option<u32>,
+    ) -> bool {
+        Self::record_directory_completion_capability_pong(self, id, protocol)
+    }
 }
 
 impl RemoteEventState for ReplayRemoteState {
@@ -1514,6 +1742,53 @@ impl RemoteEventState for ReplayRemoteState {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn active_session_preview_capability_accepts_only_its_ping_pong() {
+        let runtime = tokio::runtime::Runtime::new().expect("test runtime");
+        runtime.block_on(async {
+            let mut remote = RemoteConnection::dummy();
+            let probe_id = remote
+                .request_session_preview_capability()
+                .await
+                .expect("capability ping should write");
+            assert!(!RemoteEventState::record_session_preview_capability_pong(
+                &mut remote,
+                probe_id + 1,
+                Some(1),
+            ));
+            assert_eq!(remote.session_preview_capability(), None);
+
+            assert!(RemoteEventState::record_session_preview_capability_pong(
+                &mut remote,
+                probe_id,
+                Some(1),
+            ));
+            assert_eq!(remote.session_preview_capability(), Some(Some(1)));
+        });
+    }
+
+    #[test]
+    fn clean_session_capability_accepts_only_its_ping_pong_and_times_out() {
+        let runtime = tokio::runtime::Runtime::new().expect("test runtime");
+        runtime.block_on(async {
+            let mut remote = RemoteConnection::dummy();
+            let probe_id = remote
+                .request_clean_session_capability()
+                .await
+                .expect("capability ping should write");
+            assert!(!RemoteEventState::record_clean_session_capability_pong(
+                &mut remote,
+                probe_id + 1,
+                Some(1),
+            ));
+            assert_eq!(remote.clean_session_capability(), None);
+
+            remote.clean_session_capability_probe = Some((probe_id, Instant::now()));
+            assert!(remote.expire_clean_session_capability_probe());
+            assert_eq!(remote.clean_session_capability(), Some(None));
+        });
+    }
     use std::time::Duration;
 
     #[tokio::test]

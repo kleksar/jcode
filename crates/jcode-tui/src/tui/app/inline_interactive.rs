@@ -2446,10 +2446,26 @@ impl App {
         picker.set_current_dir(current_dir);
         picker.set_current_session_id(Some(super::commands::active_session_id(self)));
         picker.activate_active_filter();
+        // Capability is connection-scoped and may not have been probed yet.
+        // Keep browsing available while the remote tick establishes it, but do
+        // not let a draft be mistaken for a local filesystem action.
+        picker.set_new_session_composer_enabled(false);
+        picker.set_new_session_composer_unavailable("Checking server support…".to_string());
         self.session_picker_overlay = Some(RefCell::new(picker));
         self.session_picker_mode = SessionPickerMode::ActiveSessions;
+        self.pending_session_creation_context = true;
+        self.in_flight_session_creation_context = None;
         self.set_status_notice(status);
         self.start_session_picker_load();
+    }
+
+    /// The clean-session composer is an Active Sessions manager capability, not
+    /// a property of the reusable picker widget. In particular, a capability
+    /// reply may arrive after that manager was dismissed and another picker has
+    /// replaced its overlay.
+    pub(super) fn active_sessions_manager_open(&self) -> bool {
+        self.session_picker_mode == SessionPickerMode::ActiveSessions
+            && self.session_picker_overlay.is_some()
     }
 
     /// Left-arrow gesture: pressing Left on an empty input opens the active
@@ -3083,6 +3099,11 @@ impl App {
                         return Ok(());
                     }
                     PickerResult::CloseSession { .. } => return Ok(()),
+                    // Task 7 owns request dispatch. Keep this temporary arm
+                    // non-destructive so a composer draft is never mistaken for
+                    // a successful operation before that integration lands.
+                    PickerResult::ResolveWorkingDirectory { .. }
+                    | PickerResult::CreateSession { .. } => return Ok(()),
                 };
                 self.session_picker_overlay = None;
                 self.session_picker_mode = SessionPickerMode::Resume;
@@ -3143,8 +3164,62 @@ impl App {
                 self.session_picker_overlay = None;
                 self.session_picker_mode = SessionPickerMode::Resume;
             }
+            OverlayAction::Selected(PickerResult::ResolveWorkingDirectory { path }) => {
+                // A validation decision supersedes any detached suggestion
+                // reply. The server may still send it, but correlation will
+                // ignore it after this cancellation.
+                self.in_flight_working_dir_completion = None;
+                if self.in_flight_working_dir_resolution.is_none() {
+                    self.in_flight_working_dir_resolution = Some((0, path));
+                }
+            }
+            OverlayAction::Selected(PickerResult::CreateSession {
+                prompt,
+                working_dir,
+            }) => {
+                self.queue_clean_session_create(prompt, working_dir);
+            }
         }
         Ok(())
+    }
+
+    pub(super) fn queue_clean_session_create(&mut self, prompt: String, working_dir: String) {
+        if self.pending_clean_session_create.is_none()
+            && self.in_flight_clean_session_create.is_none()
+        {
+            let selected_route = self.remote_provider_model.as_ref().and_then(|model| {
+                        self.remote_model_options
+                            .iter()
+                            .find(|route| {
+                                route.model == *model
+                                    && self
+                                        .remote_provider_name
+                                        .as_ref()
+                                        .is_none_or(|provider| route.provider == *provider)
+                            })
+                            .or_else(|| {
+                                self.remote_model_options
+                                    .iter()
+                                    .find(|route| route.model == *model)
+                            })
+                            .cloned()
+                    });
+            self.pending_clean_session_create = Some(super::PendingCleanSessionCreate {
+                prompt,
+                working_dir,
+                runtime: crate::protocol::SessionRuntimeSelection {
+                            provider_key: selected_route
+                                .as_ref()
+                                .map(|route| route.provider.clone())
+                                .or_else(|| self.remote_provider_name.clone()),
+                            model: self.remote_provider_model.clone(),
+                            route_api_method: selected_route
+                                .as_ref()
+                                .map(|route| route.api_method.clone()),
+                            reasoning_effort: self.remote_reasoning_effort_hint(),
+                },
+            });
+        }
     }
 
     fn toggle_selected_model_favorite(&mut self) {

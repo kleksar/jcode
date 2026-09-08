@@ -389,6 +389,13 @@ pub(super) async fn unregister_session_event_sender(
         member.event_txs.remove(connection_id);
         if let Some((_, tx)) = member.event_txs.iter().next() {
             member.event_tx = tx.clone();
+        } else {
+            // Do not preserve the final detached client's socket as the
+            // compatibility fallback. A later resume can reuse that socket
+            // for another session.
+            let (event_tx, event_rx) = mpsc::unbounded_channel();
+            drop(event_rx);
+            member.event_tx = event_tx;
         }
     }
 }
@@ -466,12 +473,29 @@ pub(super) fn session_event_fanout_sender_with_fallback(
     session_id: String,
     swarm_members: Arc<RwLock<HashMap<String, SwarmMember>>>,
     fallback_tx: mpsc::UnboundedSender<ServerEvent>,
+    connection_id: String,
+    client_connections: Arc<RwLock<HashMap<String, super::debug::ClientConnectionInfo>>>,
 ) -> mpsc::UnboundedSender<ServerEvent> {
     let (tx, mut rx) = mpsc::unbounded_channel::<ServerEvent>();
     tokio::spawn(async move {
         while let Some(event) = rx.recv().await {
             if fanout_session_event(&swarm_members, &session_id, event.clone()).await == 0 {
-                let _ = fallback_tx.send(event);
+                // The captured fallback belongs to the connection that began
+                // this turn. If its still-registered session has detached all
+                // live attachments, that connection may now own another
+                // session, so never leak the event through it.
+                if !swarm_members.read().await.contains_key(&session_id) {
+                    // Keep the registry read guard across the synchronous send. A
+                    // reassignment must acquire the write lock, so it cannot make
+                    // this captured socket appear to belong to A after the check.
+                    let connections = client_connections.read().await;
+                    if connections
+                        .get(&connection_id)
+                        .is_some_and(|info| info.session_id == session_id)
+                    {
+                        let _ = fallback_tx.send(event);
+                    }
+                }
             }
         }
     });
@@ -511,6 +535,91 @@ pub(super) fn enqueue_soft_interrupt(
             source, urgent, content_bytes, content_chars
         ));
         false
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn member(event_tx: mpsc::UnboundedSender<ServerEvent>) -> SwarmMember {
+        let now = Instant::now();
+        SwarmMember {
+            session_id: "session-a".to_string(),
+            event_tx,
+            event_txs: HashMap::new(),
+            working_dir: None,
+            swarm_id: None,
+            swarm_enabled: false,
+            status: "ready".to_string(),
+            detail: None,
+            task_label: None,
+            friendly_name: None,
+            report_back_to_session_id: None,
+            latest_completion_report: None,
+            role: "agent".to_string(),
+            joined_at: now,
+            last_status_change: now,
+            is_headless: false,
+            output_tail: None,
+            todo_progress: None,
+            todo_items: Vec::new(),
+            runtime: crate::protocol::SwarmMemberRuntime::default(),
+        }
+    }
+
+    #[tokio::test]
+    async fn unregistering_last_attachment_cannot_fan_out_to_that_former_connection() {
+        let (former_tx, mut former_rx) = mpsc::unbounded_channel();
+        let (peer_tx, mut peer_rx) = mpsc::unbounded_channel();
+        let members = Arc::new(RwLock::new(HashMap::from([(
+            "session-a".to_string(),
+            member(former_tx.clone()),
+        )])));
+        register_session_event_sender(&members, "session-a", "former", former_tx).await;
+        register_session_event_sender(&members, "session-a", "peer", peer_tx).await;
+
+        unregister_session_event_sender(&members, "session-a", "former").await;
+        assert_eq!(
+            fanout_session_event(&members, "session-a", ServerEvent::Done { id: 1 }).await,
+            1
+        );
+        assert!(matches!(peer_rx.try_recv(), Ok(ServerEvent::Done { id: 1 })));
+        assert!(former_rx.try_recv().is_err());
+
+        unregister_session_event_sender(&members, "session-a", "peer").await;
+        assert_eq!(
+            fanout_session_event(&members, "session-a", ServerEvent::Done { id: 2 }).await,
+            0
+        );
+        assert!(former_rx.try_recv().is_err());
+        assert!(peer_rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn captured_processing_fallback_does_not_reach_a_registered_detached_session() {
+        let (former_tx, mut former_rx) = mpsc::unbounded_channel();
+        let members = Arc::new(RwLock::new(HashMap::from([(
+            "session-a".to_string(),
+            member(former_tx.clone()),
+        )])));
+        register_session_event_sender(&members, "session-a", "former", former_tx.clone()).await;
+        let processing_tx = session_event_fanout_sender_with_fallback(
+            "session-a".to_string(),
+            Arc::clone(&members),
+            former_tx,
+            "former".to_string(),
+            Arc::new(RwLock::new(HashMap::new())),
+        );
+        unregister_session_event_sender(&members, "session-a", "former").await;
+
+        processing_tx.send(ServerEvent::Done { id: 3 }).expect("enqueue event");
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(50), former_rx.recv())
+                .await
+                .is_err(),
+            "the detached socket must remain empty after the fanout task drains"
+        );
     }
 }
 

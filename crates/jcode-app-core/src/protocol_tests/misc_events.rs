@@ -373,12 +373,16 @@ fn test_native_ssh_pong_capability_is_backward_compatible() -> Result<()> {
         legacy,
         ServerEvent::Pong {
             id: 7,
-            native_ssh_protocol: None
+            native_ssh_protocol: None,
+            ..
         }
     ));
     let modern = ServerEvent::Pong {
         id: 7,
         native_ssh_protocol: Some(1),
+        session_preview_protocol: None,
+        clean_session_protocol: None,
+        directory_completion_protocol: None,
     };
     let json = serde_json::to_value(&modern)?;
     assert_eq!(json["native_ssh_protocol"], 1);
@@ -386,7 +390,8 @@ fn test_native_ssh_pong_capability_is_backward_compatible() -> Result<()> {
         serde_json::from_value::<ServerEvent>(json)?,
         ServerEvent::Pong {
             id: 7,
-            native_ssh_protocol: Some(1)
+            native_ssh_protocol: Some(1),
+            ..
         }
     ));
     assert!(
@@ -394,5 +399,236 @@ fn test_native_ssh_pong_capability_is_backward_compatible() -> Result<()> {
             .get("native_ssh_protocol")
             .is_none()
     );
+    Ok(())
+}
+
+#[test]
+fn test_session_preview_request_and_event_roundtrip() -> Result<()> {
+    let request = Request::GetSessionPreview {
+        id: 41,
+        session_id: "session-preview".to_string(),
+        limit: 20,
+    };
+    let request_json = serde_json::to_string(&request)?;
+    assert!(request_json.contains("\"type\":\"get_session_preview\""));
+    let decoded_request = parse_request_json(&request_json)?;
+    assert_eq!(decoded_request.id(), 41);
+
+    let event = ServerEvent::SessionPreview {
+        id: 41,
+        session_id: "session-preview".to_string(),
+        revision: 9,
+        messages: vec![
+            HistoryMessage {
+                role: "user".to_string(),
+                content: "Please inspect this.".to_string(),
+                tool_calls: None,
+                tool_data: None,
+            },
+            HistoryMessage {
+                role: "tool".to_string(),
+                content: "Inspection complete.".to_string(),
+                tool_calls: Some(vec!["inspect".to_string()]),
+                tool_data: None,
+            },
+        ],
+        activity: SessionActivitySnapshot {
+            is_processing: true,
+            current_tool_name: Some("inspect".to_string()),
+        },
+    };
+    let event_json = encode_event(&event);
+    let decoded_event = parse_event_json(event_json.trim())?;
+    let ServerEvent::SessionPreview {
+        id,
+        session_id,
+        revision,
+        messages,
+        activity,
+    } = decoded_event
+    else {
+        return Err(anyhow!("expected SessionPreview event"));
+    };
+    assert_eq!(id, 41);
+    assert_eq!(session_id, "session-preview");
+    assert_eq!(revision, 9);
+    assert_eq!(messages.len(), 2);
+    assert_eq!(messages[0].role, "user");
+    assert_eq!(
+        messages[1].tool_calls.as_deref(),
+        Some(&["inspect".to_string()][..])
+    );
+    assert!(activity.is_processing);
+    assert_eq!(activity.current_tool_name.as_deref(), Some("inspect"));
+    Ok(())
+}
+
+#[test]
+fn test_session_preview_pong_capability_is_backward_compatible() -> Result<()> {
+    let legacy: ServerEvent = serde_json::from_str(r#"{"type":"pong","id":7}"#)?;
+    assert!(matches!(
+        legacy,
+        ServerEvent::Pong {
+            id: 7,
+            session_preview_protocol: None,
+            ..
+        }
+    ));
+
+    let modern = ServerEvent::Pong {
+        id: 7,
+        native_ssh_protocol: Some(1),
+        session_preview_protocol: Some(1),
+        clean_session_protocol: None,
+        directory_completion_protocol: None,
+    };
+    let json = serde_json::to_value(&modern)?;
+    assert_eq!(json["session_preview_protocol"], 1);
+    assert!(matches!(
+        serde_json::from_value::<ServerEvent>(json)?,
+        ServerEvent::Pong {
+            id: 7,
+            session_preview_protocol: Some(1),
+            ..
+        }
+    ));
+    assert!(
+        serde_json::to_value(&legacy)?
+            .get("session_preview_protocol")
+            .is_none()
+    );
+    Ok(())
+}
+
+#[test]
+fn test_clean_session_protocol_pong_capability_is_backward_compatible() -> Result<()> {
+    let legacy: ServerEvent = serde_json::from_str(r#"{"type":"pong","id":7}"#)?;
+    assert!(matches!(
+        legacy,
+        ServerEvent::Pong {
+            id: 7,
+            clean_session_protocol: None,
+            directory_completion_protocol: None,
+            ..
+        }
+    ));
+
+    let modern = ServerEvent::Pong {
+        id: 7,
+        native_ssh_protocol: Some(1),
+        session_preview_protocol: Some(1),
+        clean_session_protocol: Some(1),
+        directory_completion_protocol: Some(1),
+    };
+    let json = serde_json::to_value(&modern)?;
+    assert_eq!(json["clean_session_protocol"], 1);
+    assert_eq!(json["directory_completion_protocol"], 1);
+    assert!(matches!(
+        serde_json::from_value::<ServerEvent>(json)?,
+        ServerEvent::Pong {
+            id: 7,
+            clean_session_protocol: Some(1),
+            directory_completion_protocol: Some(1),
+            ..
+        }
+    ));
+    assert!(
+        serde_json::to_value(&legacy)?
+            .get("clean_session_protocol")
+            .is_none()
+    );
+    Ok(())
+}
+
+#[test]
+fn test_session_creation_wire_roundtrip() -> Result<()> {
+    let runtime = SessionRuntimeSelection {
+        provider_key: Some("openai".to_string()),
+        model: Some("gpt-5".to_string()),
+        route_api_method: Some("responses".to_string()),
+        reasoning_effort: Some("high".to_string()),
+    };
+    assert_eq!(
+        serde_json::from_value::<SessionRuntimeSelection>(serde_json::to_value(&runtime)?)?,
+        runtime
+    );
+    assert_eq!(
+        serde_json::to_value(SessionRuntimeSelection::default())?,
+        serde_json::json!({})
+    );
+
+    let requests = [
+        Request::GetSessionCreationContext { id: 51 },
+        Request::ResolveWorkingDirectory {
+            id: 52,
+            path: "~/project".to_string(),
+        },
+        Request::CompleteWorkingDirectory {
+            id: 53,
+            path: "~/pro".to_string(),
+            limit: 32,
+        },
+        Request::CreateSession {
+            id: 54,
+            working_dir: "/server/project".to_string(),
+            runtime: runtime.clone(),
+        },
+    ];
+    for request in requests {
+        let id = request.id();
+        assert_eq!(
+            parse_request_json(&serde_json::to_string(&request)?)?.id(),
+            id
+        );
+    }
+
+    let context = ServerEvent::SessionCreationContext {
+        id: 51,
+        home_dir: "/server/home".to_string(),
+        recent_working_dirs: vec!["/server/newest".to_string(), "/server/older".to_string()],
+    };
+    assert!(matches!(
+        parse_event_json(encode_event(&context).trim())?,
+        ServerEvent::SessionCreationContext { id: 51, home_dir, recent_working_dirs }
+            if home_dir == "/server/home"
+                && recent_working_dirs == ["/server/newest", "/server/older"]
+    ));
+
+    let resolved = ServerEvent::WorkingDirectoryResolved {
+        id: 52,
+        input: "~/project".to_string(),
+        absolute_path: "/server/home/project".to_string(),
+    };
+    assert!(matches!(
+        parse_event_json(encode_event(&resolved).trim())?,
+        ServerEvent::WorkingDirectoryResolved { id: 52, input, absolute_path }
+            if input == "~/project" && absolute_path == "/server/home/project"
+    ));
+
+    let completions = ServerEvent::WorkingDirectoryCompletions {
+        id: 53,
+        input: "~/pro".to_string(),
+        candidates: vec!["~/project/".to_string()],
+        truncated: false,
+    };
+    assert!(matches!(
+        parse_event_json(encode_event(&completions).trim())?,
+        ServerEvent::WorkingDirectoryCompletions { id: 53, input, candidates, truncated: false }
+            if input == "~/pro" && candidates == ["~/project/"]
+    ));
+
+    let created = ServerEvent::SessionCreated {
+        id: 53,
+        session_id: "created-session".to_string(),
+        session_name: "Created session".to_string(),
+        working_dir: "/server/project".to_string(),
+    };
+    assert!(matches!(
+        parse_event_json(encode_event(&created).trim())?,
+        ServerEvent::SessionCreated { id: 53, session_id, session_name, working_dir }
+            if session_id == "created-session"
+                && session_name == "Created session"
+                && working_dir == "/server/project"
+    ));
     Ok(())
 }

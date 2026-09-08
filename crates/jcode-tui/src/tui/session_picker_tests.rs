@@ -929,13 +929,19 @@ fn session_picker_ctrl_a_toggles_active_and_all_recent_by_session_id() {
         .expect("Ctrl+A should be handled");
     assert_eq!(picker.filter_mode, SessionFilterMode::All);
     assert_eq!(picker.visible_session_count(), 5);
-    assert_eq!(picker.selected_session().map(|session| session.id.as_str()), Some("ready"));
+    assert_eq!(
+        picker.selected_session().map(|session| session.id.as_str()),
+        Some("ready")
+    );
 
     picker
         .handle_overlay_key(KeyCode::Char('a'), KeyModifiers::CONTROL)
         .expect("Ctrl+A should toggle back");
     assert_eq!(picker.filter_mode, SessionFilterMode::Active);
-    assert_eq!(picker.selected_session().map(|session| session.id.as_str()), Some("ready"));
+    assert_eq!(
+        picker.selected_session().map(|session| session.id.as_str()),
+        Some("ready")
+    );
 }
 
 #[test]
@@ -952,7 +958,10 @@ fn active_filter_shows_root_debug_sessions_but_keeps_debug_children_hidden() {
     ]);
 
     assert_eq!(picker.visible_session_count(), 1);
-    assert_eq!(picker.selected_session().map(|session| session.id.as_str()), Some("root-debug"));
+    assert_eq!(
+        picker.selected_session().map(|session| session.id.as_str()),
+        Some("root-debug")
+    );
 }
 
 #[test]
@@ -1614,11 +1623,13 @@ fn onboarding_banner_renders_prompt_and_both_action_rows() {
         review_x < 50,
         "suggested prompt should span the visual center: {lines:#?}"
     );
-    let start_label_width = "Start in the current directory".chars().count();
+    // Preserve the archive baseline's right-gutter invariant.
+    let start_label = "Start in the current directory";
     assert!(
         start_y >= buffer.area.height as usize - 3
-            && start_x + start_label_width >= buffer.area.width as usize - 4,
-        "blank-session action should stay secondary in the bottom-right: {lines:#?}"
+            && start_x > buffer.area.width as usize / 2
+            && start_x + start_label.len() <= buffer.area.width as usize - 2,
+        "blank-session action must remain right-aligned in the bottom gutter: {lines:#?}"
     );
 }
 
@@ -1675,6 +1686,104 @@ fn buffer_text(picker: &mut SessionPicker, w: u16, h: u16) -> String {
         .expect("render picker");
     let buffer = terminal.backend().buffer().clone();
     buffer.content().iter().map(|cell| cell.symbol()).collect()
+}
+
+#[test]
+fn clean_session_prompt_uses_bottom_footer_and_path_stays_in_chooser_modal() {
+    use crossterm::event::{KeyCode, KeyModifiers};
+
+    let mut picker = SessionPicker::new(vec![make_session(
+        "ready",
+        "ready",
+        false,
+        SessionStatus::Active,
+    )]);
+    picker.set_current_dir(Some("/server/here".into()));
+    picker.set_new_session_composer_enabled(true);
+    picker.set_session_creation_context(
+        "/server/home".into(),
+        vec!["/recent/one".into(), "/recent/two".into()],
+    );
+    picker
+        .handle_overlay_key(KeyCode::Char('p'), KeyModifiers::NONE)
+        .expect("prompt starts through real picker key handling");
+
+    let backend = ratatui::backend::TestBackend::new(120, 30);
+    let mut terminal = ratatui::Terminal::new(backend).expect("test terminal");
+    terminal
+        .draw(|frame| picker.render(frame))
+        .expect("render bottom prompt");
+    let rows: Vec<String> = terminal
+        .backend()
+        .buffer()
+        .content()
+        .chunks(120)
+        .map(|row| row.iter().map(|cell| cell.symbol()).collect())
+        .collect();
+    assert!(
+        rows[28].contains("New session: p") && rows[29].contains("Enter choose directory"),
+        "prompt and its hint must occupy the bottom footer: {rows:#?}"
+    );
+    assert!(
+        !rows[..29]
+            .iter()
+            .any(|row| row.contains("Enter choose directory"))
+    );
+
+    picker
+        .handle_overlay_key(KeyCode::Enter, KeyModifiers::NONE)
+        .expect("open chooser");
+    // Here remains selected by default, but immediate printable input must
+    // begin manual entry rather than create a session in Here.
+    for c in "~/".chars() {
+        assert!(matches!(
+            picker.handle_overlay_key(KeyCode::Char(c), KeyModifiers::NONE),
+            Ok(OverlayAction::Continue)
+        ));
+    }
+    terminal
+        .draw(|frame| picker.render(frame))
+        .expect("render modal path editor");
+    let modal = terminal
+        .backend()
+        .buffer()
+        .content()
+        .iter()
+        .map(|cell| cell.symbol())
+        .collect::<String>();
+    assert!(modal.contains("Type path: ~/▎"));
+    assert!(
+        !modal.contains("Working directory:"),
+        "path input must not move to footer"
+    );
+}
+
+#[test]
+fn clean_session_chooser_paste_from_non_manual_row_edits_path_without_creating() {
+    use crossterm::event::{KeyCode, KeyModifiers};
+
+    let mut picker = SessionPicker::new(Vec::new());
+    picker.set_current_dir(Some("/server/here".into()));
+    picker.set_new_session_composer_enabled(true);
+    picker.set_session_creation_context("/server/home".into(), vec!["/server/recent".into()]);
+    picker
+        .handle_overlay_key(KeyCode::Char('p'), KeyModifiers::NONE)
+        .expect("start prompt");
+    picker
+        .handle_overlay_key(KeyCode::Enter, KeyModifiers::NONE)
+        .expect("open chooser with Here selected");
+
+    assert!(picker.append_clean_session_prompt_paste("~/with spaces"));
+    assert_eq!(
+        picker.clean_composer_manual_path_for_test(),
+        Some("~/with spaces"),
+        "paste from the default Here row must enter manual path editing intact"
+    );
+    assert!(matches!(
+        picker.handle_overlay_key(KeyCode::Enter, KeyModifiers::NONE),
+        Ok(OverlayAction::Selected(PickerResult::ResolveWorkingDirectory { path }))
+            if path == "~/with spaces"
+    ));
 }
 
 // ---------------------------------------------------------------------------
@@ -2677,4 +2786,437 @@ fn preview_without_search_has_no_highlight_and_scrolls_to_bottom() {
         !any_highlight,
         "no search means no highlight color in preview"
     );
+}
+
+#[test]
+fn session_picker_composer_direct_typing_preserves_shortcuts_and_requires_cwd_choice() {
+    use crossterm::event::{KeyCode, KeyModifiers};
+    let mut picker = SessionPicker::new(vec![make_session(
+        "one",
+        "one",
+        false,
+        SessionStatus::Active,
+    )]);
+    picker.set_current_dir(Some("/server/here".to_string()));
+    picker.set_new_session_composer_enabled(true);
+    for c in ['q', 'd', 's', 'S', 'b', 'B', 'R', 'T', '/', ' ', 'π'] {
+        assert!(matches!(
+            picker.handle_overlay_key(KeyCode::Char(c), KeyModifiers::NONE),
+            Ok(OverlayAction::Continue)
+        ));
+    }
+    assert!(matches!(
+        picker.handle_overlay_key(KeyCode::Char('f'), KeyModifiers::CONTROL),
+        Ok(OverlayAction::Continue)
+    ));
+    assert!(matches!(
+        picker.handle_overlay_key(KeyCode::Esc, KeyModifiers::NONE),
+        Ok(OverlayAction::Continue)
+    ));
+    let mut generic = SessionPicker::new(vec![make_session(
+        "two",
+        "two",
+        false,
+        SessionStatus::Active,
+    )]);
+    assert!(matches!(
+        generic.handle_overlay_key(KeyCode::Char('q'), KeyModifiers::NONE),
+        Ok(OverlayAction::Close)
+    ));
+}
+
+#[test]
+fn new_session_composer_renders_footer_scrollable_choices_and_manual_states() {
+    use crossterm::event::{KeyCode, KeyModifiers};
+
+    let mut picker = SessionPicker::new(Vec::new());
+    picker.set_current_dir(Some("/server/here".to_string()));
+    picker.set_new_session_composer_enabled(true);
+    picker.set_session_creation_context(
+        "/server/home".into(),
+        // The server and client both cap recents at five, so Home follows the
+        // current directory plus five bounded recent choices.
+        (0..5)
+            .map(|index| format!("/server/recent-{index}"))
+            .collect(),
+    );
+    picker
+        .handle_overlay_key(KeyCode::Char('p'), KeyModifiers::NONE)
+        .unwrap();
+    let footer = buffer_text(&mut picker, 80, 18);
+    assert!(
+        footer.contains("New session: p▎"),
+        "prompt must be a footer: {footer:?}"
+    );
+    assert!(footer.contains("Enter choose directory"));
+
+    picker
+        .handle_overlay_key(KeyCode::Enter, KeyModifiers::NONE)
+        .unwrap();
+    for _ in 0..6 {
+        picker
+            .handle_overlay_key(KeyCode::Down, KeyModifiers::NONE)
+            .unwrap();
+    }
+    let home = buffer_text(&mut picker, 80, 18);
+    assert!(
+        home.contains("› Home: /server/home"),
+        "selection must follow Home: {home:?}"
+    );
+    assert!(
+        home.contains("↑ more directories"),
+        "chooser should expose a scroll window: {home:?}"
+    );
+
+    picker
+        .handle_overlay_key(KeyCode::Down, KeyModifiers::NONE)
+        .unwrap();
+    let manual_choice = buffer_text(&mut picker, 80, 18);
+    assert!(
+        manual_choice.contains("› Type path…:"),
+        "manual row must be visible: {manual_choice:?}"
+    );
+    picker
+        .handle_overlay_key(KeyCode::Enter, KeyModifiers::NONE)
+        .unwrap();
+    for c in "~/work".chars() {
+        picker
+            .handle_overlay_key(KeyCode::Char(c), KeyModifiers::NONE)
+            .unwrap();
+    }
+    let editing = buffer_text(&mut picker, 80, 18);
+    assert!(
+        editing.contains("Type path: ~/work▎"),
+        "manual input needs its cursor inside the directory modal: {editing:?}"
+    );
+
+    let action = picker
+        .handle_overlay_key(KeyCode::Enter, KeyModifiers::NONE)
+        .unwrap();
+    let OverlayAction::Selected(PickerResult::ResolveWorkingDirectory { path }) = action else {
+        panic!("expected working-directory resolution");
+    };
+    picker.begin_working_directory_resolution(7, path.clone());
+    let resolving = buffer_text(&mut picker, 80, 18);
+    assert!(resolving.contains("Resolving working directory: ~/work"));
+    assert!(matches!(
+        picker.apply_resolved_working_directory(7, &path, "/server/home/work".into()),
+        Some((prompt, working_dir)) if prompt == "p" && working_dir == "/server/home/work"
+    ));
+    picker.begin_clean_session_creation(8);
+    let creating = buffer_text(&mut picker, 80, 18);
+    assert!(creating.contains("Creating session in: /server/home/work"));
+
+    let narrow = buffer_text(&mut picker, 20, 3);
+    assert!(
+        narrow.contains("Creating"),
+        "narrow terminals retain progress: {narrow:?}"
+    );
+}
+
+#[test]
+fn active_preview_timeout_becomes_retryable_without_empty() {
+    use std::time::{Duration, Instant};
+
+    let session_id = "preview-timeout";
+    let mut picker = SessionPicker::new(vec![make_session(
+        session_id,
+        "preview",
+        false,
+        SessionStatus::Active,
+    )]);
+    picker.set_live_presence_for_test(vec![crate::session::SessionPresence {
+        session_id: session_id.into(),
+        pid: std::process::id(),
+        streaming: true,
+        streaming_since: None,
+        internal: false,
+    }]);
+    picker.set_active_preview_capability(Some(1));
+    let now = Instant::now();
+    assert_eq!(
+        picker.take_pending_active_preview_at(now),
+        Some(session_id.into())
+    );
+    picker.mark_active_preview_loading_at(session_id, 1, now);
+    assert_eq!(
+        picker.take_pending_active_preview_at(now + Duration::from_secs(5)),
+        None,
+        "first failure backs off for one second"
+    );
+    assert_eq!(
+        picker.take_pending_active_preview_at(now + Duration::from_secs(6)),
+        Some(session_id.into())
+    );
+    assert!(!matches!(
+        picker.active_preview_state(session_id),
+        ActivePreviewState::Empty { .. }
+    ));
+}
+
+#[test]
+fn active_preview_backoff_retries_and_rejects_stale_response() {
+    use std::time::{Duration, Instant};
+
+    let session_id = "preview-retry";
+    let mut picker = SessionPicker::new(vec![make_session(
+        session_id,
+        "preview",
+        false,
+        SessionStatus::Active,
+    )]);
+    picker.set_live_presence_for_test(vec![crate::session::SessionPresence {
+        session_id: session_id.into(),
+        pid: std::process::id(),
+        streaming: true,
+        streaming_since: None,
+        internal: false,
+    }]);
+    picker.set_active_preview_capability(Some(1));
+    let now = Instant::now();
+    assert_eq!(
+        picker.take_pending_active_preview_at(now),
+        Some(session_id.into())
+    );
+    picker.mark_active_preview_loading_at(session_id, 1, now);
+    let mut request_started_at = now;
+    for (request_id, delay) in [(1, 1), (2, 2), (3, 4), (4, 5)] {
+        assert_eq!(
+            picker.take_pending_active_preview_at(request_started_at + Duration::from_secs(5)),
+            None
+        );
+        request_started_at += Duration::from_secs(5 + delay);
+        assert_eq!(
+            picker.take_pending_active_preview_at(request_started_at),
+            Some(session_id.into())
+        );
+        if request_id < 4 {
+            picker.mark_active_preview_loading_at(session_id, request_id + 1, request_started_at);
+        }
+    }
+    picker.mark_active_preview_loading_at(session_id, 99, request_started_at);
+    let activity = crate::protocol::SessionActivitySnapshot {
+        is_processing: false,
+        current_tool_name: None,
+    };
+    assert!(
+        !picker.apply_active_preview(4, session_id, 1, Vec::new(), activity.clone()),
+        "superseded response cannot replace current row"
+    );
+    assert!(picker.apply_active_preview(
+        99,
+        session_id,
+        2,
+        vec![crate::protocol::HistoryMessage {
+            role: "assistant".into(),
+            content: "loaded".into(),
+            tool_calls: None,
+            tool_data: None
+        }],
+        activity
+    ));
+    assert!(matches!(
+        picker.active_preview_state(session_id),
+        ActivePreviewState::Loaded { revision: 2 }
+    ));
+}
+
+#[test]
+fn session_picker_working_directory_resolution_is_request_and_path_correlated() {
+    use crossterm::event::{KeyCode, KeyModifiers};
+    let mut picker = SessionPicker::new(Vec::new());
+    picker.set_new_session_composer_enabled(true);
+    picker.set_session_creation_context("/server/home".into(), vec!["/server/recent".into()]);
+    picker
+        .handle_overlay_key(KeyCode::Char('x'), KeyModifiers::NONE)
+        .unwrap();
+    picker
+        .handle_overlay_key(KeyCode::Enter, KeyModifiers::NONE)
+        .unwrap();
+    for _ in 0..3 {
+        picker
+            .handle_overlay_key(KeyCode::Down, KeyModifiers::NONE)
+            .unwrap();
+    }
+    picker
+        .handle_overlay_key(KeyCode::Enter, KeyModifiers::NONE)
+        .unwrap();
+    picker
+        .handle_overlay_key(KeyCode::Char('/'), KeyModifiers::NONE)
+        .unwrap();
+    let action = picker
+        .handle_overlay_key(KeyCode::Enter, KeyModifiers::NONE)
+        .unwrap();
+    let OverlayAction::Selected(PickerResult::ResolveWorkingDirectory { path }) = action else {
+        panic!("expected resolution");
+    };
+    picker.begin_working_directory_resolution(7, path.clone());
+    picker
+        .handle_overlay_key(KeyCode::Esc, KeyModifiers::NONE)
+        .unwrap();
+    assert!(picker
+        .apply_resolved_working_directory(7, &path, "/stale-after-escape".into())
+        .is_none());
+    let retry = picker
+        .handle_overlay_key(KeyCode::Enter, KeyModifiers::NONE)
+        .unwrap();
+    let OverlayAction::Selected(PickerResult::ResolveWorkingDirectory { path }) = retry else {
+        panic!("expected retry resolution");
+    };
+    picker.begin_working_directory_resolution(9, path.clone());
+    assert!(picker
+        .apply_resolved_working_directory(8, &path, "/wrong".into())
+        .is_none());
+    assert!(matches!(
+        picker.apply_resolved_working_directory(9, &path, "/server/normalized".into()),
+        Some((prompt, working_dir)) if prompt == "x" && working_dir == "/server/normalized"
+    ));
+    picker.begin_clean_session_creation(10);
+    assert!(picker.fail_creation_action(10, "create rejected".into()));
+    assert_eq!(picker.clean_composer_manual_path_for_test(), Some("/"));
+    assert_eq!(picker.clean_composer_feedback_for_test(), Some("create rejected"));
+    assert!(matches!(
+        picker
+            .handle_overlay_key(KeyCode::Enter, KeyModifiers::NONE)
+            .unwrap(),
+        OverlayAction::Selected(PickerResult::ResolveWorkingDirectory { ref path }) if path == "/"
+    ));
+}
+
+#[test]
+fn path_completion_down_starts_at_first_and_edits_clear_selection() {
+    use crossterm::event::{KeyCode, KeyModifiers};
+
+    let mut picker = SessionPicker::new(Vec::new());
+    picker.set_new_session_composer_enabled(true);
+    picker
+        .handle_overlay_key(KeyCode::Char('p'), KeyModifiers::NONE)
+        .unwrap();
+    picker
+        .handle_overlay_key(KeyCode::Enter, KeyModifiers::NONE)
+        .unwrap();
+    picker
+        .handle_overlay_key(KeyCode::Char('/'), KeyModifiers::NONE)
+        .unwrap();
+    assert!(picker.apply_working_directory_completions(
+        "/",
+        vec!["/first".into(), "/second".into()],
+        false,
+    ));
+
+    picker
+        .handle_overlay_key(KeyCode::Down, KeyModifiers::NONE)
+        .unwrap();
+    assert_eq!(picker.new_session_composer.completion_candidates().unwrap().1, Some(0));
+    picker
+        .handle_overlay_key(KeyCode::Down, KeyModifiers::NONE)
+        .unwrap();
+    assert_eq!(picker.new_session_composer.completion_candidates().unwrap().1, Some(1));
+
+    picker
+        .handle_overlay_key(KeyCode::Char('x'), KeyModifiers::NONE)
+        .unwrap();
+    assert_eq!(picker.new_session_composer.completion_candidates().unwrap().1, None);
+    assert!(!picker.apply_working_directory_completions(
+        "/",
+        vec!["/stale".into()],
+        false,
+    ));
+}
+
+#[test]
+fn composer_selected_directory_survives_server_create_error_and_retries_same_cwd() {
+    use crossterm::event::{KeyCode, KeyModifiers};
+
+    let mut picker = SessionPicker::new(Vec::new());
+    picker.set_current_dir(Some("/server/here".into()));
+    picker.set_new_session_composer_enabled(true);
+
+    picker
+        .handle_overlay_key(KeyCode::Char('p'), KeyModifiers::NONE)
+        .unwrap();
+    picker
+        .handle_overlay_key(KeyCode::Enter, KeyModifiers::NONE)
+        .unwrap();
+    let first = picker
+        .handle_overlay_key(KeyCode::Enter, KeyModifiers::NONE)
+        .unwrap();
+    assert!(matches!(
+        first,
+        OverlayAction::Selected(PickerResult::CreateSession {
+            ref prompt,
+            ref working_dir,
+        }) if prompt == "p" && working_dir == "/server/here"
+    ));
+
+    picker.begin_clean_session_creation(41);
+    assert!(picker.fail_creation_action(41, "server rejected create".into()));
+    let retry = picker
+        .handle_overlay_key(KeyCode::Enter, KeyModifiers::NONE)
+        .unwrap();
+    assert!(matches!(
+        retry,
+        OverlayAction::Selected(PickerResult::CreateSession {
+            ref prompt,
+            ref working_dir,
+        }) if prompt == "p" && working_dir == "/server/here"
+    ));
+}
+
+#[test]
+fn composer_empty_draft_enter_selects_row_and_control_shortcuts_remain_picker_owned() {
+    use crossterm::event::{KeyCode, KeyModifiers};
+
+    let mut picker = SessionPicker::new(vec![make_session(
+        "idle",
+        "idle",
+        false,
+        SessionStatus::Active,
+    )]);
+    picker.set_new_session_composer_enabled(true);
+    picker.live_presence.insert(
+        "idle".into(),
+        crate::session::SessionPresence {
+            session_id: "idle".into(),
+            pid: 1,
+            streaming: false,
+            streaming_since: None,
+            internal: false,
+        },
+    );
+    picker
+        .handle_overlay_key(KeyCode::Char('x'), KeyModifiers::NONE)
+        .unwrap();
+    picker
+        .handle_overlay_key(KeyCode::Backspace, KeyModifiers::NONE)
+        .unwrap();
+    assert!(matches!(
+        picker
+            .handle_overlay_key(KeyCode::Enter, KeyModifiers::NONE)
+            .unwrap(),
+        OverlayAction::Selected(PickerResult::Selected(_))
+            | OverlayAction::Selected(PickerResult::SelectedInCurrentTerminal(_))
+            | OverlayAction::Selected(PickerResult::SelectedInNewTerminal(_))
+    ));
+
+    // A new draft must not steal the established active-filter or close keys.
+    picker
+        .handle_overlay_key(KeyCode::Char('x'), KeyModifiers::NONE)
+        .unwrap();
+    assert!(matches!(
+        picker.handle_overlay_key(KeyCode::Char('a'), KeyModifiers::CONTROL),
+        Ok(OverlayAction::Continue)
+    ));
+    assert!(matches!(
+        picker.handle_overlay_key(KeyCode::Char('x'), KeyModifiers::CONTROL),
+        Ok(OverlayAction::Continue)
+    ));
+    assert_eq!(
+        picker.close_feedback_for_test().as_deref(),
+        Some("Press Ctrl+X again within 2s to close this session")
+    );
+    assert!(matches!(
+        picker.handle_overlay_key(KeyCode::Char('x'), KeyModifiers::CONTROL),
+        Ok(OverlayAction::Selected(PickerResult::CloseSession { ref session_id })) if session_id == "idle"
+    ));
 }

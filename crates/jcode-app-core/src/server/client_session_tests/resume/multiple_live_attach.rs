@@ -93,6 +93,7 @@ async fn handle_resume_session_allows_multiple_live_tui_attach() -> Result<()> {
         None,
         false,
         false,
+        true,
         &mut client_selfdev,
         &mut client_session_id,
         "conn_new",

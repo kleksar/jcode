@@ -47,6 +47,20 @@ pub enum CommDeliveryMode {
     Wake,
 }
 
+/// Explicit effective runtime choices for a newly created clean session.
+/// Missing values deliberately preserve the server's normal defaults.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SessionRuntimeSelection {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_key: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub route_api_method: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_effort: Option<String>,
+}
+
 /// A message in conversation history (for sync)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HistoryMessage {
@@ -579,6 +593,11 @@ impl Request {
             Request::ClientDebugResponse { id, .. } => *id,
             Request::Subscribe { id, .. } | Request::PrepareDisconnect { id } => *id,
             Request::GetHistory { id } => *id,
+            Request::GetSessionPreview { id, .. } => *id,
+            Request::GetSessionCreationContext { id } => *id,
+            Request::ResolveWorkingDirectory { id, .. } => *id,
+            Request::CompleteWorkingDirectory { id, .. } => *id,
+            Request::CreateSession { id, .. } => *id,
             Request::GetModelCatalog { id } => *id,
             Request::GetCompactedHistory { id, .. } => *id,
             Request::Reload { id, .. } => *id,

@@ -191,10 +191,10 @@ impl App {
             .as_ref()
             .map(estimate_pending_remote_message_bytes)
             .unwrap_or(0);
-        let pending_split_prompt_bytes = self
-            .pending_split_prompt
+        let pending_session_start_prompt_bytes = self
+            .pending_session_start_prompt
             .as_ref()
-            .map(estimate_pending_split_prompt_bytes)
+            .map(estimate_pending_session_start_prompt_bytes)
             .unwrap_or(0);
         let pending_catchup_resume_bytes = self
             .pending_catchup_resume
@@ -415,7 +415,7 @@ impl App {
 
         let totals = serde_json::json!({
             "pending_remote_message_bytes": pending_remote_message_bytes,
-            "pending_split_prompt_bytes": pending_split_prompt_bytes,
+            "pending_session_start_prompt_bytes": pending_session_start_prompt_bytes,
             "pending_catchup_resume_bytes": pending_catchup_resume_bytes,
             "in_flight_catchup_resume_bytes": in_flight_catchup_resume_bytes,
             "input_undo_stack_bytes": input_undo_stack_bytes,
@@ -450,9 +450,9 @@ impl App {
                 "present": self.rate_limit_pending_message.is_some(),
                 "estimate_bytes": pending_remote_message_bytes,
             },
-            "pending_split_prompt": {
-                "present": self.pending_split_prompt.is_some(),
-                "estimate_bytes": pending_split_prompt_bytes,
+            "pending_session_start_prompt": {
+                "present": self.pending_session_start_prompt.is_some(),
+                "estimate_bytes": pending_session_start_prompt_bytes,
             },
             "catchup": {
                 "pending_estimate_bytes": pending_catchup_resume_bytes,
@@ -782,7 +782,7 @@ fn estimate_pending_remote_message_bytes(value: &PendingRemoteMessage) -> usize 
             .unwrap_or(0)
 }
 
-fn estimate_pending_split_prompt_bytes(value: &PendingSplitPrompt) -> usize {
+fn estimate_pending_session_start_prompt_bytes(value: &PendingSessionStartPrompt) -> usize {
     value.content.capacity() + estimate_pending_images_bytes(&value.images)
 }
 

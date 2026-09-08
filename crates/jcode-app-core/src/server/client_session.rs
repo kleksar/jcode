@@ -1188,6 +1188,7 @@ pub(super) async fn handle_resume_session(
     client_instance_id: Option<&str>,
     client_has_local_history: bool,
     allow_session_takeover: bool,
+    cleanup_provisional_source: bool,
     client_selfdev: &mut bool,
     client_session_id: &mut String,
     client_connection_id: &str,
@@ -1281,23 +1282,34 @@ pub(super) async fn handle_resume_session(
             incoming_client_instance_id
         ));
 
-        cleanup_detached_source_session_if_unused(
-            &old_session_id,
-            client_connection_id,
-            agent,
-            sessions,
-            shutdown_signals,
-            soft_interrupt_queues,
-            client_connections,
-            swarm_members,
-            swarms_by_id,
-            file_touch,
-            channel_subscriptions,
-            channel_subscriptions_by_session,
-            swarm_plans,
-            swarm_coordinators,
-        )
-        .await;
+        if cleanup_provisional_source {
+            // A target-aware initial Subscribe starts from the connection's
+            // disposable bootstrap Agent. It has never been established as a
+            // user session, so remove its complete runtime when detached.
+            cleanup_detached_source_session_if_unused(
+                &old_session_id,
+                client_connection_id,
+                agent,
+                sessions,
+                shutdown_signals,
+                soft_interrupt_queues,
+                client_connections,
+                swarm_members,
+                swarms_by_id,
+                file_touch,
+                channel_subscriptions,
+                channel_subscriptions_by_session,
+                swarm_plans,
+                swarm_coordinators,
+            )
+            .await;
+        } else {
+            // An ordinary ResumeSession merely moves this connection. Keep the
+            // detached established session Active and live, but stop sending
+            // its events to the connection that now owns the target.
+            unregister_session_event_sender(swarm_members, &old_session_id, client_connection_id)
+                .await;
+        }
 
         if let Some(conflict) = conflicting_live_client {
             let incoming_instance_id = incoming_client_instance_id.as_deref();

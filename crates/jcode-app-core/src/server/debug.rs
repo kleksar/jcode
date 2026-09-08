@@ -305,6 +305,10 @@ pub(super) async fn handle_debug_client(
                 let event = ServerEvent::Pong {
                     id,
                     native_ssh_protocol: Some(1),
+                    session_preview_protocol: None,
+                    // Debug connections cannot dispatch clean-session requests.
+                    clean_session_protocol: None,
+                    directory_completion_protocol: None,
                 };
                 let json = encode_event(&event);
                 writer.write_all(json.as_bytes()).await?;

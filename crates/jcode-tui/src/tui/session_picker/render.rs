@@ -2,6 +2,270 @@ use super::*;
 use ratatui::widgets::Wrap;
 
 impl SessionPicker {
+    pub(super) fn render_new_session_composer(&self, frame: &mut Frame, footer: Option<Rect>) {
+        if !self.new_session_composer.is_active() {
+            return;
+        }
+        let area = frame.area();
+        if area.width < 8 || area.height == 0 {
+            return;
+        }
+
+        // Typing and server progress deliberately live in a compact footer. The
+        // picker and preview remain readable while composing a new session.
+        if !self.new_session_composer.choosing_directory()
+            && self.new_session_composer.manual_path().is_none()
+        {
+            let Some(footer) = footer else {
+                return;
+            };
+            let (label, value, help) = if let Some(path) = self.new_session_composer.manual_path() {
+                (
+                    "Working directory",
+                    format!("{path}▎"),
+                    "Enter resolve · Esc back",
+                )
+            } else if self.new_session_composer.creating() {
+                (
+                    "Creating session in",
+                    self.new_session_composer
+                        .resolved_path()
+                        .unwrap_or_default()
+                        .to_string(),
+                    "Please wait",
+                )
+            } else if let Some(path) = self.new_session_composer.resolved_path() {
+                (
+                    "Use working directory",
+                    path.to_string(),
+                    "Enter create · Esc edit",
+                )
+            } else if self.new_session_composer.resolving_path() {
+                (
+                    "Resolving working directory",
+                    self.new_session_composer
+                        .path_being_resolved()
+                        .unwrap_or_default()
+                        .to_string(),
+                    "Esc back",
+                )
+            } else {
+                (
+                    "New session",
+                    format!(
+                        "{}▎",
+                        self.new_session_composer.prompt().unwrap_or_default()
+                    ),
+                    "Enter choose directory · Esc cancel",
+                )
+            };
+            let mut lines = vec![Line::from(vec![
+                Span::styled(
+                    format!("{label}: "),
+                    Style::default().fg(rgb(120, 210, 255)),
+                ),
+                Span::styled(
+                    value,
+                    Style::default()
+                        .fg(Color::White)
+                        .add_modifier(Modifier::BOLD),
+                ),
+            ])];
+            if let Some(feedback) = self.new_session_composer.feedback() {
+                lines.push(Line::from(Span::styled(
+                    feedback.to_string(),
+                    Style::default().fg(rgb(255, 120, 120)),
+                )));
+            }
+            if footer.height >= 2 {
+                lines.push(Line::from(Span::styled(
+                    help,
+                    Style::default().fg(rgb(120, 120, 130)),
+                )));
+            }
+            frame.render_widget(
+                Paragraph::new(lines)
+                    .block(
+                        Block::default()
+                            .borders(Borders::TOP)
+                            .border_style(Style::default().fg(rgb(186, 139, 255))),
+                    )
+                    .wrap(Wrap { trim: false }),
+                footer,
+            );
+            return;
+        }
+
+        // The directory picker is intentionally the only compact modal. Its
+        // viewport follows the selected row instead of always showing the first
+        // five choices.
+        let width = area.width.saturating_sub(4).min(86).max(8);
+        let height = area.height.saturating_sub(2).min(10).max(3);
+        let modal_area = Rect {
+            x: area.x + area.width.saturating_sub(width) / 2,
+            y: area.y + area.height.saturating_sub(height) / 2,
+            width,
+            height,
+        };
+        if let Some(path) = self.new_session_composer.manual_path() {
+            let (candidates, selected, truncated) = self
+                .new_session_composer
+                .completion_candidates()
+                .expect("manual path is only exposed while editing");
+            let row_capacity = usize::from(modal_area.height.saturating_sub(5)).max(1);
+            let selected_index = selected.unwrap_or(0);
+            let start = selected_index
+                .saturating_sub(row_capacity.saturating_sub(1) / 2)
+                .min(candidates.len().saturating_sub(row_capacity));
+            let end = (start + row_capacity).min(candidates.len());
+            let mut body = vec![Line::from(vec![
+                Span::styled("Type path: ", Style::default().fg(rgb(120, 210, 255))),
+                Span::styled(
+                    format!("{path}▎"),
+                    Style::default()
+                        .fg(Color::White)
+                        .add_modifier(Modifier::BOLD),
+                ),
+            ])];
+            if candidates.is_empty() {
+                body.push(Line::from(Span::styled(
+                    "Loading directory suggestions…",
+                    Style::default().fg(rgb(120, 120, 130)),
+                )));
+            } else {
+                for (index, candidate) in
+                    candidates.iter().enumerate().skip(start).take(end - start)
+                {
+                    body.push(Line::from(vec![
+                        Span::styled(
+                            if Some(index) == selected {
+                                "› "
+                            } else {
+                                "  "
+                            },
+                            Style::default().fg(rgb(255, 193, 7)),
+                        ),
+                        Span::styled(
+                            candidate,
+                            if Some(index) == selected {
+                                Style::default()
+                                    .fg(Color::White)
+                                    .add_modifier(Modifier::BOLD)
+                            } else {
+                                Style::default().fg(rgb(160, 160, 170))
+                            },
+                        ),
+                    ]));
+                }
+            }
+            if truncated {
+                body.push(Line::from(Span::styled(
+                    "More matches available",
+                    Style::default().fg(rgb(120, 120, 130)),
+                )));
+            }
+            if let Some(feedback) = self.new_session_composer.feedback() {
+                body.push(Line::from(Span::styled(
+                    feedback.to_string(),
+                    Style::default().fg(rgb(255, 120, 120)),
+                )));
+            }
+            body.push(Line::from(Span::styled(
+                "↑↓ suggest · Tab complete · Enter validate · Esc back",
+                Style::default().fg(rgb(120, 120, 130)),
+            )));
+            frame.render_widget(Clear, modal_area);
+            frame.render_widget(
+                Paragraph::new(body)
+                    .block(
+                        Block::default()
+                            .title(" New session ")
+                            .borders(Borders::ALL)
+                            .border_type(BorderType::Rounded)
+                            .border_style(Style::default().fg(rgb(186, 139, 255))),
+                    )
+                    .wrap(Wrap { trim: false }),
+                modal_area,
+            );
+            return;
+        }
+
+        let choices = self.new_session_composer.choices();
+        let selected_index = self.new_session_composer.selected_index();
+        let row_capacity = usize::from(modal_area.height.saturating_sub(4)).max(1);
+        let start = selected_index
+            .saturating_sub(row_capacity.saturating_sub(1) / 2)
+            .min(choices.len().saturating_sub(row_capacity));
+        let end = (start + row_capacity).min(choices.len());
+        let mut body = vec![Line::from(Span::styled(
+            format!(
+                "Choose working directory for: {}",
+                self.new_session_composer.prompt().unwrap_or_default()
+            ),
+            Style::default()
+                .fg(rgb(120, 210, 255))
+                .add_modifier(Modifier::BOLD),
+        ))];
+        if start > 0 {
+            body.push(Line::from(Span::styled(
+                "  ↑ more directories",
+                Style::default().fg(rgb(120, 120, 130)),
+            )));
+        }
+        for (index, choice) in choices.iter().enumerate().skip(start).take(end - start) {
+            let selected = index == selected_index;
+            body.push(Line::from(vec![
+                Span::styled(
+                    if selected { "› " } else { "  " },
+                    Style::default().fg(rgb(255, 193, 7)),
+                ),
+                Span::styled(
+                    format!("{}: ", choice.label),
+                    Style::default().fg(rgb(190, 190, 200)),
+                ),
+                Span::styled(
+                    &choice.absolute_path,
+                    if selected {
+                        Style::default()
+                            .fg(Color::White)
+                            .add_modifier(Modifier::BOLD)
+                    } else {
+                        Style::default().fg(rgb(160, 160, 170))
+                    },
+                ),
+            ]));
+        }
+        if end < choices.len() {
+            body.push(Line::from(Span::styled(
+                "  ↓ more directories",
+                Style::default().fg(rgb(120, 120, 130)),
+            )));
+        }
+        if let Some(feedback) = self.new_session_composer.feedback() {
+            body.push(Line::from(Span::styled(
+                feedback.to_string(),
+                Style::default().fg(rgb(255, 120, 120)),
+            )));
+        }
+        body.push(Line::from(Span::styled(
+            "↑↓ select · Enter continue · Esc back",
+            Style::default().fg(rgb(120, 120, 130)),
+        )));
+        frame.render_widget(Clear, modal_area);
+        frame.render_widget(
+            Paragraph::new(body)
+                .block(
+                    Block::default()
+                        .title(" New session ")
+                        .borders(Borders::ALL)
+                        .border_type(BorderType::Rounded)
+                        .border_style(Style::default().fg(rgb(186, 139, 255))),
+                )
+                .wrap(Wrap { trim: false }),
+            modal_area,
+        );
+    }
+
     fn running_spinner_frame() -> usize {
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)

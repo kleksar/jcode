@@ -373,6 +373,64 @@ fn rendered_to_history_message(msg: crate::session::RenderedMessage) -> HistoryM
     }
 }
 
+/// Convert only the rendered transcript tail needed by a session preview.
+///
+/// This deliberately does not use `get_history_and_rendered_images`: preview
+/// frames never carry image data, and the bounded `HistoryMessage` collection
+/// is constructed before the caller serializes a wire event. The underlying
+/// session is borrowed, so looking at a preview cannot mutate its transcript
+/// or attachment/source state.
+pub(super) fn preview_history_messages(
+    session: &crate::session::Session,
+    limit: usize,
+) -> Vec<HistoryMessage> {
+    if limit == 0 {
+        return Vec::new();
+    }
+
+    let mut rendered = crate::session::render_messages(session);
+    for (stored_index, stored) in session.messages.iter().enumerate() {
+        if !stored
+            .content
+            .iter()
+            .any(|block| matches!(block, ContentBlock::Image { .. }))
+        {
+            continue;
+        }
+        if let Some(message) = rendered
+            .iter_mut()
+            .find(|message| message.stored_index == Some(stored_index))
+        {
+            if !message.content.is_empty() {
+                message.content.push('\n');
+            }
+            message.content.push_str("[Image attachment omitted]");
+        } else {
+            rendered.push(crate::session::RenderedMessage {
+                role: match stored.role {
+                    Role::User => "user".to_string(),
+                    Role::Assistant => "assistant".to_string(),
+                },
+                content: "[Image attachment omitted]".to_string(),
+                tool_calls: Vec::new(),
+                tool_data: None,
+                stored_index: Some(stored_index),
+            });
+        }
+    }
+    rendered.sort_by_key(|message| message.stored_index.unwrap_or(usize::MAX));
+
+    rendered
+        .into_iter()
+        .rev()
+        .take(limit)
+        .map(rendered_to_history_message)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect()
+}
+
 fn history_reload_recovery_snapshot(
     session_id: &str,
     was_interrupted: Option<bool>,

@@ -24,11 +24,8 @@ async fn closed_session_rejects_no_reply_context_message() {
         forked: Arc::new(AtomicBool::new(false)),
     });
     let registry = Registry::new(Arc::clone(&provider)).await;
-    let mut session = crate::session::Session::create_with_id(
-        "session_closed_context".to_string(),
-        None,
-        None,
-    );
+    let mut session =
+        crate::session::Session::create_with_id("session_closed_context".to_string(), None, None);
     session.mark_closed();
     let agent = Arc::new(Mutex::new(Agent::new_with_session(
         provider, registry, session, None,
@@ -71,19 +68,16 @@ async fn resume_source_working_dir_does_not_wait_for_busy_agent_lock() {
     )));
     let _busy_agent_lock = agent.lock().await;
 
-    let working_dir = tokio::time::timeout(
-        Duration::from_millis(100),
-        async {
-            resume_source_working_dir(
-                &agent,
-                Some("/workspace/busy-resume-source".to_string()),
-            )
-        },
-    )
+    let working_dir = tokio::time::timeout(Duration::from_millis(100), async {
+        resume_source_working_dir(&agent, Some("/workspace/busy-resume-source".to_string()))
+    })
     .await
     .expect("switching away from a busy session must not wait for its Agent mutex");
 
-    assert_eq!(working_dir.as_deref(), Some("/workspace/busy-resume-source"));
+    assert_eq!(
+        working_dir.as_deref(),
+        Some("/workspace/busy-resume-source")
+    );
 }
 
 #[tokio::test]
@@ -1015,6 +1009,7 @@ fn reload_starting_rejects_new_turn_without_spawning_processing_task() {
                 active_skill: None,
             },
             "session_guard",
+            "test-connection",
             &mut ProcessingState {
                 client_is_processing: &mut client_is_processing,
                 message_id: &mut processing_message_id,
@@ -1025,6 +1020,7 @@ fn reload_starting_rejects_new_turn_without_spawning_processing_task() {
             &client_event_tx,
             &processing_done_tx,
             Vec::new(),
+            &Arc::new(RwLock::new(HashMap::new())),
             &SwarmStatusRefs {
                 members: &swarm_members,
                 swarms_by_id: &swarms_by_id,
@@ -1116,6 +1112,7 @@ async fn client_initiated_turn_fans_out_stream_and_terminal_events_to_live_attac
             active_skill: None,
         },
         session_id,
+        "test-connection",
         &mut ProcessingState {
             client_is_processing: &mut client_is_processing,
             message_id: &mut processing_message_id,
@@ -1126,6 +1123,7 @@ async fn client_initiated_turn_fans_out_stream_and_terminal_events_to_live_attac
         &origin_tx,
         &processing_done_tx,
         Vec::new(),
+        &Arc::new(RwLock::new(HashMap::new())),
         &SwarmStatusRefs {
             members: &swarm_members,
             swarms_by_id: &swarms_by_id,
@@ -1241,6 +1239,7 @@ fn accepted_reload_recovery_continuation_marks_intent_delivered() -> anyhow::Res
                 active_skill: None,
             },
             session_id,
+            "test-connection",
             &mut ProcessingState {
                 client_is_processing: &mut client_is_processing,
                 message_id: &mut processing_message_id,
@@ -1251,6 +1250,7 @@ fn accepted_reload_recovery_continuation_marks_intent_delivered() -> anyhow::Res
             &client_event_tx,
             &processing_done_tx,
             Vec::new(),
+            &Arc::new(RwLock::new(HashMap::new())),
             &SwarmStatusRefs {
                 members: &swarm_members,
                 swarms_by_id: &swarms_by_id,
@@ -1341,6 +1341,7 @@ fn reload_starting_rejects_new_turns_for_multiple_sessions() {
                     active_skill: None,
                 },
                 session_id,
+                "test-connection",
                 &mut ProcessingState {
                     client_is_processing: &mut client_is_processing,
                     message_id: &mut processing_message_id,
@@ -1351,6 +1352,7 @@ fn reload_starting_rejects_new_turns_for_multiple_sessions() {
                 &client_event_tx,
                 &processing_done_tx,
                 Vec::new(),
+                &Arc::new(RwLock::new(HashMap::new())),
                 &SwarmStatusRefs {
                     members: &swarm_members,
                     swarms_by_id: &swarms_by_id,
@@ -1460,6 +1462,28 @@ async fn lightweight_comm_request_skips_full_session_initialization() {
 
     let (client_reader, mut client_writer) = client_stream.into_split();
     let mut client_reader = BufReader::new(client_reader);
+    let ping = Request::Ping { id: 6 };
+    let payload = serde_json::to_string(&ping).expect("serialize Ping") + "\n";
+    client_writer
+        .write_all(payload.as_bytes())
+        .await
+        .expect("write Ping");
+
+    let mut line = String::new();
+    client_reader
+        .read_line(&mut line)
+        .await
+        .expect("read Pong bytes");
+    let pong = decode_request_or_event(&line);
+    assert!(matches!(
+        pong,
+        ServerEvent::Pong {
+            id: 6,
+            session_preview_protocol: Some(1),
+            ..
+        }
+    ));
+
     let request = Request::CommList {
         id: 7,
         session_id: "not-in-swarm".to_string(),
@@ -1468,13 +1492,13 @@ async fn lightweight_comm_request_skips_full_session_initialization() {
     client_writer
         .write_all(payload.as_bytes())
         .await
-        .expect("write request");
+        .expect("write request after Ping");
 
-    let mut line = String::new();
+    line.clear();
     client_reader
         .read_line(&mut line)
         .await
-        .expect("read ack bytes");
+        .expect("read ack bytes after Ping");
     let ack = decode_request_or_event(&line);
     assert!(matches!(ack, ServerEvent::Ack { id: 7 }));
 
