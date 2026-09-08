@@ -65,6 +65,17 @@ fn side_panel_mermaid_measurement_reserves_scrollbar_in_render_profile() {
 }
 
 #[test]
+fn side_panel_content_geometry_matches_the_two_cell_chrome_inset() {
+    let area = Rect::new(10, 5, 40, 20);
+
+    assert_eq!(
+        side_panel_content_area(area),
+        Some(Rect::new(13, 6, 37, 19)),
+        "pre-render geometry must match draw_right_rail_chrome"
+    );
+}
+
+#[test]
 fn clamp_side_panel_image_rows_leaves_room_for_following_content() {
     let rows = clamp_side_panel_image_rows(18, 16, 2, true);
     assert_eq!(rows, 15);

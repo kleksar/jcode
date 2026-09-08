@@ -163,6 +163,19 @@ impl App {
         self.diff_pane_auto_scroll = self.diff_pane_scroll == usize::MAX;
     }
 
+    pub(super) fn reset_focused_document_ui(&mut self) {
+        let Some(page_id) = self.side_panel.focused_page_id.clone() else {
+            return;
+        };
+        self.prepare_worktree_pane_state();
+        self.worktree_pane
+            .document_ui
+            .insert(page_id, Default::default());
+        self.diff_pane_scroll = 0;
+        self.diff_pane_scroll_x = 0;
+        self.diff_pane_auto_scroll = false;
+    }
+
     pub(super) fn cycle_markdown_document_mode(&mut self) -> bool {
         let Some(page_id) = self.side_panel.focused_page_id.clone() else {
             return false;
@@ -534,6 +547,12 @@ impl App {
                 self.set_diff_pane_focus(true);
                 return true;
             }
+        }
+        if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left))
+            && mouse.row == layout.area.y
+        {
+            // Header padding and the left rail chrome are not body controls.
+            return false;
         }
         if layout.files_tab_active {
             if let Some(tree_area) = layout.tree_area

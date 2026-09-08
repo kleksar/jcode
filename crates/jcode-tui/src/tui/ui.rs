@@ -3026,7 +3026,9 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
             base_ratio
         };
         let min_diff_width = if documents_tab_active {
-            64
+            // Documents are useful in compact terminals. This leaves enough
+            // width for the full tab and mode header after right-rail chrome.
+            44
         } else if has_worktree_surface {
             42
         } else {

@@ -667,8 +667,15 @@ impl App {
 
     pub(super) fn apply_side_panel_snapshot(
         &mut self,
-        snapshot: crate::side_panel::SidePanelSnapshot,
+        mut snapshot: crate::side_panel::SidePanelSnapshot,
     ) {
+        if snapshot
+            .focused_page_id
+            .as_deref()
+            .is_some_and(|focused| !snapshot.pages.iter().any(|page| page.id == focused))
+        {
+            snapshot.focused_page_id = snapshot.pages.first().map(|page| page.id.clone());
+        }
         let session_changed = !self.worktree_pane_matches_session();
         if session_changed {
             self.prepare_worktree_pane_state();
@@ -704,6 +711,11 @@ impl App {
         }
         if self.side_panel.pages.is_empty() {
             self.worktree_pane.document_ui.clear();
+            if session_changed
+                && self.worktree_pane.tab == super::worktree_pane::WorktreePaneTab::Documents
+            {
+                self.worktree_pane.tab = super::worktree_pane::WorktreePaneTab::Files;
+            }
         } else if focused_changed {
             self.prepare_worktree_pane_state();
             if focused_is_new && let Some(id) = focused_after.as_deref() {

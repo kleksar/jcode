@@ -36,6 +36,14 @@ fn side_panel_inner(area: Rect) -> Rect {
 
 fn side_panel_content_area(area: Rect) -> Option<Rect> {
     let inner = side_panel_inner(area);
+    // Keep pre-render, cache, image-profile, and copy geometry identical to
+    // `draw_right_rail_chrome`, which adds a two-cell inset after the border.
+    let inset = 2.min(inner.width);
+    let inner = Rect {
+        x: inner.x.saturating_add(inset),
+        width: inner.width.saturating_sub(inset),
+        ..inner
+    };
     if inner.width == 0 || inner.height <= SIDE_PANEL_HEADER_HEIGHT {
         return None;
     }

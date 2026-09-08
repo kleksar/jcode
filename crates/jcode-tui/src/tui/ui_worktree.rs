@@ -1113,46 +1113,54 @@ pub(super) fn project_pane_title(
 }
 
 fn project_pane_tab_areas(area: Rect) -> (Rect, Rect, Rect, Rect, Rect, Rect, Rect, Rect) {
-    // `draw_right_rail_chrome` reserves a two-cell left inset for the border.
-    let header_x = area.x.saturating_add(2);
-    let diff = Rect::new(header_x, area.y, DIFF_TAB_LABEL.len() as u16, 1);
-    let files = Rect::new(
+    // `draw_right_rail_chrome` uses the left border plus a two-cell content
+    // inset. Hit areas must begin at the first rendered header cell.
+    let header_x = area.x.saturating_add(3);
+    let header = Rect::new(header_x, area.y, area.right().saturating_sub(header_x), 1);
+    let clip = |rect: Rect| rect.intersection(header);
+    let diff = clip(Rect::new(header_x, area.y, DIFF_TAB_LABEL.len() as u16, 1));
+    let files = clip(Rect::new(
         diff.right().saturating_add(1),
         area.y,
         FILES_TAB_LABEL.len() as u16,
         1,
-    );
-    let documents = Rect::new(
+    ));
+    let documents = clip(Rect::new(
         files.right().saturating_add(1),
         area.y,
         DOCUMENTS_TAB_LABEL.len() as u16,
         1,
-    );
-    let previous = Rect::new(
+    ));
+    let previous = clip(Rect::new(
         documents.right().saturating_add(2),
         area.y,
         DOCUMENT_PREVIOUS_PAGE_LABEL.len() as u16,
         1,
-    );
-    let read = Rect::new(
+    ));
+    let read = clip(Rect::new(
         previous.right(),
         area.y,
         DOCUMENT_READ_LABEL.len() as u16,
         1,
-    );
-    let source = Rect::new(read.right(), area.y, DOCUMENT_SOURCE_LABEL.len() as u16, 1);
-    let changes = Rect::new(
+    ));
+    let source = clip(Rect::new(
+        read.right(),
+        area.y,
+        DOCUMENT_SOURCE_LABEL.len() as u16,
+        1,
+    ));
+    let changes = clip(Rect::new(
         source.right(),
         area.y,
         DOCUMENT_CHANGES_LABEL.len() as u16,
         1,
-    );
-    let next = Rect::new(
+    ));
+    let next = clip(Rect::new(
         changes.right(),
         area.y,
         DOCUMENT_NEXT_PAGE_LABEL.len() as u16,
         1,
-    );
+    ));
     (
         diff, files, documents, previous, read, source, changes, next,
     )

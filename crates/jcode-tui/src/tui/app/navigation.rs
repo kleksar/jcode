@@ -344,6 +344,11 @@ impl App {
         snapshot.focused_page_id = Some(id);
         self.side_panel_user_hidden = false;
         self.apply_side_panel_snapshot(snapshot);
+        // This is an explicit Files activation, not a passive snapshot refresh.
+        // Reopening an already-focused page must return to Documents and start
+        // in its normal Read state.
+        self.reset_focused_document_ui();
+        self.set_worktree_pane_tab(super::worktree_pane::WorktreePaneTab::Documents);
         self.set_diff_pane_focus(true);
         self.set_status_notice(format!("Opened Markdown: {}", title));
         true
