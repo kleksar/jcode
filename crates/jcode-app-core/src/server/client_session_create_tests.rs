@@ -5,9 +5,10 @@ use crate::message::{Message, StreamEvent, ToolDefinition};
 use crate::protocol::Request;
 use crate::provider::{EventStream, Provider};
 use crate::recent_session_index::RecentSessionMetadata;
+use crate::server::SwarmMember;
 use async_trait::async_trait;
 use futures::stream;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -66,6 +67,8 @@ struct BusySocketOracleProvider {
     release_a: Arc<Notify>,
     a_finished: Arc<AtomicBool>,
     a_finished_notify: Arc<Notify>,
+    a_terminated: Arc<AtomicBool>,
+    a_terminated_notify: Arc<Notify>,
 }
 
 impl BusySocketOracleProvider {
@@ -76,6 +79,8 @@ impl BusySocketOracleProvider {
             release_a: Arc::new(Notify::new()),
             a_finished: Arc::new(AtomicBool::new(false)),
             a_finished_notify: Arc::new(Notify::new()),
+            a_terminated: Arc::new(AtomicBool::new(false)),
+            a_terminated_notify: Arc::new(Notify::new()),
         }
     }
 }
@@ -112,6 +117,8 @@ impl Provider for BusySocketOracleProvider {
         let release = Arc::clone(&self.release_a);
         let finished = Arc::clone(&self.a_finished);
         let finished_notify = Arc::clone(&self.a_finished_notify);
+        let terminated = Arc::clone(&self.a_terminated);
+        let terminated_notify = Arc::clone(&self.a_terminated_notify);
         tokio::spawn(async move {
             if tx
                 .send(Ok(StreamEvent::TextDelta(
@@ -120,6 +127,8 @@ impl Provider for BusySocketOracleProvider {
                 .await
                 .is_err()
             {
+                terminated.store(true, Ordering::SeqCst);
+                terminated_notify.notify_one();
                 return;
             }
             initial_sent.store(true, Ordering::SeqCst);
@@ -132,6 +141,8 @@ impl Provider for BusySocketOracleProvider {
                 .await
                 .is_err()
             {
+                terminated.store(true, Ordering::SeqCst);
+                terminated_notify.notify_one();
                 return;
             }
             if tx
@@ -143,6 +154,8 @@ impl Provider for BusySocketOracleProvider {
             }
             finished.store(true, Ordering::SeqCst);
             finished_notify.notify_one();
+            terminated.store(true, Ordering::SeqCst);
+            terminated_notify.notify_one();
         });
         Ok(Box::pin(tokio_stream::wrappers::ReceiverStream::new(rx)))
     }
@@ -154,6 +167,11 @@ impl Provider for BusySocketOracleProvider {
     fn fork(&self) -> Arc<dyn Provider> {
         Arc::new(self.clone())
     }
+}
+
+struct CleanSessionClientState {
+    swarm_members: Arc<RwLock<HashMap<String, SwarmMember>>>,
+    swarms_by_id: Arc<RwLock<HashMap<String, HashSet<String>>>>,
 }
 
 /// Isolate persisted-session tests because `Session::load` uses process-wide
@@ -191,6 +209,7 @@ async fn start_clean_session_client(
 ) -> (
     crate::transport::Stream,
     tokio::task::JoinHandle<anyhow::Result<()>>,
+    CleanSessionClientState,
 ) {
     let (server_stream, client_stream) = crate::transport::Stream::pair().expect("socket pair");
     let global_session_id = Arc::new(RwLock::new(String::new()));
@@ -223,8 +242,8 @@ async fn start_clean_session_client(
         global_session_id,
         client_count,
         client_connections,
-        swarm_members,
-        swarms_by_id,
+        Arc::clone(&swarm_members),
+        Arc::clone(&swarms_by_id),
         shared_context,
         swarm_plans,
         swarm_coordinators,
@@ -244,7 +263,14 @@ async fn start_clean_session_client(
         AwaitMembersRuntime::default(),
         SwarmMutationRuntime::default(),
     ));
-    (client_stream, task)
+    (
+        client_stream,
+        task,
+        CleanSessionClientState {
+            swarm_members,
+            swarms_by_id,
+        },
+    )
 }
 
 async fn send_request<W: tokio::io::AsyncWrite + Unpin>(writer: &mut W, request: &Request) {
@@ -367,7 +393,7 @@ async fn clean_session_creation_does_not_wait_for_busy_source() {
         .insert(source_id.clone(), Arc::clone(&source));
     let busy_source = source.lock().await;
 
-    let (client_stream, server_task) =
+    let (client_stream, server_task, _state) =
         start_clean_session_client(Arc::clone(&provider), Arc::clone(&sessions)).await;
     let (client_reader, mut client_writer) = client_stream.into_split();
     let mut client_reader = BufReader::new(client_reader);
@@ -440,7 +466,7 @@ async fn clean_session_first_message_is_persisted_once_and_starts_one_turn() {
         .await
         .insert(source_id.clone(), Arc::clone(&source));
 
-    let (client_stream, server_task) =
+    let (client_stream, server_task, _state) =
         start_clean_session_client(Arc::clone(&provider), Arc::clone(&sessions)).await;
     let (client_reader, mut client_writer) = client_stream.into_split();
     let mut client_reader = BufReader::new(client_reader);
@@ -556,7 +582,7 @@ async fn resuming_a_new_clean_session_retains_the_prior_established_session() {
         count_completions: Arc::clone(&count_completions),
     });
     let (sessions, _, _) = clean_session_state();
-    let (client_stream, server_task) =
+    let (client_stream, server_task, _state) =
         start_clean_session_client(Arc::clone(&provider), Arc::clone(&sessions)).await;
     let (client_reader, mut client_writer) = client_stream.into_split();
     let mut client_reader = BufReader::new(client_reader);
@@ -770,7 +796,7 @@ async fn busy_streaming_a_resume_b_does_not_leak_and_resume_a_retains_history() 
     let working_dir_b = tempfile::tempdir().expect("working directory B");
     let provider = Arc::new(BusySocketOracleProvider::new());
     let (sessions, _, _) = clean_session_state();
-    let (client_stream, server_task) =
+    let (client_stream, server_task, _state) =
         start_clean_session_client(provider.clone(), Arc::clone(&sessions)).await;
     let (client_reader, mut client_writer) = client_stream.into_split();
     let mut client_reader = BufReader::new(client_reader);
@@ -1020,6 +1046,269 @@ async fn busy_streaming_a_resume_b_does_not_leak_and_resume_a_retains_history() 
         !messages
             .iter()
             .any(|message| message.content.contains(prompt_b))
+    );
+
+    drop(client_writer);
+    server_task
+        .await
+        .expect("server task join")
+        .expect("server task result");
+}
+
+#[tokio::test]
+async fn authorized_stop_busy_a_then_resume_b_does_not_leak_a_stream() {
+    let _storage = crate::storage::lock_test_env();
+    let _home = IsolatedSessionHome::new();
+    let working_dir_a = tempfile::tempdir().expect("working directory A");
+    let working_dir_b = tempfile::tempdir().expect("working directory B");
+    let provider = Arc::new(BusySocketOracleProvider::new());
+    let (sessions, _, _) = clean_session_state();
+    let (client_stream, server_task, state) =
+        start_clean_session_client(provider.clone(), Arc::clone(&sessions)).await;
+    let (client_reader, mut client_writer) = client_stream.into_split();
+    let mut client_reader = BufReader::new(client_reader);
+
+    send_request(
+        &mut client_writer,
+        &subscribe_request(1, working_dir_a.path().to_string_lossy().into_owned()),
+    )
+    .await;
+    send_request(
+        &mut client_writer,
+        &Request::CreateSession {
+            id: 2,
+            working_dir: working_dir_a.path().to_string_lossy().into_owned(),
+            runtime: empty_runtime(),
+        },
+    )
+    .await;
+    let ServerEvent::SessionCreated {
+        session_id: session_a,
+        ..
+    } = recv_until(&mut client_reader, |event| {
+        matches!(event, ServerEvent::SessionCreated { id: 2, .. })
+    })
+    .await
+    else {
+        unreachable!()
+    };
+
+    send_request(
+        &mut client_writer,
+        &Request::CreateSession {
+            id: 3,
+            working_dir: working_dir_b.path().to_string_lossy().into_owned(),
+            runtime: empty_runtime(),
+        },
+    )
+    .await;
+    let ServerEvent::SessionCreated {
+        session_id: session_b,
+        ..
+    } = recv_until(&mut client_reader, |event| {
+        matches!(event, ServerEvent::SessionCreated { id: 3, .. })
+    })
+    .await
+    else {
+        unreachable!()
+    };
+
+    // Model the real coordinator/child ownership relation, but invoke the
+    // production CommStop request below rather than removing A in the fixture.
+    let swarm_id = "stop-switch-oracle-swarm".to_string();
+    let (coord_tx, _coord_rx) = mpsc::unbounded_channel();
+    let (a_tx, _a_rx) = mpsc::unbounded_channel();
+    let now = std::time::Instant::now();
+    let member = |session_id: String,
+                  event_tx: mpsc::UnboundedSender<ServerEvent>,
+                  owner: Option<String>,
+                  role: &str|
+     -> SwarmMember {
+        SwarmMember {
+            session_id,
+            event_tx,
+            event_txs: HashMap::new(),
+            working_dir: None,
+            swarm_id: Some(swarm_id.clone()),
+            swarm_enabled: true,
+            status: "working".to_string(),
+            detail: None,
+            friendly_name: None,
+            report_back_to_session_id: owner,
+            latest_completion_report: None,
+            role: role.to_string(),
+            joined_at: now,
+            last_status_change: now,
+            is_headless: false,
+            output_tail: None,
+            todo_progress: None,
+            todo_items: Vec::new(),
+            runtime: crate::protocol::SwarmMemberRuntime::default(),
+            task_label: None,
+        }
+    };
+    state.swarm_members.write().await.extend([
+        (
+            "stop-coordinator".to_string(),
+            member(
+                "stop-coordinator".to_string(),
+                coord_tx,
+                None,
+                "coordinator",
+            ),
+        ),
+        (
+            session_a.clone(),
+            member(
+                session_a.clone(),
+                a_tx,
+                Some("stop-coordinator".to_string()),
+                "agent",
+            ),
+        ),
+    ]);
+    state.swarms_by_id.write().await.insert(
+        swarm_id,
+        HashSet::from(["stop-coordinator".to_string(), session_a.clone()]),
+    );
+
+    send_request(
+        &mut client_writer,
+        &Request::ResumeSession {
+            id: 4,
+            session_id: session_b.clone(),
+            client_instance_id: None,
+            client_has_local_history: false,
+            allow_session_takeover: false,
+        },
+    )
+    .await;
+    recv_until(&mut client_reader, |event| {
+        matches!(event, ServerEvent::Done { id: 4 })
+    })
+    .await;
+    let prompt_b = "STOP_SWITCH_ORACLE_B_CONTEXT";
+    send_request(
+        &mut client_writer,
+        &Request::Message {
+            id: 5,
+            content: prompt_b.to_string(),
+            images: Vec::new(),
+            system_reminder: None,
+            active_skill: None,
+            no_reply: true,
+        },
+    )
+    .await;
+
+    send_request(
+        &mut client_writer,
+        &Request::ResumeSession {
+            id: 6,
+            session_id: session_a.clone(),
+            client_instance_id: None,
+            client_has_local_history: false,
+            allow_session_takeover: false,
+        },
+    )
+    .await;
+    recv_until(&mut client_reader, |event| {
+        matches!(event, ServerEvent::Done { id: 6 })
+    })
+    .await;
+    send_request(
+        &mut client_writer,
+        &Request::Message {
+            id: 7,
+            content: BUSY_SOCKET_ORACLE_PROMPT.to_string(),
+            images: Vec::new(),
+            system_reminder: None,
+            active_skill: None,
+            no_reply: false,
+        },
+    )
+    .await;
+    recv_until(&mut client_reader, |event| {
+        matches!(event, ServerEvent::TextDelta { text } if text == BUSY_SOCKET_ORACLE_INITIAL)
+    })
+    .await;
+
+    send_request(
+        &mut client_writer,
+        &Request::CommStop {
+            id: 8,
+            session_id: "stop-coordinator".to_string(),
+            target_session: session_a.clone(),
+            force: Some(false),
+        },
+    )
+    .await;
+    recv_until(&mut client_reader, |event| {
+        matches!(event, ServerEvent::Done { id: 8 })
+    })
+    .await;
+    assert!(!sessions.read().await.contains_key(&session_a));
+    assert!(!state.swarm_members.read().await.contains_key(&session_a));
+
+    provider.release_a.notify_one();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if provider.a_terminated.load(Ordering::SeqCst) {
+                break;
+            }
+            provider.a_terminated_notify.notified().await;
+        }
+    })
+    .await
+    .expect("stopped A provider stream must positively terminate");
+
+    send_request(
+        &mut client_writer,
+        &Request::ResumeSession {
+            id: 9,
+            session_id: session_b.clone(),
+            client_instance_id: None,
+            client_has_local_history: false,
+            allow_session_takeover: false,
+        },
+    )
+    .await;
+    recv_until(&mut client_reader, |event| {
+        matches!(event, ServerEvent::Done { id: 9 })
+    })
+    .await;
+    let stale_frame =
+        tokio::time::timeout(Duration::from_millis(500), recv_event(&mut client_reader)).await;
+    if let Ok(event) = stale_frame {
+        panic!("stopped A stream or terminal frame leaked after B Resume completed: {event:?}");
+    }
+    send_request(&mut client_writer, &Request::GetHistory { id: 10 }).await;
+    let ServerEvent::History {
+        session_id,
+        messages,
+        ..
+    } = recv_until(&mut client_reader, |event| {
+        matches!(event, ServerEvent::History { id: 10, .. })
+    })
+    .await
+    else {
+        unreachable!()
+    };
+    assert_eq!(session_id, session_b);
+    assert!(
+        messages
+            .iter()
+            .any(|message| message.content.contains(prompt_b))
+    );
+    assert!(
+        !messages
+            .iter()
+            .any(|message| message.content.contains(BUSY_SOCKET_ORACLE_INITIAL))
+    );
+    assert!(
+        !messages
+            .iter()
+            .any(|message| message.content.contains(BUSY_SOCKET_ORACLE_RESPONSE))
     );
 
     drop(client_writer);
