@@ -702,6 +702,68 @@ fn test_documents_join_worktree_tabs_and_cycle_without_duplicate_pages() {
 }
 
 #[test]
+fn test_documents_mouse_header_controls_select_modes_and_pages() {
+    let _lock = scroll_render_test_lock();
+    let repo = init_worktree_pane_test_repo();
+    let mut app = create_test_app();
+    app.session.working_dir = Some(repo.path().to_string_lossy().into_owned());
+    app.apply_side_panel_snapshot(document_snapshot(
+        "one",
+        &[("one", "One", "# one"), ("two", "Two", "# two")],
+    ));
+    let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(140, 30)).unwrap();
+    render_and_snap(&app, &mut terminal);
+    let layout = crate::tui::ui::worktree_pane_layout().expect("documents layout");
+
+    for (area, expected) in [
+        (
+            layout.document_source_area,
+            super::worktree_pane::MarkdownDocumentMode::Source,
+        ),
+        (
+            layout.document_changes_area,
+            super::worktree_pane::MarkdownDocumentMode::Changes,
+        ),
+        (
+            layout.document_read_area,
+            super::worktree_pane::MarkdownDocumentMode::Read,
+        ),
+    ] {
+        assert!(app.handle_worktree_pane_mouse(worktree_test_mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            area.x + 1,
+            area.y,
+        )));
+        assert_eq!(app.focused_markdown_document_mode(), expected);
+    }
+    assert!(app.handle_worktree_pane_mouse(worktree_test_mouse(
+        MouseEventKind::Down(MouseButton::Left),
+        layout.document_next_page_area.x + 1,
+        layout.document_next_page_area.y,
+    )));
+    assert_eq!(app.side_panel.focused_page_id.as_deref(), Some("two"));
+    assert!(app.handle_worktree_pane_mouse(worktree_test_mouse(
+        MouseEventKind::Down(MouseButton::Left),
+        layout.document_previous_page_area.x + 1,
+        layout.document_previous_page_area.y,
+    )));
+    assert_eq!(app.side_panel.focused_page_id.as_deref(), Some("one"));
+}
+
+#[test]
+fn test_documents_keep_tabs_and_controls_on_narrow_terminal() {
+    let _lock = scroll_render_test_lock();
+    let mut app = create_test_app();
+    app.apply_side_panel_snapshot(document_snapshot("one", &[("one", "One", "# one")]));
+    let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(90, 24)).unwrap();
+    let text = render_and_snap(&app, &mut terminal);
+    let layout = crate::tui::ui::worktree_pane_layout().expect("narrow documents layout");
+    assert!(text.contains("Diff") && text.contains("Files") && text.contains("Documents"));
+    assert!(text.contains("Read") && text.contains("Source") && text.contains("Changes"));
+    assert!(layout.document_next_page_area.width > 0);
+}
+
+#[test]
 fn test_document_mode_and_scroll_are_per_page_and_survive_passive_refresh() {
     let mut app = create_test_app();
     let first = document_snapshot("one", &[("one", "One", "one\n"), ("two", "Two", "two\n")]);
@@ -721,7 +783,7 @@ fn test_document_mode_and_scroll_are_per_page_and_survive_passive_refresh() {
         super::worktree_pane::MarkdownDocumentMode::Source
     );
     assert!(app.handle_diff_pane_focus_key(KeyCode::Char('['), KeyModifiers::NONE));
-    assert_eq!(app.diff_pane_scroll, 12);
+    assert_eq!(app.diff_pane_scroll, 0);
     assert_eq!(
         app.markdown_document_mode("one"),
         super::worktree_pane::MarkdownDocumentMode::Source
@@ -735,11 +797,51 @@ fn test_document_mode_and_scroll_are_per_page_and_survive_passive_refresh() {
     );
     assert_eq!(app.diff_pane_scroll, 0);
     app.set_worktree_pane_tab(super::worktree_pane::WorktreePaneTab::Documents);
-    assert_eq!(app.diff_pane_scroll, 12);
+    assert_eq!(app.diff_pane_scroll, 0);
     assert_eq!(
         app.markdown_document_mode("one"),
         super::worktree_pane::MarkdownDocumentMode::Source
     );
+}
+
+#[test]
+fn test_document_scroll_is_independent_for_each_mode() {
+    let mut app = create_test_app();
+    let content = "one\n".repeat(80);
+    app.apply_side_panel_snapshot(document_snapshot("one", &[("one", "One", &content)]));
+    app.set_diff_pane_focus(true);
+
+    app.diff_pane_scroll = 12;
+    assert!(app.handle_diff_pane_focus_key(KeyCode::Char('m'), KeyModifiers::NONE));
+    assert_eq!(app.diff_pane_scroll, 0, "unseen Source starts at the top");
+
+    app.diff_pane_scroll = 34;
+    assert!(app.handle_diff_pane_focus_key(KeyCode::Char('m'), KeyModifiers::NONE));
+    assert_eq!(app.diff_pane_scroll, 0, "unseen Changes starts at the top");
+
+    app.diff_pane_scroll = 56;
+    assert!(app.handle_diff_pane_focus_key(KeyCode::Char('m'), KeyModifiers::NONE));
+    assert_eq!(app.diff_pane_scroll, 12, "Read scroll is restored");
+    assert!(app.handle_diff_pane_focus_key(KeyCode::Char('m'), KeyModifiers::NONE));
+    assert_eq!(app.diff_pane_scroll, 34, "Source scroll is restored");
+    assert!(app.handle_diff_pane_focus_key(KeyCode::Char('m'), KeyModifiers::NONE));
+    assert_eq!(app.diff_pane_scroll, 56, "Changes scroll is restored");
+}
+
+#[test]
+fn test_document_scroll_survives_refresh_but_not_a_new_session() {
+    let mut app = create_test_app();
+    let snapshot = document_snapshot("one", &[("one", "One", "one")]);
+    app.apply_side_panel_snapshot(snapshot.clone());
+    app.diff_pane_scroll = 23;
+    app.save_focused_document_ui();
+    app.apply_side_panel_snapshot(snapshot.clone());
+    assert_eq!(app.diff_pane_scroll, 23, "passive refresh preserves scroll");
+
+    app.session.id = "new-session".into();
+    app.apply_side_panel_snapshot(snapshot);
+    assert_eq!(app.diff_pane_scroll, 0, "new sessions start at the top");
+    assert!(app.worktree_pane.document_ui.is_empty());
 }
 
 #[test]

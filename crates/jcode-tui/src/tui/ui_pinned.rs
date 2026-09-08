@@ -1364,15 +1364,29 @@ pub(super) fn draw_side_panel_markdown(
         let title = super::worktree_ui::project_pane_title(
             crate::tui::app::worktree_pane::WorktreePaneTab::Documents,
             vec![
-                Span::styled(" Read ", Style::default().fg(dim_color())),
                 Span::styled(
-                    " Source ",
+                    super::worktree_ui::DOCUMENT_PREVIOUS_PAGE_LABEL,
+                    Style::default().fg(dim_color()),
+                ),
+                Span::styled(
+                    super::worktree_ui::DOCUMENT_READ_LABEL,
+                    Style::default().fg(dim_color()),
+                ),
+                Span::styled(
+                    super::worktree_ui::DOCUMENT_SOURCE_LABEL,
                     Style::default()
                         .fg(rgb(235, 235, 245))
                         .bg(rgb(55, 55, 68))
                         .add_modifier(ratatui::style::Modifier::BOLD),
                 ),
-                Span::styled(" Changes ", Style::default().fg(dim_color())),
+                Span::styled(
+                    super::worktree_ui::DOCUMENT_CHANGES_LABEL,
+                    Style::default().fg(dim_color()),
+                ),
+                Span::styled(
+                    super::worktree_ui::DOCUMENT_NEXT_PAGE_LABEL,
+                    Style::default().fg(dim_color()),
+                ),
                 Span::styled(
                     format!(" {} {}/{} ", page.title, page_index, page_count),
                     Style::default().fg(tool_color()),
@@ -1422,7 +1436,11 @@ pub(super) fn draw_side_panel_markdown(
             crate::tui::app::worktree_pane::WorktreePaneTab::Documents,
             vec![
                 Span::styled(
-                    " Read ",
+                    super::worktree_ui::DOCUMENT_PREVIOUS_PAGE_LABEL,
+                    Style::default().fg(dim_color()),
+                ),
+                Span::styled(
+                    super::worktree_ui::DOCUMENT_READ_LABEL,
                     if document_mode == crate::tui::app::worktree_pane::MarkdownDocumentMode::Read {
                         Style::default()
                             .fg(rgb(235, 235, 245))
@@ -1432,8 +1450,35 @@ pub(super) fn draw_side_panel_markdown(
                         Style::default().fg(dim_color())
                     },
                 ),
-                Span::styled(" Source ", Style::default().fg(dim_color())),
-                Span::styled(" Changes ", Style::default().fg(dim_color())),
+                Span::styled(
+                    super::worktree_ui::DOCUMENT_SOURCE_LABEL,
+                    if document_mode == crate::tui::app::worktree_pane::MarkdownDocumentMode::Source
+                    {
+                        Style::default()
+                            .fg(rgb(235, 235, 245))
+                            .bg(rgb(55, 55, 68))
+                            .add_modifier(ratatui::style::Modifier::BOLD)
+                    } else {
+                        Style::default().fg(dim_color())
+                    },
+                ),
+                Span::styled(
+                    super::worktree_ui::DOCUMENT_CHANGES_LABEL,
+                    if document_mode
+                        == crate::tui::app::worktree_pane::MarkdownDocumentMode::Changes
+                    {
+                        Style::default()
+                            .fg(rgb(235, 235, 245))
+                            .bg(rgb(55, 55, 68))
+                            .add_modifier(ratatui::style::Modifier::BOLD)
+                    } else {
+                        Style::default().fg(dim_color())
+                    },
+                ),
+                Span::styled(
+                    super::worktree_ui::DOCUMENT_NEXT_PAGE_LABEL,
+                    Style::default().fg(dim_color()),
+                ),
             ],
         )
         .spans
@@ -1464,7 +1509,7 @@ pub(super) fn draw_side_panel_markdown(
         ));
         if page_count > 1 {
             title_parts.push(Span::styled(
-                " Tab/Shift-Tab pages ",
+                " top tabs, [/] pages ",
                 Style::default().fg(dim_color()),
             ));
         }

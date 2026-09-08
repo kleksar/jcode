@@ -669,6 +669,13 @@ impl App {
         &mut self,
         snapshot: crate::side_panel::SidePanelSnapshot,
     ) {
+        let session_changed = !self.worktree_pane_matches_session();
+        if session_changed {
+            self.prepare_worktree_pane_state();
+            self.diff_pane_scroll = 0;
+            self.diff_pane_scroll_x = 0;
+            self.diff_pane_auto_scroll = false;
+        }
         let focused_before = self.side_panel.focused_page_id.clone();
         let focused_after = snapshot.focused_page_id.clone();
         let focused_changed = focused_before != focused_after;

@@ -19,6 +19,14 @@ pub(crate) enum MarkdownDocumentMode {
 }
 
 impl MarkdownDocumentMode {
+    const fn index(self) -> usize {
+        match self {
+            Self::Read => 0,
+            Self::Source => 1,
+            Self::Changes => 2,
+        }
+    }
+
     fn next(self) -> Self {
         match self {
             Self::Read => Self::Source,
@@ -31,7 +39,17 @@ impl MarkdownDocumentMode {
 #[derive(Clone, Copy, Debug, Default)]
 pub(super) struct MarkdownDocumentUiState {
     pub(super) mode: MarkdownDocumentMode,
-    pub(super) scroll: usize,
+    scrolls: [usize; 3],
+}
+
+impl MarkdownDocumentUiState {
+    fn scroll(&self) -> usize {
+        self.scrolls[self.mode.index()]
+    }
+
+    fn save_scroll(&mut self, scroll: usize) {
+        self.scrolls[self.mode.index()] = scroll;
+    }
 }
 
 pub(super) struct WorktreePaneState {
@@ -131,7 +149,7 @@ impl App {
                 .document_ui
                 .entry(page_id)
                 .or_default()
-                .scroll = self.diff_pane_scroll;
+                .save_scroll(self.diff_pane_scroll);
         }
     }
 
@@ -141,8 +159,8 @@ impl App {
         };
         self.prepare_worktree_pane_state();
         let state = *self.worktree_pane.document_ui.entry(page_id).or_default();
-        self.diff_pane_scroll = state.scroll;
-        self.diff_pane_auto_scroll = state.scroll == usize::MAX;
+        self.diff_pane_scroll = state.scroll();
+        self.diff_pane_auto_scroll = self.diff_pane_scroll == usize::MAX;
     }
 
     pub(super) fn cycle_markdown_document_mode(&mut self) -> bool {
@@ -151,8 +169,23 @@ impl App {
         };
         self.prepare_worktree_pane_state();
         let state = self.worktree_pane.document_ui.entry(page_id).or_default();
-        state.scroll = self.diff_pane_scroll;
+        state.save_scroll(self.diff_pane_scroll);
         state.mode = state.mode.next();
+        self.diff_pane_scroll = state.scroll();
+        self.diff_pane_auto_scroll = self.diff_pane_scroll == usize::MAX;
+        true
+    }
+
+    fn set_markdown_document_mode(&mut self, mode: MarkdownDocumentMode) -> bool {
+        let Some(page_id) = self.side_panel.focused_page_id.clone() else {
+            return false;
+        };
+        self.prepare_worktree_pane_state();
+        let state = self.worktree_pane.document_ui.entry(page_id).or_default();
+        state.save_scroll(self.diff_pane_scroll);
+        state.mode = mode;
+        self.diff_pane_scroll = state.scroll();
+        self.diff_pane_auto_scroll = self.diff_pane_scroll == usize::MAX;
         true
     }
 
@@ -461,6 +494,38 @@ impl App {
                 layout.files_tab_area,
             ) {
                 self.set_worktree_pane_tab(WorktreePaneTab::Files);
+                self.set_diff_pane_focus(true);
+                return true;
+            }
+            if let Some(mode) = [
+                (layout.document_read_area, MarkdownDocumentMode::Read),
+                (layout.document_source_area, MarkdownDocumentMode::Source),
+                (layout.document_changes_area, MarkdownDocumentMode::Changes),
+            ]
+            .into_iter()
+            .find_map(|(area, mode)| {
+                crate::tui::layout_utils::point_in_rect(mouse.column, mouse.row, area)
+                    .then_some(mode)
+            }) {
+                self.set_markdown_document_mode(mode);
+                self.set_diff_pane_focus(true);
+                return true;
+            }
+            if crate::tui::layout_utils::point_in_rect(
+                mouse.column,
+                mouse.row,
+                layout.document_previous_page_area,
+            ) {
+                self.focus_adjacent_document_page(-1);
+                self.set_diff_pane_focus(true);
+                return true;
+            }
+            if crate::tui::layout_utils::point_in_rect(
+                mouse.column,
+                mouse.row,
+                layout.document_next_page_area,
+            ) {
+                self.focus_adjacent_document_page(1);
                 self.set_diff_pane_focus(true);
                 return true;
             }

@@ -2868,7 +2868,8 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
     };
     let has_worktree_changes = worktree_changes.is_some();
     let explicit_worktree_pane = !swarm_page_active
-        && area.width >= AUTO_WORKTREE_PANE_MIN_WIDTH
+        && (area.width >= AUTO_WORKTREE_PANE_MIN_WIDTH
+            || (has_side_panel_content && app.worktree_documents_available()))
         && !has_pinned_content
         && !has_file_diff_edits
         && !app.is_replay()
@@ -2998,7 +2999,13 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
 
     let (chat_area, diff_pane_area) = if needs_side_pane {
         const MIN_DIFF_WIDTH: u16 = 30;
-        let min_chat_width: u16 = if has_worktree_surface { 56 } else { 20 };
+        let min_chat_width: u16 = if documents_tab_active {
+            20
+        } else if has_worktree_surface {
+            56
+        } else {
+            20
+        };
         // Pinned images live in a tall narrow column, so a wide image fits to
         // the pane width and ends up small with empty space below it. When the
         // pane is showing image content (and the user has not manually resized
@@ -3013,7 +3020,9 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
         } else {
             base_ratio
         };
-        let min_diff_width = if has_worktree_surface {
+        let min_diff_width = if documents_tab_active {
+            64
+        } else if has_worktree_surface {
             42
         } else {
             MIN_DIFF_WIDTH
