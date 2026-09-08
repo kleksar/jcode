@@ -58,6 +58,201 @@ include!("tests/command_suggestions_cache.rs");
 include!("tests/skill_invocation_multi_word.rs");
 include!("tests/prompt_history_cross_session.rs");
 include!("tests/ssh_remote.rs");
+
+fn kv_cache_test_baseline(
+    provider: &str,
+    model: &str,
+    completed_at: Instant,
+    signature: Option<KvCacheRequestSignature>,
+) -> KvCacheBaseline {
+    KvCacheBaseline {
+        session_id: Some("test-session".to_string()),
+        cache_generation: 0,
+        input_tokens: 10_000,
+        completed_at,
+        provider: provider.to_string(),
+        model: model.to_string(),
+        upstream_provider: None,
+        signature,
+    }
+}
+
+fn kv_cache_test_request(
+    provider: &str,
+    model: &str,
+    signature: Option<KvCacheRequestSignature>,
+    baseline_messages_prefix_matches: Option<bool>,
+) -> PendingKvCacheRequest {
+    PendingKvCacheRequest {
+        turn_number: 2,
+        call_index: 1,
+        provider: provider.to_string(),
+        model: model.to_string(),
+        upstream_provider: None,
+        signature,
+        baseline_messages_prefix_matches,
+        baseline: None,
+        cache_generation: 0,
+    }
+}
+
+#[test]
+fn kv_cache_miss_labels_aged_partial_read_as_ttl_estimate() {
+    let mut app = create_named_provider_test_app("openrouter", "test-model");
+    app.streaming.streaming_cache_read_tokens = Some(2_000);
+    let baseline = kv_cache_test_baseline(
+        "openrouter",
+        "test-model",
+        Instant::now() - Duration::from_secs(301),
+        None,
+    );
+    let request = kv_cache_test_request("openrouter", "test-model", None, Some(true));
+    let reason = app.classify_kv_cache_miss_reason(&request, &baseline, 2_000, 20);
+    assert_eq!(reason, KvCacheMissReason::ExpirySuspected);
+    assert_eq!(reason.label(), "expiry suspected (TTL estimate)");
+    let mut recorded_request = request;
+    recorded_request.baseline = Some(baseline);
+    let notices_before = app.display_messages.len();
+    app.record_kv_cache_miss_sample(&recorded_request);
+    assert_eq!(app.kv_cache.kv_cache_miss_samples.len(), 1);
+    assert_eq!(app.kv_cache.kv_cache_miss_samples[0].reason, reason);
+    assert_eq!(app.display_messages.len(), notices_before);
+}
+
+#[test]
+fn kv_cache_miss_prefers_concrete_static_change_over_aged_baseline() {
+    let mut app = create_named_provider_test_app("openrouter", "test-model");
+    app.streaming.streaming_cache_read_tokens = Some(0);
+    let baseline_signature = App::kv_cache_request_signature(&[], &[], "old system", "");
+    let request_signature = App::kv_cache_request_signature(&[], &[], "new system", "");
+    let baseline = kv_cache_test_baseline(
+        "openrouter",
+        "test-model",
+        Instant::now() - Duration::from_secs(301),
+        Some(baseline_signature),
+    );
+    let request = kv_cache_test_request(
+        "openrouter",
+        "test-model",
+        Some(request_signature),
+        Some(false),
+    );
+    assert_eq!(
+        app.classify_kv_cache_miss_reason(&request, &baseline, 0, 0),
+        KvCacheMissReason::HarnessSystemChanged
+    );
+}
+
+#[test]
+fn kv_cache_miss_preserves_provider_and_model_switch_precedence_over_ttl_estimate() {
+    let mut app = create_named_provider_test_app("openrouter", "test-model");
+    app.streaming.streaming_cache_read_tokens = Some(0);
+    let baseline = kv_cache_test_baseline(
+        "openrouter",
+        "test-model",
+        Instant::now() - Duration::from_secs(301),
+        None,
+    );
+    let provider_request = kv_cache_test_request("anthropic", "test-model", None, Some(false));
+    assert_eq!(
+        app.classify_kv_cache_miss_reason(&provider_request, &baseline, 0, 0),
+        KvCacheMissReason::ProviderSwitch
+    );
+    let model_request = kv_cache_test_request("openrouter", "other-model", None, Some(false));
+    assert_eq!(
+        app.classify_kv_cache_miss_reason(&model_request, &baseline, 0, 0),
+        KvCacheMissReason::ModelSwitch
+    );
+}
+
+#[test]
+fn kv_cache_miss_keeps_unknown_path_when_ttl_is_unavailable() {
+    let app = create_named_provider_test_app("mock", "test-model");
+    let baseline = kv_cache_test_baseline(
+        "mock",
+        "test-model",
+        Instant::now() - Duration::from_secs(60 * 60),
+        None,
+    );
+    let request = kv_cache_test_request("mock", "test-model", None, Some(true));
+    assert_eq!(
+        app.classify_kv_cache_miss_reason(&request, &baseline, 0, 0),
+        KvCacheMissReason::Unknown
+    );
+}
+
+#[test]
+fn kv_cache_miss_prefers_concrete_tools_change_over_aged_baseline() {
+    let mut app = create_named_provider_test_app("openrouter", "test-model");
+    app.streaming.streaming_cache_read_tokens = Some(0);
+    let mut request_signature = App::kv_cache_request_signature(&[], &[], "system", "");
+    let baseline_signature = request_signature.clone();
+    request_signature.tools_hash = request_signature.tools_hash.wrapping_add(1);
+    let baseline = kv_cache_test_baseline(
+        "openrouter",
+        "test-model",
+        Instant::now() - Duration::from_secs(301),
+        Some(baseline_signature),
+    );
+    let request = kv_cache_test_request(
+        "openrouter",
+        "test-model",
+        Some(request_signature),
+        Some(true),
+    );
+
+    assert_eq!(
+        app.classify_kv_cache_miss_reason(&request, &baseline, 0, 0),
+        KvCacheMissReason::HarnessToolsChanged
+    );
+}
+
+#[test]
+fn kv_cache_miss_prefers_concrete_prefix_change_over_aged_baseline() {
+    let mut app = create_named_provider_test_app("openrouter", "test-model");
+    app.streaming.streaming_cache_read_tokens = Some(0);
+    let baseline = kv_cache_test_baseline(
+        "openrouter",
+        "test-model",
+        Instant::now() - Duration::from_secs(301),
+        None,
+    );
+    let request = kv_cache_test_request("openrouter", "test-model", None, Some(false));
+
+    assert_eq!(
+        app.classify_kv_cache_miss_reason(&request, &baseline, 0, 0),
+        KvCacheMissReason::HarnessPrefixChanged
+    );
+}
+
+#[test]
+fn kv_cache_miss_ignores_requests_without_a_baseline() {
+    let mut app = create_named_provider_test_app("openrouter", "test-model");
+    let request = kv_cache_test_request("openrouter", "test-model", None, Some(false));
+
+    app.record_kv_cache_miss_sample(&request);
+
+    assert!(app.kv_cache.kv_cache_miss_samples.is_empty());
+}
+
+#[test]
+fn kv_cache_miss_preserves_upstream_switch_precedence_over_ttl_estimate() {
+    let app = create_named_provider_test_app("openrouter", "test-model");
+    let mut baseline = kv_cache_test_baseline(
+        "openrouter",
+        "test-model",
+        Instant::now() - Duration::from_secs(301),
+        None,
+    );
+    baseline.upstream_provider = Some("upstream-a".to_string());
+    let mut request = kv_cache_test_request("openrouter", "test-model", None, Some(false));
+    request.upstream_provider = Some("upstream-b".to_string());
+    assert_eq!(
+        app.classify_kv_cache_miss_reason(&request, &baseline, 0, 0),
+        KvCacheMissReason::UpstreamSwitch
+    );
+}
+
 #[test]
 fn kv_cache_signature_prefix_match_allows_appended_messages() {
     let baseline_messages = vec![

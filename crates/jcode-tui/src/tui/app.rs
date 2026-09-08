@@ -257,7 +257,9 @@ enum KvCacheMissReason {
     ProviderSwitch,
     ModelSwitch,
     UpstreamSwitch,
-    Expired,
+    /// The baseline is older than the provider TTL. This is an estimate, not
+    /// evidence that the provider evicted the cache entry.
+    ExpirySuspected,
     HarnessSystemChanged,
     HarnessToolsChanged,
     HarnessPrefixChanged,
@@ -272,7 +274,7 @@ impl KvCacheMissReason {
             Self::ProviderSwitch => "provider switch",
             Self::ModelSwitch => "model switch",
             Self::UpstreamSwitch => "upstream switch",
-            Self::Expired => "expired",
+            Self::ExpirySuspected => "expiry suspected (TTL estimate)",
             Self::HarnessSystemChanged => "harness: system changed",
             Self::HarnessToolsChanged => "harness: tools changed",
             Self::HarnessPrefixChanged => "harness: prefix changed",
@@ -2331,7 +2333,7 @@ impl App {
                 KvCacheMissReason::ProviderSwitch
                     | KvCacheMissReason::ModelSwitch
                     | KvCacheMissReason::UpstreamSwitch
-                    | KvCacheMissReason::Expired
+                    | KvCacheMissReason::ExpirySuspected
                     | KvCacheMissReason::HarnessSystemChanged
                     | KvCacheMissReason::HarnessToolsChanged
                     | KvCacheMissReason::HarnessPrefixChanged
@@ -2438,13 +2440,6 @@ impl App {
             return KvCacheMissReason::UpstreamSwitch;
         }
 
-        if let Some(ttl_secs) =
-            crate::tui::cache_ttl_for_provider_model(&baseline.provider, Some(&baseline.model))
-            && baseline.completed_at.elapsed() >= Duration::from_secs(ttl_secs)
-        {
-            return KvCacheMissReason::Expired;
-        }
-
         if let (Some(previous), Some(current)) = (&baseline.signature, &request.signature) {
             if previous.system_static_hash != current.system_static_hash {
                 return KvCacheMissReason::HarnessSystemChanged;
@@ -2458,6 +2453,15 @@ impl App {
 
         if request.baseline_messages_prefix_matches == Some(false) {
             return KvCacheMissReason::HarnessPrefixChanged;
+        }
+
+        // TTL age is only a heuristic. Prefer concrete request-signature and
+        // prefix evidence above, and do not describe this as provider eviction.
+        if let Some(ttl_secs) =
+            crate::tui::cache_ttl_for_provider_model(&baseline.provider, Some(&baseline.model))
+            && baseline.completed_at.elapsed() >= Duration::from_secs(ttl_secs)
+        {
+            return KvCacheMissReason::ExpirySuspected;
         }
 
         if self.streaming.streaming_cache_read_tokens.is_none() {
