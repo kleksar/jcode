@@ -1334,6 +1334,8 @@ pub(super) fn draw_side_panel_markdown(
         return;
     };
 
+    let document_mode = app.markdown_document_mode();
+
     let page_index = snapshot
         .pages
         .iter()
@@ -1356,6 +1358,56 @@ pub(super) fn draw_side_panel_markdown(
         app.side_panel_native_scrollbar() && content_shell_area.width > 1;
     let mermaid_profile_area =
         side_panel_mermaid_profile_area(content_shell_area, reserve_native_scrollbar);
+    if app.worktree_documents_tab_active()
+        && document_mode == crate::tui::app::worktree_pane::MarkdownDocumentMode::Source
+    {
+        let title = super::worktree_ui::project_pane_title(
+            crate::tui::app::worktree_pane::WorktreePaneTab::Documents,
+            vec![
+                Span::styled(" Read ", Style::default().fg(dim_color())),
+                Span::styled(
+                    " Source ",
+                    Style::default()
+                        .fg(rgb(235, 235, 245))
+                        .bg(rgb(55, 55, 68))
+                        .add_modifier(ratatui::style::Modifier::BOLD),
+                ),
+                Span::styled(" Changes ", Style::default().fg(dim_color())),
+                Span::styled(
+                    format!(" {} {}/{} ", page.title, page_index, page_count),
+                    Style::default().fg(tool_color()),
+                ),
+            ],
+        );
+        let Some(inner) = super::draw_right_rail_chrome(frame, area, title, border_style) else {
+            return;
+        };
+        let lines: Vec<Line<'static>> = page
+            .content
+            .split('\n')
+            .map(|line| Line::from(Span::raw(line.to_owned())))
+            .collect();
+        let max_scroll = lines.len().saturating_sub(inner.height as usize);
+        let clamped = scroll.min(max_scroll);
+        let visible: Vec<_> = lines
+            .iter()
+            .skip(clamped)
+            .take(inner.height as usize)
+            .cloned()
+            .collect();
+        super::set_pinned_pane_total_lines(lines.len());
+        super::set_last_diff_pane_max_scroll(max_scroll);
+        super::set_last_diff_pane_effective_scroll(clamped);
+        super::record_side_pane_snapshot(
+            &lines,
+            clamped,
+            (clamped + inner.height as usize).min(lines.len()),
+            inner,
+        );
+        super::clear_area(frame, inner);
+        frame.render_widget(Paragraph::new(visible), inner);
+        return;
+    }
     let rendered_full_width = render_side_panel_markdown_cached_with_zoom_and_profile_area(
         page,
         content_shell_area,
@@ -1368,10 +1420,21 @@ pub(super) fn draw_side_panel_markdown(
     let mut title_parts = if app.worktree_documents_tab_active() {
         super::worktree_ui::project_pane_title(
             crate::tui::app::worktree_pane::WorktreePaneTab::Documents,
-            vec![Span::styled(
-                " documents ",
-                Style::default().fg(tool_color()),
-            )],
+            vec![
+                Span::styled(
+                    " Read ",
+                    if document_mode == crate::tui::app::worktree_pane::MarkdownDocumentMode::Read {
+                        Style::default()
+                            .fg(rgb(235, 235, 245))
+                            .bg(rgb(55, 55, 68))
+                            .add_modifier(ratatui::style::Modifier::BOLD)
+                    } else {
+                        Style::default().fg(dim_color())
+                    },
+                ),
+                Span::styled(" Source ", Style::default().fg(dim_color())),
+                Span::styled(" Changes ", Style::default().fg(dim_color())),
+            ],
         )
         .spans
     } else {

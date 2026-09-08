@@ -11,7 +11,7 @@ pub(crate) enum WorktreePaneTab {
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub(super) enum MarkdownDocumentMode {
+pub(crate) enum MarkdownDocumentMode {
     #[default]
     Read,
     Source,
@@ -113,6 +113,14 @@ impl App {
             .document_ui
             .get(page_id)
             .map(|state| state.mode)
+            .unwrap_or_default()
+    }
+
+    pub(super) fn focused_markdown_document_mode(&self) -> MarkdownDocumentMode {
+        self.side_panel
+            .focused_page_id
+            .as_deref()
+            .map(|id| self.markdown_document_mode(id))
             .unwrap_or_default()
     }
 

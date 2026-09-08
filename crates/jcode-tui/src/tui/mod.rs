@@ -685,6 +685,9 @@ pub trait TuiState {
     fn worktree_documents_available(&self) -> bool {
         false
     }
+    fn markdown_document_mode(&self) -> crate::tui::app::worktree_pane::MarkdownDocumentMode {
+        Default::default()
+    }
     fn project_tree_selected_path(&self) -> Option<&str> {
         None
     }
