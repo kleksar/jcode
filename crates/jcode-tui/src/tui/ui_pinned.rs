@@ -1325,6 +1325,7 @@ pub(super) fn draw_side_panel_markdown(
     scroll: usize,
     focused: bool,
     centered: bool,
+    worktree_changes: Option<&crate::tui::ui::worktree_ui::WorktreeChangesSnapshot>,
 ) {
     if area.width < 10 || area.height < 3 {
         return;
@@ -1401,6 +1402,70 @@ pub(super) fn draw_side_panel_markdown(
             .split('\n')
             .map(|line| Line::from(Span::raw(line.to_owned())))
             .collect();
+        let max_scroll = lines.len().saturating_sub(inner.height as usize);
+        let clamped = scroll.min(max_scroll);
+        let visible: Vec<_> = lines
+            .iter()
+            .skip(clamped)
+            .take(inner.height as usize)
+            .cloned()
+            .collect();
+        super::set_pinned_pane_total_lines(lines.len());
+        super::set_last_diff_pane_max_scroll(max_scroll);
+        super::set_last_diff_pane_effective_scroll(clamped);
+        super::record_side_pane_snapshot(
+            &lines,
+            clamped,
+            (clamped + inner.height as usize).min(lines.len()),
+            inner,
+        );
+        super::clear_area(frame, inner);
+        frame.render_widget(Paragraph::new(visible), inner);
+        return;
+    }
+    if app.worktree_documents_tab_active()
+        && document_mode == crate::tui::app::worktree_pane::MarkdownDocumentMode::Changes
+    {
+        let title = super::worktree_ui::project_pane_title(
+            crate::tui::app::worktree_pane::WorktreePaneTab::Documents,
+            vec![
+                Span::styled(
+                    super::worktree_ui::DOCUMENT_PREVIOUS_PAGE_LABEL,
+                    Style::default().fg(dim_color()),
+                ),
+                Span::styled(
+                    super::worktree_ui::DOCUMENT_READ_LABEL,
+                    Style::default().fg(dim_color()),
+                ),
+                Span::styled(
+                    super::worktree_ui::DOCUMENT_SOURCE_LABEL,
+                    Style::default().fg(dim_color()),
+                ),
+                Span::styled(
+                    super::worktree_ui::DOCUMENT_CHANGES_LABEL,
+                    Style::default()
+                        .fg(rgb(235, 235, 245))
+                        .bg(rgb(55, 55, 68))
+                        .add_modifier(ratatui::style::Modifier::BOLD),
+                ),
+                Span::styled(
+                    super::worktree_ui::DOCUMENT_NEXT_PAGE_LABEL,
+                    Style::default().fg(dim_color()),
+                ),
+                Span::styled(
+                    format!(" {} {}/{} ", page.title, page_index, page_count),
+                    Style::default().fg(tool_color()),
+                ),
+            ],
+        );
+        let Some(inner) = super::draw_right_rail_chrome(frame, area, title, border_style) else {
+            return;
+        };
+        let lines = super::worktree_ui::selected_document_change_lines(
+            worktree_changes,
+            page,
+            app.working_dir().as_deref(),
+        );
         let max_scroll = lines.len().saturating_sub(inner.height as usize);
         let clamped = scroll.min(max_scroll);
         let visible: Vec<_> = lines

@@ -1022,6 +1022,45 @@ fn cached_render_lines(
     lines
 }
 
+pub(super) fn selected_document_change_lines(
+    snapshot: Option<&WorktreeChangesSnapshot>,
+    page: &crate::side_panel::SidePanelPage,
+    working_dir: Option<&str>,
+) -> Arc<Vec<Line<'static>>> {
+    let Some(relative_path) = document_relative_path(page, working_dir) else {
+        return Arc::new(vec![Line::from(Span::styled(
+            "No changes for this document",
+            Style::default().fg(dim_color()),
+        ))]);
+    };
+    let Some(snapshot) = snapshot else {
+        return Arc::new(vec![Line::from(Span::styled(
+            "No changes for this document",
+            Style::default().fg(dim_color()),
+        ))]);
+    };
+    if snapshot.files.iter().all(|file| file.path != relative_path) {
+        return Arc::new(vec![Line::from(Span::styled(
+            "No changes for this document",
+            Style::default().fg(dim_color()),
+        ))]);
+    }
+    cached_render_lines(snapshot, Some(&relative_path))
+}
+
+fn document_relative_path(
+    page: &crate::side_panel::SidePanelPage,
+    working_dir: Option<&str>,
+) -> Option<String> {
+    if page.source != crate::side_panel::SidePanelPageSource::LinkedFile {
+        return None;
+    }
+    let root = Path::new(working_dir?.trim()).canonicalize().ok()?;
+    let file = Path::new(&page.file_path).canonicalize().ok()?;
+    let relative = file.strip_prefix(root).ok()?;
+    Some(relative.to_string_lossy().replace('\\', "/"))
+}
+
 const DIFF_TAB_LABEL: &str = " Diff ";
 const FILES_TAB_LABEL: &str = " Files ";
 const DOCUMENTS_TAB_LABEL: &str = " Documents ";

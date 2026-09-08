@@ -653,6 +653,29 @@ fn document_snapshot(
     }
 }
 
+fn linked_document_snapshot(
+    focused: &str,
+    pages: &[(&str, &str, &std::path::Path, &str)],
+) -> crate::side_panel::SidePanelSnapshot {
+    crate::side_panel::SidePanelSnapshot {
+        focused_page_id: Some(focused.into()),
+        pages: pages
+            .iter()
+            .map(
+                |(id, title, file_path, content)| crate::side_panel::SidePanelPage {
+                    id: (*id).into(),
+                    title: (*title).into(),
+                    file_path: file_path.to_string_lossy().into_owned(),
+                    format: crate::side_panel::SidePanelPageFormat::Markdown,
+                    source: crate::side_panel::SidePanelPageSource::LinkedFile,
+                    content: (*content).into(),
+                    updated_at_ms: 1,
+                },
+            )
+            .collect(),
+    }
+}
+
 #[test]
 fn test_documents_join_worktree_tabs_and_cycle_without_duplicate_pages() {
     let _lock = scroll_render_test_lock();
@@ -870,6 +893,122 @@ fn test_documents_render_mode_header_and_raw_source() {
     assert!(source.contains("# heading"), "{source}");
     assert!(source.contains("**bold**"), "{source}");
     assert!(source.contains("```rust"), "{source}");
+}
+
+#[test]
+fn test_documents_changes_shows_only_the_focused_linked_file_diff() {
+    let _lock = scroll_render_test_lock();
+    let repo = init_worktree_pane_test_repo();
+    crate::tui::ui::prime_worktree_changes_for_tests(repo.path());
+    let mut app = create_test_app();
+    app.session.working_dir = Some(repo.path().to_string_lossy().into_owned());
+    app.apply_side_panel_snapshot(linked_document_snapshot(
+        "demo",
+        &[
+            (
+                "demo",
+                "Demo",
+                &repo.path().join("demo.rs"),
+                "document body",
+            ),
+            (
+                "notes",
+                "Notes",
+                &repo.path().join("notes.txt"),
+                "other document",
+            ),
+        ],
+    ));
+    app.set_diff_pane_focus(true);
+    assert!(app.handle_diff_pane_focus_key(KeyCode::Char('m'), KeyModifiers::NONE));
+    assert!(app.handle_diff_pane_focus_key(KeyCode::Char('m'), KeyModifiers::NONE));
+
+    let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(140, 30)).unwrap();
+    let text = render_and_snap(&app, &mut terminal);
+    assert!(text.contains("Changes"), "{text}");
+    assert!(
+        text.contains("fn old() {}") && text.contains("fn new() {}"),
+        "{text}"
+    );
+    assert!(
+        !text.contains("second"),
+        "must not leak another file: {text}"
+    );
+    assert!(
+        !text.contains("document body"),
+        "must not render Read content: {text}"
+    );
+}
+
+#[test]
+fn test_documents_changes_shows_safe_message_without_matching_linked_change() {
+    let _lock = scroll_render_test_lock();
+    let repo = init_worktree_pane_test_repo();
+    crate::tui::ui::prime_worktree_changes_for_tests(repo.path());
+    let mut app = create_test_app();
+    app.session.working_dir = Some(repo.path().to_string_lossy().into_owned());
+    app.apply_side_panel_snapshot(linked_document_snapshot(
+        "missing",
+        &[(
+            "missing",
+            "Missing",
+            &repo.path().join("unchanged.md"),
+            "document body",
+        )],
+    ));
+    app.set_diff_pane_focus(true);
+    assert!(app.handle_diff_pane_focus_key(KeyCode::Char('m'), KeyModifiers::NONE));
+    assert!(app.handle_diff_pane_focus_key(KeyCode::Char('m'), KeyModifiers::NONE));
+
+    let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(140, 30)).unwrap();
+    let text = render_and_snap(&app, &mut terminal);
+    assert!(text.contains("No changes for this document"), "{text}");
+    assert!(!text.contains("document body"), "{text}");
+}
+
+#[test]
+fn test_documents_changes_shows_safe_message_for_managed_page() {
+    let _lock = scroll_render_test_lock();
+    let repo = init_worktree_pane_test_repo();
+    let mut app = create_test_app();
+    app.session.working_dir = Some(repo.path().to_string_lossy().into_owned());
+    app.apply_side_panel_snapshot(document_snapshot(
+        "managed",
+        &[("managed", "Managed", "document body")],
+    ));
+    app.set_diff_pane_focus(true);
+    assert!(app.handle_diff_pane_focus_key(KeyCode::Char('m'), KeyModifiers::NONE));
+    assert!(app.handle_diff_pane_focus_key(KeyCode::Char('m'), KeyModifiers::NONE));
+
+    let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(140, 30)).unwrap();
+    let text = render_and_snap(&app, &mut terminal);
+    assert!(text.contains("No changes for this document"), "{text}");
+    assert!(!text.contains("document body"), "{text}");
+}
+
+#[test]
+fn test_documents_changes_shows_safe_message_while_snapshot_is_unavailable() {
+    let _lock = scroll_render_test_lock();
+    let repo = init_worktree_pane_test_repo();
+    let mut app = create_test_app();
+    app.session.working_dir = Some(repo.path().to_string_lossy().into_owned());
+    app.apply_side_panel_snapshot(linked_document_snapshot(
+        "demo",
+        &[(
+            "demo",
+            "Demo",
+            &repo.path().join("demo.rs"),
+            "document body",
+        )],
+    ));
+    app.set_diff_pane_focus(true);
+    assert!(app.handle_diff_pane_focus_key(KeyCode::Char('m'), KeyModifiers::NONE));
+    assert!(app.handle_diff_pane_focus_key(KeyCode::Char('m'), KeyModifiers::NONE));
+
+    let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(140, 30)).unwrap();
+    let text = render_and_snap(&app, &mut terminal);
+    assert!(text.contains("No changes for this document"), "{text}");
+    assert!(!text.contains("document body"), "{text}");
 }
 
 #[test]

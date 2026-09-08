@@ -2860,7 +2860,12 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
         && !has_pinned_content
         && !has_file_diff_edits
         && !app.is_replay();
-    let worktree_changes = if worktree_surface_allowed {
+    let documents_changes_active = !swarm_page_active
+        && app.worktree_documents_available()
+        && app.worktree_documents_tab_active()
+        && app.markdown_document_mode()
+            == crate::tui::app::worktree_pane::MarkdownDocumentMode::Changes;
+    let worktree_changes = if worktree_surface_allowed || documents_changes_active {
         let working_dir = app.working_dir();
         snapshot_for_worktree(working_dir.as_deref())
     } else {
@@ -3553,6 +3558,7 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
                 app.diff_pane_scroll(),
                 app.diff_pane_focus(),
                 app.centered_mode(),
+                worktree_changes.as_deref(),
             );
             worktree_ui::record_documents_worktree_layout(diff_area, app);
         } else if has_side_panel_content && !has_worktree_surface {
@@ -3569,6 +3575,7 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
                 app.diff_pane_scroll(),
                 app.diff_pane_focus(),
                 app.centered_mode(),
+                None,
             );
         } else if has_file_diff_edits {
             if let Some(ref mut capture) = debug_capture {
