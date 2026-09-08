@@ -96,7 +96,7 @@ mod split_view;
 mod state_ui;
 mod state_ui_input_helpers;
 mod update_sim;
-mod worktree_pane;
+pub(crate) mod worktree_pane;
 pub(crate) use state_ui_input_helpers::registered_command_entries;
 mod state_ui_maintenance;
 mod state_ui_messages;

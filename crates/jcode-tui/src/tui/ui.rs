@@ -2867,7 +2867,14 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
         None
     };
     let has_worktree_changes = worktree_changes.is_some();
-    let explicit_worktree_pane = worktree_surface_allowed && app.worktree_pane_explicit_open();
+    let explicit_worktree_pane = !swarm_page_active
+        && area.width >= AUTO_WORKTREE_PANE_MIN_WIDTH
+        && !has_pinned_content
+        && !has_file_diff_edits
+        && !app.is_replay()
+        && app.worktree_pane_explicit_open()
+        && (!has_side_panel_content || app.worktree_documents_available());
+    let documents_tab_active = explicit_worktree_pane && app.worktree_documents_tab_active();
     let files_tab_active = explicit_worktree_pane && app.worktree_files_tab_active();
     let project_tree = if files_tab_active {
         let working_dir = app.working_dir();
@@ -3523,7 +3530,23 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
 
     crate::tui::clear_side_panel_debug_snapshot();
     if let Some(diff_area) = diff_pane_area {
-        if has_side_panel_content {
+        if documents_tab_active {
+            if let Some(ref mut capture) = debug_capture {
+                capture
+                    .render_order
+                    .push("draw_side_panel_markdown".to_string());
+            }
+            draw_side_panel_markdown(
+                frame,
+                diff_area,
+                app,
+                app.side_panel(),
+                app.diff_pane_scroll(),
+                app.diff_pane_focus(),
+                app.centered_mode(),
+            );
+            worktree_ui::record_documents_worktree_layout(diff_area, app);
+        } else if has_side_panel_content && !has_worktree_surface {
             if let Some(ref mut capture) = debug_capture {
                 capture
                     .render_order

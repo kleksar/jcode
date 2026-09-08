@@ -1889,6 +1889,12 @@ impl crate::tui::TuiState for App {
     fn worktree_files_tab_active(&self) -> bool {
         self.worktree_files_tab_active()
     }
+    fn worktree_documents_tab_active(&self) -> bool {
+        self.worktree_documents_tab_active()
+    }
+    fn worktree_documents_available(&self) -> bool {
+        self.worktree_documents_available()
+    }
     fn project_tree_selected_path(&self) -> Option<&str> {
         self.worktree_pane_matches_session()
             .then_some(self.worktree_pane.tree_selected_path.as_deref())

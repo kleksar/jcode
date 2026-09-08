@@ -3,10 +3,35 @@ use super::*;
 const FILTER_IDLE_TIMEOUT: Duration = Duration::from_secs(60);
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub(super) enum WorktreePaneTab {
+pub(crate) enum WorktreePaneTab {
     Diff,
     #[default]
     Files,
+    Documents,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(super) enum MarkdownDocumentMode {
+    #[default]
+    Read,
+    Source,
+    Changes,
+}
+
+impl MarkdownDocumentMode {
+    fn next(self) -> Self {
+        match self {
+            Self::Read => Self::Source,
+            Self::Source => Self::Changes,
+            Self::Changes => Self::Read,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+pub(super) struct MarkdownDocumentUiState {
+    pub(super) mode: MarkdownDocumentMode,
+    pub(super) scroll: usize,
 }
 
 pub(super) struct WorktreePaneState {
@@ -20,6 +45,7 @@ pub(super) struct WorktreePaneState {
     pub(super) tree_expanded_dirs: std::collections::HashSet<String>,
     pub(super) tree_preview_scroll: usize,
     pub(super) tree_preview_focused: bool,
+    pub(super) document_ui: std::collections::HashMap<String, MarkdownDocumentUiState>,
     session_id: String,
     working_dir: Option<String>,
 }
@@ -37,6 +63,7 @@ impl Default for WorktreePaneState {
             tree_expanded_dirs: std::collections::HashSet::new(),
             tree_preview_scroll: 0,
             tree_preview_focused: false,
+            document_ui: std::collections::HashMap::new(),
             session_id: String::new(),
             working_dir: None,
         }
@@ -55,7 +82,7 @@ impl App {
             .flatten()
     }
 
-    fn prepare_worktree_pane_state(&mut self) {
+    pub(super) fn prepare_worktree_pane_state(&mut self) {
         if !self.worktree_pane_matches_session() {
             let explicit_open = self.worktree_pane.explicit_open;
             let tab = self.worktree_pane.tab;
@@ -73,11 +100,83 @@ impl App {
         self.worktree_pane.tab == WorktreePaneTab::Files
     }
 
+    pub(super) fn worktree_documents_tab_active(&self) -> bool {
+        self.worktree_pane.tab == WorktreePaneTab::Documents && self.side_panel.has_pages()
+    }
+
+    pub(super) fn worktree_documents_available(&self) -> bool {
+        self.side_panel.has_pages() && !self.worktree_pane.document_ui.is_empty()
+    }
+
+    pub(super) fn markdown_document_mode(&self, page_id: &str) -> MarkdownDocumentMode {
+        self.worktree_pane
+            .document_ui
+            .get(page_id)
+            .map(|state| state.mode)
+            .unwrap_or_default()
+    }
+
+    pub(super) fn save_focused_document_ui(&mut self) {
+        if let Some(page_id) = self.side_panel.focused_page_id.clone() {
+            self.prepare_worktree_pane_state();
+            self.worktree_pane
+                .document_ui
+                .entry(page_id)
+                .or_default()
+                .scroll = self.diff_pane_scroll;
+        }
+    }
+
+    pub(super) fn restore_focused_document_ui(&mut self) {
+        let Some(page_id) = self.side_panel.focused_page_id.clone() else {
+            return;
+        };
+        self.prepare_worktree_pane_state();
+        let state = *self.worktree_pane.document_ui.entry(page_id).or_default();
+        self.diff_pane_scroll = state.scroll;
+        self.diff_pane_auto_scroll = state.scroll == usize::MAX;
+    }
+
+    pub(super) fn cycle_markdown_document_mode(&mut self) -> bool {
+        let Some(page_id) = self.side_panel.focused_page_id.clone() else {
+            return false;
+        };
+        self.prepare_worktree_pane_state();
+        let state = self.worktree_pane.document_ui.entry(page_id).or_default();
+        state.scroll = self.diff_pane_scroll;
+        state.mode = state.mode.next();
+        true
+    }
+
+    pub(super) fn focus_adjacent_document_page(&mut self, delta: isize) -> bool {
+        let page_count = self.side_panel.pages.len();
+        if page_count < 2 {
+            return false;
+        }
+        let current = self
+            .side_panel
+            .focused_page_id
+            .as_deref()
+            .and_then(|id| self.side_panel.pages.iter().position(|page| page.id == id))
+            .unwrap_or(0);
+        self.save_focused_document_ui();
+        let next = (current as isize + delta).rem_euclid(page_count as isize) as usize;
+        let id = self.side_panel.pages[next].id.clone();
+        self.side_panel.focused_page_id = Some(id.clone());
+        self.last_side_panel_focus_id = Some(id);
+        self.restore_focused_document_ui();
+        crate::tui::clear_side_panel_render_caches();
+        true
+    }
+
     pub(super) fn worktree_pane_explicit_open(&self) -> bool {
         self.worktree_pane.explicit_open
     }
 
     pub(super) fn set_worktree_pane_tab(&mut self, tab: WorktreePaneTab) {
+        if self.worktree_documents_tab_active() && tab != WorktreePaneTab::Documents {
+            self.save_focused_document_ui();
+        }
         self.prepare_worktree_pane_state();
         self.worktree_pane.explicit_open = true;
         if self.worktree_pane.tab == tab {
@@ -86,11 +185,15 @@ impl App {
         self.worktree_pane.tab = tab;
         self.worktree_pane.tree_preview_focused = false;
         self.reset_worktree_diff_scroll();
+        if tab == WorktreePaneTab::Documents {
+            self.restore_focused_document_ui();
+        }
         self.set_status_notice(match tab {
             WorktreePaneTab::Diff => "Right pane: Diff (Tab switches to Files)",
             WorktreePaneTab::Files => {
                 "Right pane: Files (arrows navigate, Enter expands/previews, Tab switches)"
             }
+            WorktreePaneTab::Documents => "Right pane: Documents ([/] pages, m mode, Tab switches)",
         });
     }
 
@@ -332,6 +435,15 @@ impl App {
                 layout.diff_tab_area,
             ) {
                 self.set_worktree_pane_tab(WorktreePaneTab::Diff);
+                self.set_diff_pane_focus(true);
+                return true;
+            }
+            if crate::tui::layout_utils::point_in_rect(
+                mouse.column,
+                mouse.row,
+                layout.documents_tab_area,
+            ) {
+                self.set_worktree_pane_tab(WorktreePaneTab::Documents);
                 self.set_diff_pane_focus(true);
                 return true;
             }

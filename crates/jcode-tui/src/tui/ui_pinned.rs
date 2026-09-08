@@ -1365,7 +1365,18 @@ pub(super) fn draw_side_panel_markdown(
         image_zoom_percent,
     );
 
-    let mut title_parts = vec![Span::styled(" side ", Style::default().fg(tool_color()))];
+    let mut title_parts = if app.worktree_documents_tab_active() {
+        super::worktree_ui::project_pane_title(
+            crate::tui::app::worktree_pane::WorktreePaneTab::Documents,
+            vec![Span::styled(
+                " documents ",
+                Style::default().fg(tool_color()),
+            )],
+        )
+        .spans
+    } else {
+        vec![Span::styled(" side ", Style::default().fg(tool_color()))]
+    };
     title_parts.push(Span::styled(
         page.title.clone(),
         Style::default()

@@ -632,6 +632,89 @@ fn test_worktree_resize_keeps_index_and_clears_hidden_hit_targets() {
     assert!(crate::tui::ui::worktree_pane_layout().is_none());
 }
 
+fn document_snapshot(focused: &str, pages: &[(&str, &str, &str)]) -> crate::side_panel::SidePanelSnapshot {
+    crate::side_panel::SidePanelSnapshot {
+        focused_page_id: Some(focused.into()),
+        pages: pages
+            .iter()
+            .map(|(id, title, content)| crate::side_panel::SidePanelPage {
+                id: (*id).into(),
+                title: (*title).into(),
+                file_path: String::new(),
+                format: crate::side_panel::SidePanelPageFormat::Markdown,
+                source: crate::side_panel::SidePanelPageSource::Managed,
+                content: (*content).into(),
+                updated_at_ms: 1,
+            })
+            .collect(),
+    }
+}
+
+#[test]
+fn test_documents_join_worktree_tabs_and_cycle_without_duplicate_pages() {
+    let _lock = scroll_render_test_lock();
+    let repo = init_worktree_pane_test_repo();
+    crate::tui::ui::prime_worktree_changes_for_tests(repo.path());
+    crate::tui::ui::prime_project_tree_for_tests(repo.path());
+    let mut app = create_test_app();
+    app.session.working_dir = Some(repo.path().to_string_lossy().into_owned());
+    app.diff_mode = crate::config::DiffDisplayMode::Inline;
+    app.apply_side_panel_snapshot(document_snapshot(
+        "one",
+        &[("one", "One", "# one"), ("two", "Two", "# two")],
+    ));
+    assert_eq!(app.worktree_pane.tab, super::worktree_pane::WorktreePaneTab::Documents);
+
+    let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(140, 30)).unwrap();
+    let text = render_and_snap(&app, &mut terminal);
+    app.set_diff_pane_focus(true);
+    let layout = crate::tui::ui::worktree_pane_layout().expect("documents pane layout");
+    assert!(text.contains("Diff") && text.contains("Files") && text.contains("Documents"));
+    assert!(text.contains("one"));
+    assert!(app.handle_diff_pane_focus_key(KeyCode::Tab, KeyModifiers::NONE));
+    assert_eq!(app.worktree_pane.tab, super::worktree_pane::WorktreePaneTab::Diff);
+    assert!(app.handle_diff_pane_focus_key(KeyCode::BackTab, KeyModifiers::NONE));
+    assert_eq!(app.worktree_pane.tab, super::worktree_pane::WorktreePaneTab::Documents);
+    assert!(app.handle_diff_pane_focus_key(KeyCode::Char(']'), KeyModifiers::NONE));
+    assert_eq!(app.side_panel.focused_page_id.as_deref(), Some("two"));
+    assert_eq!(app.side_panel.pages.len(), 2);
+    assert!(app.handle_worktree_pane_mouse(worktree_test_mouse(
+        MouseEventKind::Down(MouseButton::Left),
+        layout.files_tab_area.x + 1,
+        layout.files_tab_area.y,
+    )));
+    assert_eq!(app.worktree_pane.tab, super::worktree_pane::WorktreePaneTab::Files);
+}
+
+#[test]
+fn test_document_mode_and_scroll_are_per_page_and_survive_passive_refresh() {
+    let mut app = create_test_app();
+    let first = document_snapshot(
+        "one",
+        &[("one", "One", "one\n"), ("two", "Two", "two\n")],
+    );
+    app.apply_side_panel_snapshot(first.clone());
+    app.set_diff_pane_focus(true);
+    app.diff_pane_scroll = 12;
+    assert!(app.handle_diff_pane_focus_key(KeyCode::Char('m'), KeyModifiers::NONE));
+    assert_eq!(app.markdown_document_mode("one"), super::worktree_pane::MarkdownDocumentMode::Source);
+    assert!(app.handle_diff_pane_focus_key(KeyCode::Char(']'), KeyModifiers::NONE));
+    app.diff_pane_scroll = 34;
+    assert!(app.handle_diff_pane_focus_key(KeyCode::Char('m'), KeyModifiers::NONE));
+    assert_eq!(app.markdown_document_mode("two"), super::worktree_pane::MarkdownDocumentMode::Source);
+    assert!(app.handle_diff_pane_focus_key(KeyCode::Char('['), KeyModifiers::NONE));
+    assert_eq!(app.diff_pane_scroll, 12);
+    assert_eq!(app.markdown_document_mode("one"), super::worktree_pane::MarkdownDocumentMode::Source);
+
+    app.set_worktree_pane_tab(super::worktree_pane::WorktreePaneTab::Files);
+    app.apply_side_panel_snapshot(first);
+    assert_eq!(app.worktree_pane.tab, super::worktree_pane::WorktreePaneTab::Files);
+    assert_eq!(app.diff_pane_scroll, 0);
+    app.set_worktree_pane_tab(super::worktree_pane::WorktreePaneTab::Documents);
+    assert_eq!(app.diff_pane_scroll, 12);
+    assert_eq!(app.markdown_document_mode("one"), super::worktree_pane::MarkdownDocumentMode::Source);
+}
+
 #[test]
 fn test_worktree_filter_hidden_idle_expiry_restores_all_files_at_top() {
     let _lock = scroll_render_test_lock();

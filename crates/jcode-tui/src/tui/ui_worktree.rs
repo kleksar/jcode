@@ -23,6 +23,7 @@ pub(crate) struct WorktreePaneLayout {
     pub area: Rect,
     pub diff_tab_area: Rect,
     pub files_tab_area: Rect,
+    pub documents_tab_area: Rect,
     pub files_tab_active: bool,
     pub list_area: Rect,
     pub body_area: Rect,
@@ -1018,6 +1019,7 @@ fn cached_render_lines(
 
 const DIFF_TAB_LABEL: &str = " Diff ";
 const FILES_TAB_LABEL: &str = " Files ";
+const DOCUMENTS_TAB_LABEL: &str = " Documents ";
 
 fn project_pane_tab_style(active: bool) -> Style {
     if active {
@@ -1030,18 +1032,38 @@ fn project_pane_tab_style(active: bool) -> Style {
     }
 }
 
-fn project_pane_title(files_active: bool, mut suffix: Vec<Span<'static>>) -> Line<'static> {
+pub(super) fn project_pane_title(
+    active_tab: crate::tui::app::worktree_pane::WorktreePaneTab,
+    mut suffix: Vec<Span<'static>>,
+) -> Line<'static> {
     let mut spans = vec![
-        Span::styled(DIFF_TAB_LABEL, project_pane_tab_style(!files_active)),
+        Span::styled(
+            DIFF_TAB_LABEL,
+            project_pane_tab_style(
+                active_tab == crate::tui::app::worktree_pane::WorktreePaneTab::Diff,
+            ),
+        ),
         Span::raw(" "),
-        Span::styled(FILES_TAB_LABEL, project_pane_tab_style(files_active)),
+        Span::styled(
+            FILES_TAB_LABEL,
+            project_pane_tab_style(
+                active_tab == crate::tui::app::worktree_pane::WorktreePaneTab::Files,
+            ),
+        ),
+        Span::raw(" "),
+        Span::styled(
+            DOCUMENTS_TAB_LABEL,
+            project_pane_tab_style(
+                active_tab == crate::tui::app::worktree_pane::WorktreePaneTab::Documents,
+            ),
+        ),
         Span::raw("  "),
     ];
     spans.append(&mut suffix);
     Line::from(spans)
 }
 
-fn project_pane_tab_areas(area: Rect) -> (Rect, Rect) {
+fn project_pane_tab_areas(area: Rect) -> (Rect, Rect, Rect) {
     let header_x = area.x.saturating_add(1);
     let diff = Rect::new(header_x, area.y, DIFF_TAB_LABEL.len() as u16, 1);
     let files = Rect::new(
@@ -1050,7 +1072,37 @@ fn project_pane_tab_areas(area: Rect) -> (Rect, Rect) {
         FILES_TAB_LABEL.len() as u16,
         1,
     );
-    (diff, files)
+    let documents = Rect::new(
+        files.right().saturating_add(1),
+        area.y,
+        DOCUMENTS_TAB_LABEL.len() as u16,
+        1,
+    );
+    (diff, files, documents)
+}
+
+pub(super) fn record_documents_worktree_layout(area: Rect, app: &dyn TuiState) {
+    let (diff_tab_area, files_tab_area, documents_tab_area) = project_pane_tab_areas(area);
+    WORKTREE_PANE_LAYOUT.with(|layout| {
+        *layout.borrow_mut() = Some(WorktreePaneLayout {
+            area,
+            diff_tab_area,
+            files_tab_area,
+            documents_tab_area,
+            files_tab_active: false,
+            list_area: area,
+            body_area: area,
+            list_scroll: 0,
+            paths: Arc::new(Vec::new()),
+            tree_area: None,
+            preview_area: None,
+            tree_scroll: 0,
+            tree_rows: Arc::new(Vec::new()),
+            preview_total_lines: 0,
+            preview_scroll: 0,
+            working_dir: app.working_dir(),
+        })
+    });
 }
 
 fn flatten_project_nodes(
@@ -1374,13 +1426,16 @@ pub(super) fn draw_project_files(
     } else {
         vec![Span::styled("loading…", Style::default().fg(dim_color()))]
     };
-    let title = project_pane_title(true, suffix);
+    let title = project_pane_title(
+        crate::tui::app::worktree_pane::WorktreePaneTab::Files,
+        suffix,
+    );
     let border = Style::default().fg(if focused { tool_color() } else { dim_color() });
     let Some(inner) = super::draw_right_rail_chrome(frame, area, title, border) else {
         return;
     };
     super::clear_area(frame, inner);
-    let (diff_tab_area, files_tab_area) = project_pane_tab_areas(area);
+    let (diff_tab_area, files_tab_area, documents_tab_area) = project_pane_tab_areas(area);
 
     let Some(snapshot) = snapshot else {
         frame.render_widget(
@@ -1398,6 +1453,7 @@ pub(super) fn draw_project_files(
                 area,
                 diff_tab_area,
                 files_tab_area,
+                documents_tab_area,
                 files_tab_active: true,
                 list_area: inner,
                 body_area: inner,
@@ -1539,6 +1595,7 @@ pub(super) fn draw_project_files(
             area,
             diff_tab_area,
             files_tab_area,
+            documents_tab_area,
             files_tab_active: true,
             list_area: tree_area,
             body_area: preview_area.unwrap_or(tree_area),
@@ -1565,7 +1622,7 @@ pub(super) fn draw_empty_worktree_changes(
         return;
     }
     let title = project_pane_title(
-        false,
+        crate::tui::app::worktree_pane::WorktreePaneTab::Diff,
         vec![Span::styled(
             "working tree clean",
             Style::default().fg(dim_color()),
@@ -1585,12 +1642,13 @@ pub(super) fn draw_empty_worktree_changes(
     super::set_last_diff_pane_max_scroll(0);
     super::set_last_diff_pane_effective_scroll(0);
     super::record_side_pane_snapshot(std::slice::from_ref(&line), 0, 1, inner);
-    let (diff_tab_area, files_tab_area) = project_pane_tab_areas(area);
+    let (diff_tab_area, files_tab_area, documents_tab_area) = project_pane_tab_areas(area);
     WORKTREE_PANE_LAYOUT.with(|layout| {
         *layout.borrow_mut() = Some(WorktreePaneLayout {
             area,
             diff_tab_area,
             files_tab_area,
+            documents_tab_area,
             files_tab_active: false,
             list_area: inner,
             body_area: inner,
@@ -1619,7 +1677,7 @@ pub(super) fn draw_worktree_changes(
         return;
     }
     let title = project_pane_title(
-        false,
+        crate::tui::app::worktree_pane::WorktreePaneTab::Diff,
         vec![
             Span::styled("changes ", Style::default().fg(tool_color())),
             Span::styled(
@@ -1718,12 +1776,13 @@ pub(super) fn draw_worktree_changes(
         );
     }
     draw_padded_section_boundary(frame, boundary_area, true);
-    let (diff_tab_area, files_tab_area) = project_pane_tab_areas(area);
+    let (diff_tab_area, files_tab_area, documents_tab_area) = project_pane_tab_areas(area);
     WORKTREE_PANE_LAYOUT.with(|layout| {
         *layout.borrow_mut() = Some(WorktreePaneLayout {
             area,
             diff_tab_area,
             files_tab_area,
+            documents_tab_area,
             files_tab_active: false,
             list_area,
             body_area: body,

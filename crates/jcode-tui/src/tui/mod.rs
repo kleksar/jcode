@@ -679,6 +679,12 @@ pub trait TuiState {
     fn worktree_files_tab_active(&self) -> bool {
         false
     }
+    fn worktree_documents_tab_active(&self) -> bool {
+        false
+    }
+    fn worktree_documents_available(&self) -> bool {
+        false
+    }
     fn project_tree_selected_path(&self) -> Option<&str> {
         None
     }

@@ -578,22 +578,50 @@ impl App {
         }
 
         self.note_worktree_pane_activity();
+        if self.worktree_documents_tab_active() {
+            match code {
+                KeyCode::Char('[') => return self.focus_adjacent_document_page(-1),
+                KeyCode::Char(']') => return self.focus_adjacent_document_page(1),
+                KeyCode::Char('m') => return self.cycle_markdown_document_mode(),
+                _ => {}
+            }
+        }
         if let Some(layout) = crate::tui::ui::worktree_pane_layout() {
             match code {
                 KeyCode::Tab => {
-                    let next = if layout.files_tab_active {
-                        super::worktree_pane::WorktreePaneTab::Diff
-                    } else {
-                        super::worktree_pane::WorktreePaneTab::Files
+                    let next = match self.worktree_pane.tab {
+                        super::worktree_pane::WorktreePaneTab::Diff => {
+                            super::worktree_pane::WorktreePaneTab::Files
+                        }
+                        super::worktree_pane::WorktreePaneTab::Files => {
+                            if self.side_panel.has_pages() {
+                                super::worktree_pane::WorktreePaneTab::Documents
+                            } else {
+                                super::worktree_pane::WorktreePaneTab::Diff
+                            }
+                        }
+                        super::worktree_pane::WorktreePaneTab::Documents => {
+                            super::worktree_pane::WorktreePaneTab::Diff
+                        }
                     };
                     self.set_worktree_pane_tab(next);
                     return true;
                 }
                 KeyCode::BackTab => {
-                    let next = if layout.files_tab_active {
-                        super::worktree_pane::WorktreePaneTab::Diff
-                    } else {
-                        super::worktree_pane::WorktreePaneTab::Files
+                    let next = match self.worktree_pane.tab {
+                        super::worktree_pane::WorktreePaneTab::Diff => {
+                            if self.side_panel.has_pages() {
+                                super::worktree_pane::WorktreePaneTab::Documents
+                            } else {
+                                super::worktree_pane::WorktreePaneTab::Files
+                            }
+                        }
+                        super::worktree_pane::WorktreePaneTab::Files => {
+                            super::worktree_pane::WorktreePaneTab::Diff
+                        }
+                        super::worktree_pane::WorktreePaneTab::Documents => {
+                            super::worktree_pane::WorktreePaneTab::Files
+                        }
                     };
                     self.set_worktree_pane_tab(next);
                     return true;
