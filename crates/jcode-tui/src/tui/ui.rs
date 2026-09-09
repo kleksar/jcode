@@ -2865,12 +2865,7 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
         && !has_pinned_content
         && !has_file_diff_edits
         && !app.is_replay();
-    let documents_changes_active = !swarm_page_active
-        && app.worktree_documents_available()
-        && app.worktree_documents_tab_active()
-        && app.markdown_document_mode()
-            == crate::tui::app::worktree_pane::MarkdownDocumentMode::Changes;
-    let worktree_changes = if worktree_surface_allowed || documents_changes_active {
+    let worktree_changes = if worktree_surface_allowed {
         let working_dir = app.working_dir();
         snapshot_for_worktree(working_dir.as_deref())
     } else {
@@ -2878,14 +2873,11 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
     };
     let has_worktree_changes = worktree_changes.is_some();
     let explicit_worktree_pane = !swarm_page_active
-        && (area.width >= AUTO_WORKTREE_PANE_MIN_WIDTH
-            || (has_side_panel_content && app.worktree_documents_available()))
+        && area.width >= AUTO_WORKTREE_PANE_MIN_WIDTH
         && !has_pinned_content
         && !has_file_diff_edits
         && !app.is_replay()
-        && app.worktree_pane_explicit_open()
-        && (!has_side_panel_content || app.worktree_documents_available());
-    let documents_tab_active = explicit_worktree_pane && app.worktree_documents_tab_active();
+        && app.worktree_pane_explicit_open();
     let files_tab_active = explicit_worktree_pane && app.worktree_files_tab_active();
     let project_tree = if files_tab_active {
         let working_dir = app.working_dir();
@@ -3009,13 +3001,7 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
 
     let (chat_area, diff_pane_area) = if needs_side_pane {
         const MIN_DIFF_WIDTH: u16 = 30;
-        let min_chat_width: u16 = if documents_tab_active {
-            20
-        } else if has_worktree_surface {
-            56
-        } else {
-            20
-        };
+        let min_chat_width: u16 = if has_worktree_surface { 56 } else { 20 };
         // Pinned images live in a tall narrow column, so a wide image fits to
         // the pane width and ends up small with empty space below it. When the
         // pane is showing image content (and the user has not manually resized
@@ -3030,9 +3016,7 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
         } else {
             base_ratio
         };
-        let min_diff_width = if documents_tab_active {
-            44
-        } else if has_worktree_surface {
+        let min_diff_width = if has_worktree_surface {
             42
         } else {
             MIN_DIFF_WIDTH
@@ -3549,24 +3533,7 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
 
     crate::tui::clear_side_panel_debug_snapshot();
     if let Some(diff_area) = diff_pane_area {
-        if documents_tab_active {
-            if let Some(ref mut capture) = debug_capture {
-                capture
-                    .render_order
-                    .push("draw_side_panel_markdown".to_string());
-            }
-            draw_side_panel_markdown(
-                frame,
-                diff_area,
-                app,
-                app.side_panel(),
-                app.diff_pane_scroll(),
-                app.diff_pane_focus(),
-                app.centered_mode(),
-                worktree_changes.as_deref(),
-            );
-            worktree_ui::record_documents_worktree_layout(diff_area, app);
-        } else if has_side_panel_content && !has_worktree_surface {
+        if has_side_panel_content && !has_worktree_surface {
             if let Some(ref mut capture) = debug_capture {
                 capture
                     .render_order

@@ -696,6 +696,9 @@ impl App {
         }
         self.last_side_panel_refresh = None;
         self.side_panel = snapshot;
+        if self.side_panel.focused_page_id.is_some() {
+            self.worktree_pane.explicit_open = false;
+        }
         self.note_runtime_memory_event("side_panel_updated", "side_panel_snapshot_applied");
         if focused_changed {
             self.diff_pane_scroll = 0;

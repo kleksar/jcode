@@ -757,15 +757,30 @@ fn test_worktree_surface_has_only_diff_and_files_and_two_stop_arrow_cycle() {
 #[test]
 fn test_generic_side_panel_pages_remain_visible_without_documents_tab() {
     let _lock = scroll_render_test_lock();
-    let mut app = create_test_app();
-    app.apply_side_panel_snapshot(document_snapshot("generic", &[("generic", "Generic", "side content")])) ;
-    app.set_diff_pane_focus(true);
-    let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(140, 30)).unwrap();
-    render_and_snap(&app, &mut terminal);
-    let text = terminal.backend().to_string();
-    assert!(text.contains("Generic") || text.contains("side"));
-    assert_eq!(app.worktree_pane.tab, super::worktree_pane::WorktreePaneTab::Files);
-    assert!(app.side_panel.focused_page().is_some());
+    for source in [
+        crate::side_panel::SidePanelPageSource::Managed,
+        crate::side_panel::SidePanelPageSource::Ephemeral,
+        crate::side_panel::SidePanelPageSource::LinkedFile,
+    ] {
+        let mut app = create_test_app();
+        app.set_worktree_pane_tab(super::worktree_pane::WorktreePaneTab::Files);
+        app.set_diff_pane_focus(true);
+        let mut snapshot = document_snapshot("generic", &[("generic", "Generic", "SIDE_UNIQUE")]);
+        snapshot.pages[0].source = source;
+        app.apply_side_panel_snapshot(snapshot);
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(140, 30)).unwrap();
+        render_and_snap(&app, &mut terminal);
+        assert!(terminal.backend().to_string().contains("SIDE_UNIQUE"));
+        assert_eq!(app.worktree_pane.tab, super::worktree_pane::WorktreePaneTab::Files);
+        assert!(!app.worktree_pane_explicit_open());
+        app.handle_key(KeyCode::Char('m'), KeyModifiers::ALT).unwrap();
+        render_and_snap(&app, &mut terminal);
+        assert!(!terminal.backend().to_string().contains("SIDE_UNIQUE"));
+        app.handle_key(KeyCode::Char('m'), KeyModifiers::ALT).unwrap();
+        render_and_snap(&app, &mut terminal);
+        assert!(terminal.backend().to_string().contains("SIDE_UNIQUE"));
+    }
 }
 
 #[test]

@@ -337,6 +337,7 @@ impl App {
         self.set_diff_pane_focus(true);
         self.files_inspector
             .select_mode(super::files_inspector::FileInspectorMode::Read);
+        self.files_inspector.enter_focus();
         self.set_status_notice(format!("Selected Markdown: {}", title));
         true
     }
@@ -1262,6 +1263,7 @@ impl App {
         };
 
         self.side_panel.focused_page_id = Some(restore_id.clone());
+        self.worktree_pane.explicit_open = false;
         self.last_side_panel_focus_id = Some(restore_id);
         self.side_panel_user_hidden = false;
         self.side_panel_explicit_hidden = false;

@@ -612,6 +612,8 @@ fn test_repository_markdown_link_opens_in_focused_side_panel() {
     .unwrap();
     let mut app = create_test_app();
     app.session.working_dir = Some(repository.path().to_string_lossy().into_owned());
+    crate::tui::ui::prime_project_tree_for_tests(repository.path());
+    app.open_project_files_pane();
     crate::tui::ui::clear_copy_viewport_snapshot();
     crate::tui::ui::record_copy_viewport_snapshot(
         std::sync::Arc::new(vec!["Read the guide".to_string()]),
@@ -628,24 +630,14 @@ fn test_repository_markdown_link_opens_in_focused_side_panel() {
         &[0],
     );
 
-    assert!(app.try_open_link_at(10, 0));
+    assert!(app.try_open_repository_markdown_link("docs/guide.md#setup"));
 
-    let page = app
-        .side_panel
-        .focused_page()
-        .expect("focused Markdown page");
-    assert_eq!(page.title, "guide.md");
-    assert_eq!(page.content, "# Repository guide\n");
-    assert_eq!(
-        page.source,
-        crate::side_panel::SidePanelPageSource::LinkedFile
-    );
+    assert!(app.side_panel.pages.is_empty());
+    assert_eq!(app.worktree_pane.tab, crate::tui::app::worktree_pane::WorktreePaneTab::Files);
+    assert!(app.files_inspector.is_focused());
+    assert_eq!(app.files_inspector.selected_file().map(|(_, path)| path.to_string_lossy().into_owned()), Some("docs/guide.md".into()));
     assert!(app.diff_pane_focus);
     assert!(!app.side_panel_user_hidden);
-    assert_eq!(
-        app.status_notice(),
-        Some("Opened Markdown: guide.md".to_string())
-    );
 }
 
 #[test]
