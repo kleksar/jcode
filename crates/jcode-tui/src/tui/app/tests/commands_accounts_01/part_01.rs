@@ -5,6 +5,7 @@ fn session_picker_resume_action_keeps_overlay_open() {
     app.session_picker_overlay = Some(RefCell::new(
         crate::tui::session_picker::SessionPicker::new(vec![
             crate::tui::session_picker::SessionInfo {
+                origin: jcode_session_types::SessionOrigin::Unknown,
                 id: "session_keep_open".to_string(),
                 parent_id: None,
                 short_name: "keep-open".to_string(),
@@ -56,6 +57,7 @@ fn session_picker_enter_queues_current_terminal_resume_and_closes_overlay() {
     app.session_picker_overlay = Some(RefCell::new(
         crate::tui::session_picker::SessionPicker::new(vec![
             crate::tui::session_picker::SessionInfo {
+                origin: jcode_session_types::SessionOrigin::Unknown,
                 id: "session_here_123".to_string(),
                 parent_id: None,
                 short_name: "here".to_string(),
@@ -129,6 +131,7 @@ fn session_closed_event_refreshes_picker_and_keeps_it_open() {
     app.session_picker_overlay = Some(RefCell::new(
         crate::tui::session_picker::SessionPicker::new(vec![
             crate::tui::session_picker::SessionInfo {
+                origin: jcode_session_types::SessionOrigin::Unknown,
                 id: "session_closed_by_server".to_string(),
                 parent_id: None,
                 short_name: "close target".to_string(),
@@ -558,6 +561,7 @@ fn session_picker_preview_wheel_uses_shared_scroll_momentum() {
         });
     }
     let session = SessionInfo {
+        origin: jcode_session_types::SessionOrigin::Unknown,
         id: "session_scroll".to_string(),
         parent_id: None,
         short_name: "scroll".to_string(),
@@ -1864,6 +1868,7 @@ fn active_session_preview_response_is_scoped_to_its_loading_request() {
     let session_id = "active_preview_target".to_string();
     let mut picker = crate::tui::session_picker::SessionPicker::new(vec![
         crate::tui::session_picker::SessionInfo {
+            origin: jcode_session_types::SessionOrigin::Unknown,
             id: session_id.clone(),
             parent_id: None,
             short_name: "preview".to_string(),

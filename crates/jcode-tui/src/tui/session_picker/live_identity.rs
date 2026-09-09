@@ -1,6 +1,7 @@
 //! Read-only, exact-ID identity hydration. Unknown fields (including transcripts)
 //! are skipped by serde rather than materialized. Limits fail closed to unknown,
 //! never to an observed root or a stale prefix truncated by the IO budget.
+use jcode_session_types::SessionOrigin;
 use serde::Deserialize;
 use std::fs::File;
 use std::io::{BufRead, BufReader, Read};
@@ -13,6 +14,7 @@ const JOURNAL_LINES: usize = 4096;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) struct LiveSessionIdentity {
+    pub(super) origin: SessionOrigin,
     pub(super) parent_id: Option<String>,
     pub(super) is_debug: bool,
 }
@@ -34,6 +36,8 @@ impl<'de> Deserialize<'de> for LiveSessionIdentity {
                 #[derive(Deserialize)]
                 struct Fields {
                     #[serde(default)]
+                    origin: SessionOrigin,
+                    #[serde(default)]
                     parent_id: Option<String>,
                     #[serde(default)]
                     is_debug: bool,
@@ -41,6 +45,7 @@ impl<'de> Deserialize<'de> for LiveSessionIdentity {
                 let fields =
                     Fields::deserialize(serde::de::value::MapAccessDeserializer::new(map))?;
                 Ok(LiveSessionIdentity {
+                    origin: fields.origin,
                     parent_id: fields.parent_id,
                     is_debug: fields.is_debug,
                 })
@@ -112,7 +117,12 @@ pub(super) fn load_live_session_identity(
             continue;
         }
         match serde_json::from_slice::<JournalEntry>(&line) {
-            Ok(entry) => identity = entry.meta,
+            Ok(entry) => {
+                // Snapshot origin is authoritative. Journal metadata can update
+                // navigation/debug state, never promote or demote provenance.
+                identity.parent_id = entry.meta.parent_id;
+                identity.is_debug = entry.meta.is_debug;
+            }
             // Match the summary loader: keep the last valid journal prefix.
             Err(_) => return Some(identity),
         }
@@ -126,18 +136,33 @@ mod tests {
     #[test]
     fn live_identity_snapshot_matrix_including_zero_messages() {
         let dir = tempfile::tempdir().unwrap();
-        for parent in [None, Some("root")] {
-            for debug in [false, true] {
-                let snapshot = serde_json::json!({"parent_id": parent, "is_debug": debug,
-                    "messages": [], "tool_content": {"arbitrary": [1, 2, 3]}});
-                std::fs::write(dir.path().join("id.json"), snapshot.to_string()).unwrap();
-                assert_eq!(
-                    load_live_session_identity(dir.path(), "id"),
-                    Some(LiveSessionIdentity {
-                        parent_id: parent.map(str::to_owned),
-                        is_debug: debug,
-                    })
-                );
+        for origin in [
+            None,
+            Some("unknown"),
+            Some("future_origin"),
+            Some("swarm_worker"),
+        ] {
+            for parent in [None, Some("root")] {
+                for debug in [false, true] {
+                    let mut snapshot = serde_json::json!({"parent_id": parent, "is_debug": debug,
+                        "messages": [], "tool_content": {"arbitrary": [1, 2, 3]}});
+                    if let Some(origin) = origin {
+                        snapshot["origin"] = origin.into();
+                    }
+                    std::fs::write(dir.path().join("id.json"), snapshot.to_string()).unwrap();
+                    assert_eq!(
+                        load_live_session_identity(dir.path(), "id"),
+                        Some(LiveSessionIdentity {
+                            origin: if origin == Some("swarm_worker") {
+                                SessionOrigin::SwarmWorker
+                            } else {
+                                SessionOrigin::Unknown
+                            },
+                            parent_id: parent.map(str::to_owned),
+                            is_debug: debug,
+                        })
+                    );
+                }
             }
         }
     }
@@ -146,7 +171,13 @@ mod tests {
     fn live_identity_missing_bad_snapshot_and_hostile_ids() {
         let dir = tempfile::tempdir().unwrap();
         assert_eq!(load_live_session_identity(dir.path(), "missing"), None);
-        for content in ["{", "null", "[]", r#"{"is_debug":"true"}"#] {
+        for content in [
+            "{",
+            "null",
+            "[]",
+            r#"{"is_debug":"true"}"#,
+            r#"{"origin":12}"#,
+        ] {
             std::fs::write(dir.path().join("id.json"), content).unwrap();
             assert_eq!(load_live_session_identity(dir.path(), "id"), None);
         }
@@ -172,6 +203,7 @@ mod tests {
         assert_eq!(
             load_live_session_identity(dir.path(), "id"),
             Some(LiveSessionIdentity {
+                origin: SessionOrigin::Unknown,
                 parent_id: None,
                 is_debug: false,
             })
@@ -180,6 +212,7 @@ mod tests {
         assert_eq!(
             load_live_session_identity(dir.path(), "id"),
             Some(LiveSessionIdentity {
+                origin: SessionOrigin::Unknown,
                 parent_id: Some("new".into()),
                 is_debug: true,
             })
@@ -209,10 +242,42 @@ mod tests {
         assert_eq!(
             load_live_session_identity(dir.path(), "id"),
             Some(LiveSessionIdentity {
+                origin: SessionOrigin::Unknown,
                 parent_id: None,
                 is_debug: false,
             })
         );
+    }
+
+    #[test]
+    fn worker_origin_snapshot_authority_over_journal_metadata() {
+        let dir = tempfile::tempdir().unwrap();
+        for origin in [None, Some("unknown"), Some("swarm_worker")] {
+            for journal_origin in [None, Some("unknown"), Some("swarm_worker")] {
+                let mut snapshot = serde_json::json!({"parent_id":"old", "is_debug":false});
+                if let Some(origin) = origin {
+                    snapshot["origin"] = origin.into();
+                }
+                std::fs::write(dir.path().join("id.json"), snapshot.to_string()).unwrap();
+                let mut meta = serde_json::json!({"parent_id":null, "is_debug":true});
+                if let Some(origin) = journal_origin {
+                    meta["origin"] = origin.into();
+                }
+                std::fs::write(
+                    dir.path().join("id.journal.jsonl"),
+                    format!("{}\n{{broken", serde_json::json!({"meta":meta})),
+                )
+                .unwrap();
+                snapshot["parent_id"] = serde_json::Value::Null;
+                snapshot["is_debug"] = true.into();
+                let expected: LiveSessionIdentity = serde_json::from_value(snapshot).unwrap();
+                assert_eq!(
+                    load_live_session_identity(dir.path(), "id"),
+                    Some(expected),
+                    "snapshot {origin:?}, journal {journal_origin:?}"
+                );
+            }
+        }
     }
 
     #[test]
@@ -224,7 +289,7 @@ mod tests {
             .set_len(SNAPSHOT_BYTES + 1)
             .unwrap();
         assert_eq!(load_live_session_identity(dir.path(), "id"), None);
-        std::fs::write(&snapshot, r#"{"is_debug":false}"#).unwrap();
+        std::fs::write(&snapshot, r#"{"is_debug":false,"origin":"swarm_worker"}"#).unwrap();
         let journal = dir.path().join("id.journal.jsonl");
         File::create(&journal)
             .unwrap()

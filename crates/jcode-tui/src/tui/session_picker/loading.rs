@@ -4,6 +4,7 @@ use crate::registry::{self, ServerInfo};
 use crate::session::{self, CrashedSessionsInfo, Session, SessionStatus, StoredDisplayRole};
 use crate::storage;
 use anyhow::Result;
+use jcode_session_types::SessionOrigin;
 use serde::de::{DeserializeSeed, IgnoredAny, MapAccess, SeqAccess, Visitor};
 use serde::{Deserialize, Serialize};
 use serde_json::value::RawValue;
@@ -58,7 +59,7 @@ fn include_old_saved_sessions_on_initial_load() -> bool {
 }
 
 const SESSION_LIST_CACHE_TTL: Duration = Duration::from_secs(5);
-const SESSION_LIST_DISK_CACHE_VERSION: u32 = 2;
+const SESSION_LIST_DISK_CACHE_VERSION: u32 = 3;
 const SESSION_LIST_DISK_CACHE_MAX_AGE_SECONDS: i64 = 7 * 24 * 60 * 60;
 const SAVED_METADATA_TAIL_SCAN_BYTES: u64 = 64 * 1024;
 const INITIAL_TRANSCRIPT_SEARCH_BUDGET_BYTES: usize = 64 * 1024;
@@ -178,7 +179,7 @@ pub fn invalidate_session_list_cache() {
 }
 
 fn session_list_disk_cache_path() -> Result<PathBuf> {
-    Ok(storage::jcode_dir()?.join("cache/session-picker-list-v2.json"))
+    Ok(storage::jcode_dir()?.join("cache/session-picker-list-v3.json"))
 }
 
 fn session_list_disk_cache_is_usable(
@@ -1215,6 +1216,8 @@ pub(super) fn collect_recent_session_stems(
 #[derive(Deserialize)]
 struct SessionSummary {
     #[serde(default)]
+    origin: SessionOrigin,
+    #[serde(default)]
     parent_id: Option<String>,
     #[serde(default)]
     title: Option<String>,
@@ -1524,6 +1527,9 @@ impl SessionTokenUsageSummary {
 
 #[derive(Deserialize)]
 struct SessionJournalSummaryMeta {
+    // Repeated by the journal format, but never applied over snapshot origin.
+    #[serde(default, rename = "origin")]
+    _origin: SessionOrigin,
     #[serde(default)]
     parent_id: Option<String>,
     #[serde(default)]
@@ -1750,6 +1756,7 @@ fn parse_jcode_session_info(
         provider_key: session.provider_key,
         is_canary: session.is_canary,
         is_debug: session.is_debug,
+        origin: session.origin,
         saved: session.saved,
         save_label: session.save_label,
         status,
@@ -1826,8 +1833,8 @@ pub fn load_sessions() -> Result<Vec<SessionInfo>> {
         // crosses `scan_limit`) can over-parse, so wasted work is bounded to a
         // single window's worth of candidates while still parallelizing widely.
         let mut sessions: Vec<SessionInfo> = Vec::new();
-        // Debug/canary sessions are hidden in the default picker view. Do not let a
-        // burst of self-dev or swarm workers consume the entire recency budget and
+        // Debug sessions and explicit workers share the hidden admission budget.
+        // Do not let a burst of workers consume the entire recency budget and
         // crowd out ordinary sessions. Keep a separate bounded debug budget so the
         // test-session toggle still has useful recent entries without making the
         // default list appear to jump from a handful of Jcode rows straight to old
@@ -1845,7 +1852,7 @@ pub fn load_sessions() -> Result<Vec<SessionInfo>> {
             });
             for (offset, parsed_session) in parsed.into_iter().enumerate() {
                 if let Some(info) = parsed_session {
-                    if info.is_debug {
+                    if info.is_debug || info.origin == SessionOrigin::SwarmWorker {
                         if debug_session_count < scan_limit {
                             debug_session_count += 1;
                             sessions.push(info);
@@ -1977,6 +1984,7 @@ fn load_external_claude_code_sessions(scan_limit: usize) -> Vec<SessionInfo> {
                 provider_key: Some("claude-code".to_string()),
                 is_canary: false,
                 is_debug: false,
+                origin: SessionOrigin::Unknown,
                 saved: false,
                 save_label: None,
                 status: SessionStatus::Closed,
@@ -2131,6 +2139,7 @@ fn load_codex_session_stub(path: &Path) -> Result<Option<SessionInfo>> {
         provider_key: Some("openai-codex".to_string()),
         is_canary: false,
         is_debug: false,
+        origin: SessionOrigin::Unknown,
         saved: false,
         save_label: None,
         status: SessionStatus::Closed,
@@ -2328,6 +2337,7 @@ fn load_pi_session_stub(path: &Path) -> Result<Option<SessionInfo>> {
         provider_key: Some("pi".to_string()),
         is_canary: false,
         is_debug: false,
+        origin: SessionOrigin::Unknown,
         saved: false,
         save_label: None,
         status: SessionStatus::Closed,
@@ -2492,6 +2502,7 @@ fn load_pi_session_info(path: &Path) -> Result<Option<SessionInfo>> {
         provider_key,
         is_canary: false,
         is_debug: false,
+        origin: SessionOrigin::Unknown,
         saved: false,
         save_label: None,
         status: SessionStatus::Closed,
@@ -2601,6 +2612,7 @@ fn load_opencode_session_stub(path: &Path) -> Result<Option<SessionInfo>> {
         provider_key: Some("opencode".to_string()),
         is_canary: false,
         is_debug: false,
+        origin: SessionOrigin::Unknown,
         saved: false,
         save_label: None,
         status: SessionStatus::Closed,
@@ -2751,6 +2763,7 @@ fn load_opencode_session_info(path: &Path) -> Result<Option<SessionInfo>> {
         provider_key,
         is_canary: false,
         is_debug: false,
+        origin: SessionOrigin::Unknown,
         saved: false,
         save_label: None,
         status: SessionStatus::Closed,
@@ -2926,6 +2939,7 @@ fn load_cursor_session_stub(path: &Path) -> Result<Option<SessionInfo>> {
         provider_key: Some("cursor".to_string()),
         is_canary: false,
         is_debug: false,
+        origin: SessionOrigin::Unknown,
         saved: false,
         save_label: None,
         status: SessionStatus::Closed,

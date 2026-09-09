@@ -100,6 +100,7 @@ fn cached_grouped_sessions_round_trip_from_disk() {
     std::fs::create_dir_all(&sessions_dir).expect("create sessions dir");
     let now = chrono::Utc::now();
     let session = SessionInfo {
+        origin: jcode_session_types::SessionOrigin::Unknown,
         id: "session_cache_test_1770000000000".to_string(),
         parent_id: None,
         short_name: "cache-test".to_string(),
@@ -1459,4 +1460,168 @@ mod external_session_opt_out {
     fn external_sessions_default_is_on() {
         assert!(jcode_config_types::DisplayConfig::default().external_sessions);
     }
+}
+
+#[test]
+fn worker_origin_does_not_consume_ordinary_admission_budget() {
+    let _env_lock = crate::storage::lock_test_env();
+    let temp = tempfile::tempdir().expect("temp dir");
+    let _home = EnvVarGuard::set_path("JCODE_HOME", temp.path());
+    let _scan_limit = EnvVarGuard::set_str("JCODE_SESSION_PICKER_MAX_SESSIONS", "50");
+
+    let push_message = |session: &mut Session, text: &str| {
+        session.append_stored_message(crate::session::StoredMessage {
+            id: format!("msg-{text}"),
+            role: crate::message::Role::User,
+            content: vec![crate::message::ContentBlock::Text {
+                text: text.to_string(),
+                cache_control: None,
+            }],
+            display_role: None,
+            timestamp: None,
+            tool_duration_ms: None,
+            token_usage: None,
+        });
+    };
+
+    // Write ordinary sessions first so their filesystem mtimes are older than
+    // the hidden debug burst below, matching the reported real-world ordering.
+    for idx in 0..60 {
+        let mut session = Session::create_with_id(
+            format!("session_regular_{}", 1_780_000_000_000u64 + idx as u64),
+            Some(format!("/tmp/regular-{idx:03}")),
+            Some(format!("Regular {idx:03}")),
+        );
+        session.is_debug = false;
+        session.is_canary = false;
+        push_message(&mut session, &format!("regular content {idx:03}"));
+        session.save().expect("save regular session");
+    }
+
+    // These newer self-dev/worker sessions are hidden by default. Previously the
+    // loader stopped after the first 50, leaving no ordinary Jcode sessions for
+    // the picker even though older resumable sessions existed.
+    for idx in 0..75 {
+        let mut session = Session::create_with_id(
+            format!("session_debug_{}", 1_790_000_000_000u64 + idx as u64),
+            Some(format!("/tmp/debug-{idx:03}")),
+            Some(format!("Debug {idx:03}")),
+        );
+        // Fixture-only snapshot tagging keeps deterministic timestamp IDs.
+        session.is_debug = false;
+        push_message(&mut session, &format!("debug content {idx:03}"));
+        session.save().expect("save worker session");
+        let path = temp
+            .path()
+            .join("sessions")
+            .join(format!("{}.json", session.id));
+        let mut json: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        json["origin"] = serde_json::json!("swarm_worker");
+        std::fs::write(path, json.to_string()).unwrap();
+    }
+
+    invalidate_session_list_cache();
+    let sessions = load_sessions().expect("load sessions");
+    let regular_count = sessions
+        .iter()
+        .filter(|session| serde_json::to_value(session).unwrap()["origin"] != "swarm_worker")
+        .count();
+    let worker_count = sessions
+        .iter()
+        .filter(|session| serde_json::to_value(session).unwrap()["origin"] == "swarm_worker")
+        .count();
+
+    assert_eq!(
+        regular_count, 50,
+        "ordinary sessions should fill the visible budget"
+    );
+    assert_eq!(
+        worker_count, 50,
+        "non-debug workers should retain their own bounded debug budget"
+    );
+}
+
+#[test]
+fn worker_origin_native_journal_and_cache_v3_round_trip() {
+    let _env_lock = crate::storage::lock_test_env();
+    let temp = tempfile::tempdir().unwrap();
+    let _home = EnvVarGuard::set_path("JCODE_HOME", temp.path());
+    let dir = temp.path().join("sessions");
+    std::fs::create_dir_all(&dir).unwrap();
+    let now = chrono::Utc::now();
+    for origin in [None, Some("unknown"), Some("swarm_worker")] {
+        for journal_origin in [None, Some("unknown"), Some("swarm_worker")] {
+            let mut snapshot = serde_json::json!({
+                "created_at":now, "updated_at":now, "parent_id":"old", "is_debug":false,
+                "messages":[{"role":"user","content":[{"type":"text","text":"hello"}]}]
+            });
+            if let Some(origin) = origin {
+                snapshot["origin"] = origin.into();
+            }
+            std::fs::write(dir.join("id.json"), snapshot.to_string()).unwrap();
+            let mut meta = serde_json::json!({"updated_at":now,"parent_id":null,"is_debug":true});
+            if let Some(origin) = journal_origin {
+                meta["origin"] = origin.into();
+            }
+            std::fs::write(
+                dir.join("id.journal.jsonl"),
+                serde_json::json!({"meta":meta}).to_string(),
+            )
+            .unwrap();
+            invalidate_session_list_cache();
+            let sessions = load_sessions().unwrap();
+            let session = sessions.iter().find(|s| s.id == "id").unwrap();
+            let expected = origin.unwrap_or("unknown");
+            assert_eq!(serde_json::to_value(session).unwrap()["origin"], expected);
+            assert_eq!(session.parent_id, None);
+            assert!(session.is_debug);
+            // Process cache and grouped disk cache retain tagged entries, rather
+            // than removing them before the show-debug filter can reveal them.
+            let cached = load_sessions().unwrap();
+            assert_eq!(
+                serde_json::to_value(cached.iter().find(|s| s.id == "id").unwrap()).unwrap()["origin"],
+                expected
+            );
+            write_grouped_session_list_disk_cache(
+                &dir,
+                session_scan_limit(),
+                &[ServerGroup {
+                    name: "local".into(),
+                    icon: "●".into(),
+                    version: "test".into(),
+                    git_hash: "test".into(),
+                    is_running: true,
+                    sessions: vec![session.clone()],
+                }],
+                &[session.clone()],
+            );
+            let (groups, orphans) = load_cached_sessions_grouped().unwrap();
+            assert_eq!(
+                serde_json::to_value(&groups[0].sessions[0]).unwrap()["origin"],
+                expected
+            );
+            assert_eq!(
+                serde_json::to_value(&orphans[0]).unwrap()["origin"],
+                expected
+            );
+        }
+    }
+    assert_eq!(SESSION_LIST_DISK_CACHE_VERSION, 3);
+    let path = session_list_disk_cache_path().unwrap();
+    let mut cache: GroupedSessionListDiskCache =
+        serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    cache.version = 2;
+    crate::storage::write_json_fast(&path, &cache).unwrap();
+    invalidate_session_list_cache();
+    assert!(
+        load_cached_sessions_grouped().is_none(),
+        "pre-origin disk rows must be invalidated"
+    );
+    let fresh = load_sessions().unwrap();
+    assert_eq!(
+        fresh.iter().find(|s| s.id == "id").unwrap().origin,
+        SessionOrigin::SwarmWorker
+    );
+    invalidate_session_list_cache();
 }

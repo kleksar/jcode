@@ -8,7 +8,7 @@ use crate::session::{CrashedSessionsInfo, Session};
 use crate::tui::{DisplayMessage, markdown};
 use anyhow::Result;
 use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers, MouseEventKind};
-use jcode_session_types::SessionStatus;
+use jcode_session_types::{SessionOrigin, SessionStatus};
 use ratatui::{
     Frame,
     layout::{Alignment, Constraint, Direction, Layout, Margin, Rect},
@@ -350,7 +350,10 @@ pub struct SessionPicker {
 
 impl SessionPicker {
     pub fn new(sessions: Vec<SessionInfo>) -> Self {
-        let hidden_test_count = sessions.iter().filter(|s| s.is_debug).count();
+        let hidden_test_count = sessions
+            .iter()
+            .filter(|s| filter::session_hidden_by_debug_toggle(s, SessionFilterMode::All))
+            .count();
 
         let crashed_sessions = crashed_sessions_from_all_sessions(&sessions);
         let crashed_session_ids: HashSet<String> = crashed_sessions
@@ -478,7 +481,7 @@ impl SessionPicker {
             .iter()
             .flat_map(|g| g.sessions.iter())
             .chain(orphan_sessions.iter())
-            .filter(|s| s.is_debug)
+            .filter(|s| filter::session_hidden_by_debug_toggle(s, SessionFilterMode::All))
             .count();
 
         // Gather all sessions for crash detection
@@ -847,15 +850,19 @@ impl SessionPicker {
 
         for presence in missing {
             let id = presence.session_id;
-            let identity = self.live_identities
-                .entry(id.clone())
-                .or_insert_with(|| sessions_dir.and_then(|dir| load_live_session_identity(dir, &id)))
-                .as_ref();
+            let identity = self.live_identities.entry(id.clone()).or_default();
+            // Retry unavailable metadata only on this bounded live refresh path.
+            // Once observed, creation provenance survives subsequent IO failures.
+            if identity.is_none() {
+                *identity = sessions_dir.and_then(|dir| load_live_session_identity(dir, &id));
+            }
+            let identity = identity.as_ref();
             let short_name = crate::id::extract_session_name(&id)
                 .unwrap_or("live")
                 .to_string();
             let now = chrono::Utc::now();
             let session = SessionInfo {
+                origin: identity.map_or(SessionOrigin::Unknown, |value| value.origin),
                 id: id.clone(),
                 parent_id: identity.and_then(|value| value.parent_id.clone()),
                 short_name: short_name.clone(),
@@ -913,8 +920,9 @@ impl SessionPicker {
             return false;
         }
         let before = std::mem::take(&mut self.live_presence);
+        let identities_before = self.live_identities.clone();
         self.refresh_live_presence();
-        let changed = before != self.live_presence;
+        let changed = before != self.live_presence || identities_before != self.live_identities;
         if changed && self.filter_mode == SessionFilterMode::Active {
             self.rebuild_items();
         }
@@ -1044,6 +1052,7 @@ impl SessionPicker {
             {
                 session.parent_id = identity.parent_id.clone();
                 session.is_debug = identity.is_debug;
+                session.origin = identity.origin;
             }
         }
 
@@ -1051,7 +1060,7 @@ impl SessionPicker {
             .iter()
             .flat_map(|g| g.sessions.iter())
             .chain(orphan_sessions.iter())
-            .filter(|s| s.is_debug)
+            .filter(|s| filter::session_hidden_by_debug_toggle(s, SessionFilterMode::All))
             .count();
 
         let all_for_crash: Vec<SessionInfo> = server_groups

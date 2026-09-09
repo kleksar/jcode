@@ -62,6 +62,7 @@ fn make_session_with_flags(
     );
 
     SessionInfo {
+        origin: jcode_session_types::SessionOrigin::Unknown,
         id: id.to_string(),
         parent_id: None,
         short_name: short_name.to_string(),
@@ -3283,45 +3284,53 @@ fn hydrate_live_identity_fixture(
 #[test]
 fn live_identity_visibility_matrix_matches_cached_rows() {
     let dir = tempfile::tempdir().unwrap();
-    for (parent, debug) in [
-        (None, false),
-        (None, true),
-        (Some("root"), false),
-        (Some("root"), true),
-    ] {
-        std::fs::write(
-            dir.path().join("id.json"),
-            serde_json::json!({
-                "parent_id": parent, "is_debug": debug, "messages": []
-            })
-            .to_string(),
-        )
-        .unwrap();
-        for internal in [false, true] {
-            let mut presence = live_presence("id", false);
-            presence.internal = internal;
-            let mut synthetic = SessionPicker::new(Vec::new());
-            hydrate_live_identity_fixture(&mut synthetic, dir.path(), vec![presence.clone()]);
-            let mut normal = make_session("id", "id", debug, SessionStatus::Active);
-            normal.parent_id = parent.map(str::to_owned);
-            let mut cached = SessionPicker::new(vec![normal]);
-            cached.set_live_presence_for_test(vec![presence]);
-            for mode in [SessionFilterMode::Active, SessionFilterMode::All] {
-                for show_debug in [false, true] {
-                    for picker in [&mut synthetic, &mut cached] {
-                        picker.filter_mode = mode;
-                        picker.show_test_sessions = show_debug;
-                        picker.rebuild_items();
+    for origin in [SessionOrigin::Unknown, SessionOrigin::SwarmWorker] {
+        for (parent, debug) in [
+            (None, false),
+            (None, true),
+            (Some("root"), false),
+            (Some("root"), true),
+        ] {
+            std::fs::write(
+                dir.path().join("id.json"),
+                serde_json::json!({
+                    "parent_id": parent, "is_debug": debug, "messages": [], "origin": origin
+                })
+                .to_string(),
+            )
+            .unwrap();
+            for internal in [false, true] {
+                let mut presence = live_presence("id", false);
+                presence.internal = internal;
+                let mut synthetic = SessionPicker::new(Vec::new());
+                hydrate_live_identity_fixture(&mut synthetic, dir.path(), vec![presence.clone()]);
+                let mut normal = make_session("id", "id", debug, SessionStatus::Active);
+                normal.parent_id = parent.map(str::to_owned);
+                normal.origin = origin;
+                let mut cached = SessionPicker::new(vec![normal]);
+                cached.set_live_presence_for_test(vec![presence]);
+                for mode in [SessionFilterMode::Active, SessionFilterMode::All] {
+                    for show_debug in [false, true] {
+                        for picker in [&mut synthetic, &mut cached] {
+                            picker.filter_mode = mode;
+                            picker.show_test_sessions = show_debug;
+                            picker.rebuild_items();
+                        }
+                        let expected = usize::from(
+                            show_debug
+                                || (origin == SessionOrigin::Unknown
+                                    && (!debug
+                                        || (mode == SessionFilterMode::Active
+                                            && parent.is_none()))),
+                        );
+                        assert_eq!(synthetic.visible_session_count(), expected);
+                        assert_eq!(cached.visible_session_count(), expected);
+                        assert_eq!(synthetic.all_sessions[0].parent_id.as_deref(), parent);
+                        assert_eq!(synthetic.all_sessions[0].is_debug, debug);
+                        assert_eq!(synthetic.all_sessions[0].origin, origin);
+                        assert_eq!(synthetic.hidden_test_count, 1 - expected);
+                        assert_eq!(cached.hidden_test_count, 1 - expected);
                     }
-                    let expected = usize::from(
-                        show_debug
-                            || !debug
-                            || (mode == SessionFilterMode::Active && parent.is_none()),
-                    );
-                    assert_eq!(synthetic.visible_session_count(), expected);
-                    assert_eq!(cached.visible_session_count(), expected);
-                    assert_eq!(synthetic.all_sessions[0].parent_id.as_deref(), parent);
-                    assert_eq!(synthetic.all_sessions[0].is_debug, debug);
                 }
             }
         }
@@ -3329,7 +3338,7 @@ fn live_identity_visibility_matrix_matches_cached_rows() {
 }
 
 #[test]
-fn live_identity_unknown_internal_compatibility_and_negative_cache() {
+fn live_identity_unknown_internal_compatibility_and_retry_on_refresh() {
     let dir = tempfile::tempdir().unwrap();
     let mut picker = SessionPicker::new(Vec::new());
     let mut presence = live_presence("unknown", false);
@@ -3353,11 +3362,11 @@ fn live_identity_unknown_internal_compatibility_and_negative_cache() {
     )
     .unwrap();
     hydrate_live_identity_fixture(&mut picker, dir.path(), vec![presence.clone()]);
-    assert_eq!(
-        picker.live_identities.get("unknown"),
-        Some(&None),
-        "presence-only ticks must not retry missing metadata"
+    assert!(
+        picker.live_identities.get("unknown").is_some_and(Option::is_some),
+        "bounded live refresh must retry unavailable metadata"
     );
+    assert_eq!(picker.all_sessions[0].parent_id.as_deref(), Some("root"));
     picker.reseed_grouped(Vec::new(), Vec::new());
     hydrate_live_identity_fixture(&mut picker, dir.path(), vec![presence]);
     assert_eq!(picker.all_sessions[0].parent_id.as_deref(), Some("root"));
@@ -3487,4 +3496,200 @@ fn live_identity_grouped_orphan_replacement_and_cache_pruning() {
         1,
         "normal replacement survives disconnect"
     );
+}
+
+// Set provenance through the persisted DTO boundary, also exercising legacy
+// serde compatibility without coupling fixtures to struct field construction.
+fn with_worker_origin(session: SessionInfo) -> SessionInfo {
+    let mut json = serde_json::to_value(session).unwrap();
+    json["origin"] = serde_json::json!("swarm_worker");
+    serde_json::from_value(json).unwrap()
+}
+
+#[test]
+fn worker_origin_policy_matrix_flat_grouped_orphan_and_toggle() {
+    for grouped in [false, true] {
+        for parent in [None, Some("root")] {
+            for debug in [false, true] {
+                for saved in [false, true] {
+                    let mut worker = with_worker_origin(make_session(
+                        "worker",
+                        "worker",
+                        debug,
+                        SessionStatus::Active,
+                    ));
+                    worker.parent_id = parent.map(str::to_owned);
+                    worker.saved = saved;
+                    let ordinary =
+                        make_session("ordinary", "ordinary", false, SessionStatus::Active);
+                    let orphan_worker = with_worker_origin(make_session(
+                        "orphan",
+                        "orphan",
+                        debug,
+                        SessionStatus::Active,
+                    ));
+                    let mut picker = if grouped {
+                        SessionPicker::new_grouped(
+                            vec![ServerGroup {
+                                name: "local".into(),
+                                icon: "●".into(),
+                                version: "test".into(),
+                                git_hash: "test".into(),
+                                is_running: true,
+                                sessions: vec![worker, ordinary],
+                            }],
+                            vec![orphan_worker],
+                        )
+                    } else {
+                        SessionPicker::new(vec![worker, ordinary, orphan_worker])
+                    };
+                    picker.set_live_presence_for_test(vec![
+                        live_presence("worker", false),
+                        live_presence("ordinary", false),
+                        live_presence("orphan", true),
+                    ]);
+                    for mode in [SessionFilterMode::Active, SessionFilterMode::All] {
+                        picker.filter_mode = mode;
+                        picker.show_test_sessions = false;
+                        picker.rebuild_items();
+                        assert_eq!(
+                            picker.visible_session_count(),
+                            1,
+                            "{grouped} {parent:?} {debug} {saved} {mode:?}"
+                        );
+                        assert_eq!(picker.hidden_test_count, 2);
+                        assert_eq!(picker.selected_session().unwrap().id, "ordinary");
+                        picker.toggle_test_sessions();
+                        assert_eq!(picker.visible_session_count(), 3);
+                        assert_eq!(picker.hidden_test_count, 0);
+                        picker.toggle_test_sessions();
+                        assert_eq!(picker.visible_session_count(), 1);
+                        assert_eq!(picker.hidden_test_count, 2);
+                    }
+                    picker.search_query = "worker".into();
+                    picker.rebuild_items();
+                    assert_eq!(picker.visible_session_count(), 0);
+                    assert_eq!(picker.hidden_test_count, 1);
+                    picker.toggle_test_sessions();
+                    assert_eq!(picker.visible_session_count(), 1);
+                    picker.filter_mode = SessionFilterMode::Active;
+                    picker.set_live_presence_for_test(vec![live_presence("ordinary", false)]);
+                    picker.rebuild_items();
+                    assert_eq!(
+                        picker.visible_session_count(),
+                        0,
+                        "show-debug must not bypass lifecycle or search"
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn worker_origin_synthetic_arrival_replacement_and_immutable_cache() {
+    let dir = tempfile::tempdir().unwrap();
+    for backing in 0..3 {
+        let mut picker = SessionPicker::new(Vec::new());
+        picker.filter_mode = SessionFilterMode::Active;
+        let mut worker = live_presence("late-worker", false);
+        worker.internal = false;
+        let presences = vec![worker, live_presence("ordinary", false)];
+        let path = dir.path().join("late-worker.json");
+        if path.exists() {
+            std::fs::remove_file(&path).unwrap();
+        }
+        hydrate_live_identity_fixture(&mut picker, dir.path(), presences.clone());
+        assert_eq!(
+            picker.visible_session_count(),
+            2,
+            "unavailable identity preserves compatibility"
+        );
+        select_session(&mut picker, "ordinary");
+        std::fs::write(
+            &path,
+            r#"{"origin":"swarm_worker","parent_id":null,"is_debug":false,"messages":[]}"#,
+        )
+        .unwrap();
+        hydrate_live_identity_fixture(&mut picker, dir.path(), presences.clone());
+        assert_eq!(
+            picker.visible_session_count(),
+            1,
+            "bounded refresh retries unavailable identity"
+        );
+        assert_eq!(picker.selected_session().unwrap().id, "ordinary");
+        assert_eq!(picker.hidden_test_count, 1);
+        assert_eq!(
+            picker
+                .all_sessions
+                .iter()
+                .find(|s| s.id == "late-worker")
+                .unwrap()
+                .message_count,
+            0
+        );
+        // A successfully observed origin survives later unavailability and stale
+        // replacement rows, including flat/grouped/orphan backing stores.
+        std::fs::write(&path, "invalid").unwrap();
+        let replacement = make_session("late-worker", "late-worker", false, SessionStatus::Active);
+        let ordinary = make_session("ordinary", "ordinary", false, SessionStatus::Active);
+        if backing != 0 {
+            let (grouped, orphans) = if backing == 1 {
+                (vec![replacement], vec![ordinary])
+            } else {
+                (Vec::new(), vec![replacement, ordinary])
+            };
+            picker.reseed_grouped(
+                vec![ServerGroup {
+                    name: "local".into(),
+                    icon: "●".into(),
+                    version: "test".into(),
+                    git_hash: "test".into(),
+                    is_running: true,
+                    sessions: grouped,
+                }],
+                orphans,
+            );
+        } else {
+            picker.reseed_grouped(Vec::new(), vec![replacement, ordinary]);
+        }
+        hydrate_live_identity_fixture(&mut picker, dir.path(), presences);
+        assert_eq!(picker.visible_session_count(), 1);
+        assert_eq!(picker.selected_session().unwrap().id, "ordinary");
+        assert_eq!(picker.hidden_test_count, 1);
+        picker.toggle_test_sessions();
+        assert_eq!(picker.visible_session_count(), 2);
+    }
+}
+
+#[test]
+fn worker_origin_dto_legacy_future_and_round_trip() {
+    let mut json =
+        serde_json::to_value(make_session("dto", "dto", false, SessionStatus::Closed)).unwrap();
+    json.as_object_mut().unwrap().remove("origin");
+    for origin in [
+        None,
+        Some("future_origin"),
+        Some("unknown"),
+        Some("swarm_worker"),
+    ] {
+        if let Some(origin) = origin {
+            json["origin"] = origin.into();
+        }
+        let session: SessionInfo = serde_json::from_value(json.clone()).unwrap();
+        let actual = serde_json::to_value(session.clone()).unwrap();
+        assert_eq!(
+            actual["origin"],
+            if origin == Some("swarm_worker") {
+                "swarm_worker"
+            } else {
+                "unknown"
+            }
+        );
+        assert_eq!(
+            serde_json::to_value(serde_json::from_value::<SessionInfo>(actual.clone()).unwrap())
+                .unwrap(),
+            actual
+        );
+    }
 }

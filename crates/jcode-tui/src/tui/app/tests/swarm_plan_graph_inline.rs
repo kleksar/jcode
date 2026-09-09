@@ -1755,6 +1755,7 @@ fn test_local_session_picker_switch_is_never_consumed_and_keeps_plan_graph_state
     app.session_picker_overlay = Some(RefCell::new(
         crate::tui::session_picker::SessionPicker::new(vec![
             crate::tui::session_picker::SessionInfo {
+                origin: jcode_session_types::SessionOrigin::Unknown,
                 id: "session_target_456".to_string(),
                 parent_id: None,
                 short_name: "target".to_string(),

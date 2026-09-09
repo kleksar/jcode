@@ -1,6 +1,6 @@
 use chrono::{DateTime, Utc};
 use jcode_message_types::ToolCall;
-use jcode_session_types::SessionStatus;
+use jcode_session_types::{SessionOrigin, SessionStatus};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
@@ -112,6 +112,9 @@ impl SessionFilterMode {
 #[derive(Clone)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct SessionInfo {
+    /// Immutable creation provenance from the native session snapshot.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub origin: SessionOrigin,
     pub id: String,
     pub parent_id: Option<String>,
     pub short_name: String,

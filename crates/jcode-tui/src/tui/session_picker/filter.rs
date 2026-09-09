@@ -1,6 +1,16 @@
 use super::loading::session_matches_picker_query;
 use super::*;
 
+/// The debug toggle is the only opt-in for positively identified workers.
+/// Unknown debug roots retain the legacy Active exception.
+pub(super) fn session_hidden_by_debug_toggle(
+    session: &SessionInfo,
+    mode: SessionFilterMode,
+) -> bool {
+    session.origin == SessionOrigin::SwarmWorker
+        || (session.is_debug && !(mode == SessionFilterMode::Active && session.parent_id.is_none()))
+}
+
 impl SessionPicker {
     fn normalized_search_query(query: &str) -> String {
         query.trim().to_lowercase()
@@ -72,10 +82,7 @@ impl SessionPicker {
             .copied()
             .filter(|session_ref| {
                 self.session_by_ref(*session_ref).is_some_and(|session| {
-                    (show_test
-                        || !session.is_debug
-                        || (filter_mode == SessionFilterMode::Active
-                            && session.parent_id.is_none()))
+                    (show_test || !session_hidden_by_debug_toggle(session, filter_mode))
                         && self.session_matches_filter_mode(session, filter_mode)
                 })
             })
@@ -117,8 +124,7 @@ impl SessionPicker {
         refs.iter()
             .filter_map(|session_ref| self.session_by_ref(*session_ref))
             .filter(|session| {
-                session.is_debug
-                    && !(filter_mode == SessionFilterMode::Active && session.parent_id.is_none())
+                session_hidden_by_debug_toggle(session, filter_mode)
                     && self.session_matches_filter_mode(session, filter_mode)
             })
             .count()
