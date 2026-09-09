@@ -166,7 +166,10 @@ pub(crate) fn set_session_delegated_swarm_read_boundary(session_id: &str, enable
         "DELEGATED_SWARM_READ_BOUNDARY",
         vec![
             ("session_id".to_string(), session_id.to_string()),
-            ("mode".to_string(), if enabled { "delegated" } else { "single-agent" }.to_string()),
+            (
+                "mode".to_string(),
+                if enabled { "delegated" } else { "single-agent" }.to_string(),
+            ),
         ],
     );
 }
@@ -175,15 +178,9 @@ fn delegated_swarm_read_refusal() -> &'static str {
     "Repository content reads are denied for this delegated-swarm root. Request worker follow-up/artifact, or explicitly switch to single-agent mode before inspecting the repository."
 }
 
-fn is_repository_read_call(tool_name: &str, input: &Value) -> bool {
+fn is_repository_read_call(tool_name: &str, _input: &Value) -> bool {
     match tool_name {
-        "read" | "ls" | "agentgrep" => true,
-        "bash" => input.get("command").and_then(Value::as_str).is_some_and(|command| {
-            let command = command.trim().to_ascii_lowercase();
-            ["cat ", "head ", "tail ", "less ", "more ", "sed ", "awk ", "grep ", "rg ", "find "]
-                .iter()
-                .any(|form| command.starts_with(form) || command.contains(&format!("| {form}")) || command.contains(&format!("&& {form}")))
-        }),
+        "read" | "ls" | "agentgrep" | "bash" => true,
         _ => false,
     }
 }

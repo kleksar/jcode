@@ -91,7 +91,7 @@ async fn batch_executes_through_surviving_registry_clone() {
 }
 
 #[tokio::test]
-async fn delegated_root_read_boundary_denies_direct_and_batched_repository_reads() {
+async fn delegated_root_read_boundary_denies_repository_reads_and_all_bash_calls() {
     let registry = registry_with_batch_and_echo().await;
     for tool in ["read", "ls", "agentgrep", "bash"] {
         registry
@@ -107,9 +107,18 @@ async fn delegated_root_read_boundary_denies_direct_and_batched_repository_reads
         ("read", json!({"file_path":"src/lib.rs"})),
         ("ls", json!({"path":"src"})),
         ("agentgrep", json!({"query":"needle"})),
-        ("bash", json!({"command":"cat src/lib.rs"})),
     ] {
         let error = registry.execute(tool, input, ctx.clone()).await.expect_err(tool);
+        assert!(error.to_string().contains("Request worker follow-up/artifact"), "{error}");
+    }
+
+    for command in [
+        "cat src/lib.rs",
+        "echo permitted-looking command",
+        "sh -c 'cat src/lib.rs'",
+        "python3 -c 'print(open(\"src/lib.rs\").read())'",
+    ] {
+        let error = registry.execute("bash", json!({"command": command}), ctx.clone()).await.expect_err(command);
         assert!(error.to_string().contains("Request worker follow-up/artifact"), "{error}");
     }
 
@@ -120,8 +129,14 @@ async fn delegated_root_read_boundary_denies_direct_and_batched_repository_reads
     ).await.expect("batch reports subcall failure");
     assert!(batch.output.contains("Request worker follow-up/artifact"), "{}", batch.output);
 
+    let worker_ctx = ToolContext {
+        session_id: "delegated-worker".to_string(),
+        ..ctx.clone()
+    };
+    registry.execute("bash", json!({"command":"cat src/lib.rs"}), worker_ctx).await.expect("workers retain Bash capability");
+
     super::super::set_session_delegated_swarm_read_boundary(&ctx.session_id, false);
-    registry.execute("read", json!({"file_path":"src/lib.rs"}), ctx).await.expect("explicit single-agent override restores reads");
+    registry.execute("bash", json!({"command":"cat src/lib.rs"}), ctx).await.expect("explicit single-agent override restores Bash capability");
 }
 
 #[tokio::test]
