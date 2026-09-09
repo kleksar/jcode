@@ -168,9 +168,10 @@ pub(crate) fn set_session_delegated_swarm_read_boundary(session_id: &str, enable
     let mut policies = SESSION_TOOL_POLICIES
         .write()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
-    if let Some(policy) = policies.get_mut(session_id) {
-        policy.delegated_swarm_root_read_boundary = enabled;
-    }
+    policies
+        .entry(session_id.to_string())
+        .or_default()
+        .delegated_swarm_root_read_boundary = enabled;
     crate::logging::event_info(
         "DELEGATED_SWARM_READ_BOUNDARY",
         vec![

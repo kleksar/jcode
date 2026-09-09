@@ -92,6 +92,14 @@ async fn batch_executes_through_surviving_registry_clone() {
 
 #[tokio::test]
 async fn delegated_root_read_boundary_denies_repository_reads_and_all_bash_calls() {
+    let ctx = test_context();
+    super::super::clear_session_tool_policy(&ctx.session_id);
+    assert_eq!(
+        super::super::session_delegated_swarm_read_boundary_for_test(&ctx.session_id),
+        None,
+        "the boundary must activate even before a session policy is registered"
+    );
+
     let registry = registry_with_batch_and_echo().await;
     for tool in ["read", "ls", "agentgrep", "bash"] {
         registry
@@ -100,8 +108,12 @@ async fn delegated_root_read_boundary_denies_repository_reads_and_all_bash_calls
             .await
             .insert(tool.to_string(), Arc::new(EchoTool));
     }
-    let ctx = test_context();
     super::super::set_session_delegated_swarm_read_boundary(&ctx.session_id, true);
+    assert_eq!(
+        super::super::session_delegated_swarm_read_boundary_for_test(&ctx.session_id),
+        Some(true),
+        "activating the boundary must install a default session policy"
+    );
 
     for (tool, input) in [
         ("read", json!({"file_path":"src/lib.rs"})),
@@ -137,6 +149,7 @@ async fn delegated_root_read_boundary_denies_repository_reads_and_all_bash_calls
 
     super::super::set_session_delegated_swarm_read_boundary(&ctx.session_id, false);
     registry.execute("bash", json!({"command":"cat src/lib.rs"}), ctx).await.expect("explicit single-agent override restores Bash capability");
+    super::super::clear_session_tool_policy("batch-registry-lifetime");
 }
 
 #[tokio::test]
