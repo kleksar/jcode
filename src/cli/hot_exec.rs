@@ -14,7 +14,10 @@ pub fn has_requested_action(run_result: &RunResult) -> bool {
 
 pub fn execute_requested_action(run_result: &RunResult) -> Result<()> {
     if let Some(ref reload_session_id) = run_result.reload_session {
-        hot_reload(reload_session_id)?;
+        hot_reload(
+            reload_session_id,
+            run_result.reload_recovery_session.as_deref(),
+        )?;
     }
 
     if let Some(ref rebuild_session_id) = run_result.rebuild_session {
@@ -42,6 +45,7 @@ pub fn hot_restart(session_id: &str) -> Result<()> {
     crate::env::set_var("JCODE_RESUMING", "1");
 
     let mut cmd = ProcessCommand::new(&exe);
+    cmd.env_remove("JCODE_RELOAD_RECOVERY_SESSION");
     if is_selfdev {
         cmd.arg("self-dev");
     }
@@ -51,7 +55,7 @@ pub fn hot_restart(session_id: &str) -> Result<()> {
     Err(anyhow::anyhow!("Failed to exec {:?}: {}", exe, err))
 }
 
-pub fn hot_reload(session_id: &str) -> Result<()> {
+pub fn hot_reload(session_id: &str, recovery_session: Option<&str>) -> Result<()> {
     let cwd = std::env::current_dir()?;
 
     crate::env::set_var("JCODE_RESUMING", "1");
@@ -66,6 +70,7 @@ pub fn hot_reload(session_id: &str) -> Result<()> {
                 .arg("--no-update")
                 .env_remove("JCODE_MIGRATE_BINARY")
                 .current_dir(cwd);
+            configure_reload_recovery_env(&mut cmd, session_id, recovery_session);
             let err = crate::platform::replace_process(&mut cmd);
             return Err(anyhow::anyhow!("Failed to exec {:?}: {}", binary_path, err));
         } else {
@@ -118,6 +123,7 @@ pub fn hot_reload(session_id: &str) -> Result<()> {
             // will repopulate the transcript after reconnect.
             .env("JCODE_RELOAD_FAST_START", "1")
             .current_dir(&cwd);
+        configure_reload_recovery_env(&mut cmd, session_id, recovery_session);
         let err = crate::platform::replace_process(&mut cmd);
 
         if err.kind() == std::io::ErrorKind::NotFound && attempt < 2 {
@@ -171,6 +177,7 @@ pub fn hot_update(session_id: &str) -> Result<()> {
                     crate::env::set_var("JCODE_RESUMING", "1");
 
                     let mut cmd = ProcessCommand::new(&exe);
+                    cmd.env_remove("JCODE_RELOAD_RECOVERY_SESSION");
                     if is_selfdev {
                         cmd.arg("self-dev");
                     }
@@ -210,6 +217,7 @@ pub fn hot_update(session_id: &str) -> Result<()> {
     let exe = std::env::current_exe()?;
     let is_selfdev = crate::cli::selfdev::client_selfdev_requested();
     let mut cmd = ProcessCommand::new(&exe);
+    cmd.env_remove("JCODE_RELOAD_RECOVERY_SESSION");
     if is_selfdev {
         cmd.arg("self-dev");
     }
@@ -223,6 +231,43 @@ pub fn hot_update(session_id: &str) -> Result<()> {
 
 pub fn get_repo_dir() -> Option<std::path::PathBuf> {
     build::get_repo_dir()
+}
+
+fn configure_reload_recovery_env(
+    command: &mut ProcessCommand,
+    session_id: &str,
+    recovery_session: Option<&str>,
+) {
+    command.env_remove("JCODE_RELOAD_RECOVERY_SESSION");
+    if let Some(recovery_session) = recovery_session
+        .filter(|recovery_session| !recovery_session.is_empty() && *recovery_session == session_id)
+    {
+        command.env("JCODE_RELOAD_RECOVERY_SESSION", recovery_session);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn reload_recovery_env_is_exact_session_scoped_and_replaces_inheritance() {
+        for (recovery, expected) in [
+            (Some("session-a"), Some("session-a")),
+            (Some("session-b"), None),
+            (Some(""), None),
+            (None, None),
+        ] {
+            let mut command = ProcessCommand::new("jcode");
+            configure_reload_recovery_env(&mut command, "session-a", recovery);
+            let envs: std::collections::HashMap<_, _> = command.get_envs().collect();
+            assert_eq!(
+                envs.get(std::ffi::OsStr::new("JCODE_RELOAD_RECOVERY_SESSION")),
+                Some(&expected.map(std::ffi::OsStr::new)),
+                "recovery={recovery:?}"
+            );
+        }
+    }
 }
 
 /// Minimum interval between `git fetch` update probes across all jcode

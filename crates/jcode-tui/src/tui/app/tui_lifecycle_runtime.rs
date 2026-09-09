@@ -308,8 +308,9 @@ impl App {
 
     /// Restore a previous session. Recovery requires explicit session authority.
     pub fn restore_session(&mut self, session_id: &str) {
-        let handoff =
-            super::reload_recovery_authority::take_reload_recovery_session_from_env(Some(session_id));
+        let handoff = super::reload_recovery_authority::take_reload_recovery_session_from_env(
+            Some(session_id),
+        );
         if !self.reload_recovery_is_authorized(session_id) {
             self.reload_recovery_authorized_session = None;
         }
@@ -704,6 +705,7 @@ pub(super) fn handle_dev_command(app: &mut App, trimmed: &str) -> bool {
             .set_status(crate::session::SessionStatus::Reloaded);
         let _ = app.session.save();
         app.save_input_for_reload(&app.session.id.clone());
+        app.authorize_reload_recovery(&app.session.id.clone());
         app.reload_requested = Some(app.session.id.clone());
         app.should_quit = true;
         return true;

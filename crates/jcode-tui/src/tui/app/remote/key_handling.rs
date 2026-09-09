@@ -1015,7 +1015,13 @@ async fn handle_remote_key_internal(
 
                     if server_needs_reload {
                         app.append_reload_message("Reloading server with newer binary...");
-                        remote.reload().await?;
+                        let session_id = app.reload_handoff_session_id();
+                        let recovery_authorization = app.reload_recovery_authorized_session.clone();
+                        app.authorize_reload_recovery(&session_id);
+                        if let Err(error) = remote.reload().await {
+                            app.reload_recovery_authorized_session = recovery_authorization;
+                            return Err(error);
+                        }
                     }
 
                     if client_needs_reload {
@@ -1043,7 +1049,13 @@ async fn handle_remote_key_internal(
 
                 if trimmed == "/server-reload" {
                     app.append_reload_message("Reloading server...");
-                    remote.reload().await?;
+                    let session_id = app.reload_handoff_session_id();
+                    let recovery_authorization = app.reload_recovery_authorized_session.clone();
+                    app.authorize_reload_recovery(&session_id);
+                    if let Err(error) = remote.reload().await {
+                        app.reload_recovery_authorized_session = recovery_authorization;
+                        return Err(error);
+                    }
                     return Ok(());
                 }
 

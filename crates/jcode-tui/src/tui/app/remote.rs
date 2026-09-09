@@ -1135,6 +1135,11 @@ pub(super) async fn handle_remote_event<B: Backend>(
         }
         RemoteRead::Event(ServerEvent::Reloading { new_socket }) => {
             let _ = new_socket;
+            if !state.server_reload_in_progress && app.is_processing {
+                if let Some(session_id) = app.remote_session_id.clone() {
+                    app.authorize_reload_recovery(&session_id);
+                }
+            }
             state.server_reload_in_progress = true;
             state.reload_recovery_attempted = false;
             state.last_disconnect_reason = Some("server reload in progress".to_string());

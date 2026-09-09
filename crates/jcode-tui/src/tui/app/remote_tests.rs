@@ -1644,6 +1644,83 @@ fn resume_authority_passive_history(directive: bool, interrupted: Option<bool>) 
     );
 }
 
+#[test]
+fn explicit_remote_server_reload_arms_exact_session_and_write_failure_restores_prior_scope() {
+    use crossterm::event::{KeyCode, KeyModifiers};
+
+    let _lock = crate::storage::lock_test_env();
+    let _env = ResumeAuthorityEnv::new();
+    tokio::runtime::Runtime::new().unwrap().block_on(async {
+        let (mut app, _) = resume_authority_app("reload-session");
+        let mut remote = crate::tui::backend::RemoteConnection::dummy();
+        app.input = "/server-reload".into();
+        app.handle_remote_key(KeyCode::Enter, KeyModifiers::NONE, &mut remote)
+            .await
+            .unwrap();
+        assert!(app.reload_recovery_is_authorized("reload-session"));
+
+        app.authorize_reload_recovery("prior-session");
+        app.input = "/server-reload".into();
+        let peer = remote.take_dummy_peer().unwrap();
+        drop(peer);
+        assert!(
+            app.handle_remote_key(KeyCode::Enter, KeyModifiers::NONE, &mut remote)
+                .await
+                .is_err()
+        );
+        assert!(app.reload_recovery_is_authorized("prior-session"));
+    });
+}
+
+#[test]
+fn live_reloading_arms_only_active_turn_once() {
+    let _lock = crate::storage::lock_test_env();
+    let _env = ResumeAuthorityEnv::new();
+    tokio::runtime::Runtime::new().unwrap().block_on(async {
+        let (mut app, _) = resume_authority_app("live-session");
+        let mut remote = crate::tui::backend::RemoteConnection::dummy();
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 24)).unwrap();
+        let mut state = reconnect::RemoteRunState::default();
+
+        super::handle_remote_event(
+            &mut app,
+            &mut terminal,
+            &mut remote,
+            &mut state,
+            crate::tui::backend::RemoteRead::Event(ServerEvent::Reloading { new_socket: None }),
+        )
+        .await
+        .unwrap();
+        assert!(!app.reload_recovery_is_authorized("live-session"));
+
+        app.is_processing = true;
+        app.remote_session_id = Some("live-session".into());
+        state.server_reload_in_progress = false;
+        super::handle_remote_event(
+            &mut app,
+            &mut terminal,
+            &mut remote,
+            &mut state,
+            crate::tui::backend::RemoteRead::Event(ServerEvent::Reloading { new_socket: None }),
+        )
+        .await
+        .unwrap();
+        assert!(app.reload_recovery_is_authorized("live-session"));
+        app.reload_recovery_authorized_session = None;
+        super::handle_remote_event(
+            &mut app,
+            &mut terminal,
+            &mut remote,
+            &mut state,
+            crate::tui::backend::RemoteRead::Event(ServerEvent::Reloading { new_socket: None }),
+        )
+        .await
+        .unwrap();
+        assert!(!app.reload_recovery_is_authorized("live-session"));
+    });
+}
+
 /// Restore every process input even if an assertion panics.
 struct ResumeAuthorityEnv {
     _home: tempfile::TempDir,
