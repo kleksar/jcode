@@ -1035,7 +1035,7 @@ pub(super) fn selected_document_change_lines(
     };
     let Some(snapshot) = snapshot else {
         return Arc::new(vec![Line::from(Span::styled(
-            "No changes for this document",
+            "Loading changes…",
             Style::default().fg(dim_color()),
         ))]);
     };
@@ -1056,9 +1056,56 @@ fn document_relative_path(
         return None;
     }
     let root = Path::new(working_dir?.trim()).canonicalize().ok()?;
-    let file = Path::new(&page.file_path).canonicalize().ok()?;
+    let file = canonicalize_existing_ancestor(lexical_absolute_path(Path::new(&page.file_path))?)?;
     let relative = file.strip_prefix(root).ok()?;
     Some(relative.to_string_lossy().replace('\\', "/"))
+}
+
+/// Normalize an absolute path without touching its final filesystem entry.
+///
+/// Linked documents can be deleted after their last successful read, while git
+/// still has a deletion diff to show. Canonicalizing the leaf would reject that
+/// safe, tracked case, so only the canonical worktree root establishes the
+/// filesystem boundary. Lexical normalization rejects relative paths and any
+/// traversal that would escape the absolute root before `strip_prefix` confirms
+/// the page remains under the worktree.
+fn lexical_absolute_path(path: &Path) -> Option<PathBuf> {
+    if !path.is_absolute() {
+        return None;
+    }
+
+    let mut normalized = PathBuf::new();
+    for component in path.components() {
+        match component {
+            std::path::Component::Prefix(prefix) => normalized.push(prefix.as_os_str()),
+            std::path::Component::RootDir => normalized.push(component.as_os_str()),
+            std::path::Component::CurDir => {}
+            std::path::Component::Normal(segment) => normalized.push(segment),
+            std::path::Component::ParentDir if !normalized.pop() => return None,
+            std::path::Component::ParentDir => {}
+        }
+    }
+    Some(normalized)
+}
+
+/// Resolve only an existing ancestor, then append the missing lexical suffix.
+/// This handles platform aliases such as macOS `/var` while still allowing a
+/// deleted leaf and rejecting symlinks that resolve outside the working root.
+fn canonicalize_existing_ancestor(path: PathBuf) -> Option<PathBuf> {
+    let mut ancestor = path;
+    let mut missing_suffix = Vec::new();
+    loop {
+        if let Ok(canonical) = ancestor.canonicalize() {
+            return Some(
+                missing_suffix
+                    .into_iter()
+                    .rev()
+                    .fold(canonical, |path, segment| path.join(segment)),
+            );
+        }
+        missing_suffix.push(ancestor.file_name()?.to_os_string());
+        ancestor = ancestor.parent()?.to_path_buf();
+    }
 }
 
 const DIFF_TAB_LABEL: &str = " Diff ";

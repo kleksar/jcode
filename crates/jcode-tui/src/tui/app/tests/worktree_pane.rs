@@ -814,7 +814,7 @@ fn test_documents_mouse_header_controls_select_modes_and_pages() {
         "one",
         &[("one", "One", "# one"), ("two", "Two", "# two")],
     ));
-    let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(140, 30)).unwrap();
+    let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(200, 30)).unwrap();
     render_and_snap(&app, &mut terminal);
     let layout = crate::tui::ui::worktree_pane_layout().expect("documents layout");
 
@@ -1298,8 +1298,41 @@ fn test_documents_changes_shows_safe_message_while_snapshot_is_unavailable() {
 
     let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(140, 30)).unwrap();
     let text = render_and_snap(&app, &mut terminal);
-    assert!(text.contains("No changes for this document"), "{text}");
+    assert!(text.contains("Loading changes…"), "{text}");
+    assert!(
+        text.contains("Documents") && text.contains("Changes"),
+        "{text}"
+    );
+    assert!(!text.contains("No changes for this document"), "{text}");
     assert!(!text.contains("document body"), "{text}");
+}
+
+#[test]
+fn test_documents_changes_shows_deleted_focused_linked_file_diff() {
+    let _lock = scroll_render_test_lock();
+    let repo = init_worktree_pane_test_repo();
+    std::fs::remove_file(repo.path().join("demo.rs")).expect("delete tracked linked file");
+    crate::tui::ui::prime_worktree_changes_for_tests(repo.path());
+    let mut app = create_test_app();
+    app.session.working_dir = Some(repo.path().to_string_lossy().into_owned());
+    app.apply_side_panel_snapshot(linked_document_snapshot(
+        "demo",
+        &[(
+            "demo",
+            "Demo",
+            &repo.path().join("demo.rs"),
+            "last good linked content",
+        )],
+    ));
+    app.set_diff_pane_focus(true);
+    assert!(app.handle_diff_pane_focus_key(KeyCode::Char('m'), KeyModifiers::NONE));
+    assert!(app.handle_diff_pane_focus_key(KeyCode::Char('m'), KeyModifiers::NONE));
+
+    let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(140, 30)).unwrap();
+    let text = render_and_snap(&app, &mut terminal);
+    assert!(text.contains("fn old() {}"), "{text}");
+    assert!(!text.contains("No changes for this document"), "{text}");
+    assert!(!text.contains("last good linked content"), "{text}");
 }
 
 #[test]

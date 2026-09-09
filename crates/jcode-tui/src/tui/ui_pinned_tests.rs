@@ -897,6 +897,56 @@ fn render_side_panel_content_change_with_same_revision_invalidates_cache() {
 }
 
 #[test]
+fn render_side_panel_cache_does_not_leak_between_documents_with_distinct_content() {
+    clear_side_panel_render_caches();
+    let first_page = crate::side_panel::SidePanelPage {
+        id: "first_document".to_string(),
+        title: "First Document".to_string(),
+        file_path: "first.md".to_string(),
+        format: crate::side_panel::SidePanelPageFormat::Markdown,
+        source: crate::side_panel::SidePanelPageSource::Managed,
+        content: "# First document only".to_string(),
+        updated_at_ms: 1,
+    };
+    let second_page = crate::side_panel::SidePanelPage {
+        id: "second_document".to_string(),
+        title: "Second Document".to_string(),
+        file_path: "second.md".to_string(),
+        format: crate::side_panel::SidePanelPageFormat::Markdown,
+        source: crate::side_panel::SidePanelPageSource::Managed,
+        content: "# Second document only".to_string(),
+        updated_at_ms: 1,
+    };
+
+    let _ = render_side_panel_markdown_cached(&first_page, Rect::new(0, 0, 28, 12), false, false);
+    let second =
+        render_side_panel_markdown_cached(&second_page, Rect::new(0, 0, 28, 12), false, false);
+    let second_text: Vec<String> = second
+        .lines
+        .iter()
+        .map(|line| {
+            line.spans
+                .iter()
+                .map(|span| span.content.as_ref())
+                .collect()
+        })
+        .collect();
+
+    assert!(
+        second_text
+            .iter()
+            .any(|line| line.contains("Second document only")),
+        "second document must render its current content: {second_text:?}"
+    );
+    assert!(
+        !second_text
+            .iter()
+            .any(|line| line.contains("First document only")),
+        "second document must not receive the first document cache entry: {second_text:?}"
+    );
+}
+
+#[test]
 fn prewarm_focused_side_panel_reuses_markdown_cache_on_first_draw() {
     clear_side_panel_render_caches();
     // Thread-local counter: see render_side_panel_height_change test.
