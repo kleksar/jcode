@@ -135,6 +135,9 @@ pub struct Session {
     /// Optional fixed model to use for subagents launched from this session.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub subagent_model: Option<String>,
+    /// Root has delegated repository inspection to swarm workers.
+    #[serde(default)]
+    pub delegated_swarm_root_read_boundary: bool,
     /// Last requested `/improve` mode for this session.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub improve_mode: Option<SessionImproveMode>,
@@ -224,6 +227,8 @@ struct SessionStartupStub {
     reasoning_effort: Option<String>,
     #[serde(default)]
     subagent_model: Option<String>,
+    #[serde(default)]
+    delegated_swarm_root_read_boundary: bool,
     #[serde(default)]
     improve_mode: Option<SessionImproveMode>,
     #[serde(default)]
@@ -331,6 +336,7 @@ impl Session {
         session.route_api_method = stub.route_api_method;
         session.reasoning_effort = stub.reasoning_effort;
         session.subagent_model = stub.subagent_model;
+        session.delegated_swarm_root_read_boundary = stub.delegated_swarm_root_read_boundary;
         session.improve_mode = stub.improve_mode;
         session.autoreview_enabled = stub.autoreview_enabled;
         session.autojudge_enabled = stub.autojudge_enabled;
@@ -503,6 +509,7 @@ impl Session {
             model: self.model.clone(),
             reasoning_effort: self.reasoning_effort.clone(),
             subagent_model: self.subagent_model.clone(),
+            delegated_swarm_root_read_boundary: self.delegated_swarm_root_read_boundary,
             improve_mode: self.improve_mode,
             autoreview_enabled: self.autoreview_enabled,
             autojudge_enabled: self.autojudge_enabled,
@@ -744,6 +751,7 @@ impl Session {
             route_api_method: None,
             reasoning_effort: None,
             subagent_model: None,
+            delegated_swarm_root_read_boundary: false,
             improve_mode: None,
             autoreview_enabled: None,
             autojudge_enabled: None,
@@ -798,6 +806,7 @@ impl Session {
             route_api_method: None,
             reasoning_effort: None,
             subagent_model: None,
+            delegated_swarm_root_read_boundary: false,
             improve_mode: None,
             autoreview_enabled: None,
             autojudge_enabled: None,

@@ -103,6 +103,9 @@ struct PersistedSwarmState {
     plan: Option<PersistedVersionedPlan>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     coordinator_session_id: Option<String>,
+    /// A coordinator that has durable worker members delegates repository reads.
+    #[serde(default)]
+    delegated_root_repository_read_boundary: bool,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     members: Vec<PersistedSwarmMember>,
     updated_at_unix_ms: u64,
@@ -256,6 +259,7 @@ fn remove_snapshot_files(swarm_id: &str) -> bool {
         swarm_id: swarm_id.to_string(),
         plan: None,
         coordinator_session_id: None,
+        delegated_root_repository_read_boundary: false,
         members: Vec::new(),
         updated_at_unix_ms: now_unix_ms(),
     };
@@ -621,6 +625,8 @@ pub(super) fn persist_swarm_state(
         swarm_id: swarm_id.to_string(),
         plan: swarm_plan.map(to_persisted_plan),
         coordinator_session_id: coordinator_session_id.map(str::to_string),
+        delegated_root_repository_read_boundary: coordinator_session_id.is_some()
+            && !swarm_members.is_empty(),
         members,
         updated_at_unix_ms: snapshot_unix_ms,
     };

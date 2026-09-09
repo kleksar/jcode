@@ -760,6 +760,17 @@ pub(super) async fn spawn_swarm_agent(
     };
     persist_swarm_state_for(swarm_id, &swarm_state).await;
 
+    // The root, not its workers, now delegates repository inspection. Persist
+    // the mode on the root session and install the registry-level boundary.
+    if let Some(root) = sessions.read().await.get(req_session_id).cloned() {
+        let mut root = root.lock().await;
+        root.session.delegated_swarm_root_read_boundary = true;
+        crate::tool::set_session_delegated_swarm_read_boundary(req_session_id, true);
+        if let Err(error) = root.session.save() {
+            crate::logging::warn(&format!("Failed to persist delegated swarm read boundary: {error}"));
+        }
+    }
+
     if let Some(initial_msg) = startup_message
         && is_headless_fallback
     {

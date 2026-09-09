@@ -20,6 +20,8 @@ pub(super) struct SessionJournalMeta {
     #[serde(default)]
     pub(super) reasoning_effort: Option<String>,
     pub(super) subagent_model: Option<String>,
+    #[serde(default)]
+    pub(super) delegated_swarm_root_read_boundary: bool,
     pub(super) improve_mode: Option<SessionImproveMode>,
     pub(super) autoreview_enabled: Option<bool>,
     pub(super) autojudge_enabled: Option<bool>,
@@ -80,6 +82,7 @@ pub(super) fn metadata_requires_snapshot(
         || prev.provider_key != current.provider_key
         || prev.reasoning_effort != current.reasoning_effort
         || prev.subagent_model != current.subagent_model
+        || prev.delegated_swarm_root_read_boundary != current.delegated_swarm_root_read_boundary
         || prev.improve_mode != current.improve_mode
         || prev.autoreview_enabled != current.autoreview_enabled
         || prev.autojudge_enabled != current.autojudge_enabled

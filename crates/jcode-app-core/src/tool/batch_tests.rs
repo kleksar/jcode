@@ -91,6 +91,40 @@ async fn batch_executes_through_surviving_registry_clone() {
 }
 
 #[tokio::test]
+async fn delegated_root_read_boundary_denies_direct_and_batched_repository_reads() {
+    let registry = registry_with_batch_and_echo().await;
+    for tool in ["read", "ls", "agentgrep", "bash"] {
+        registry
+            .tools
+            .write()
+            .await
+            .insert(tool.to_string(), Arc::new(EchoTool));
+    }
+    let ctx = test_context();
+    super::super::set_session_delegated_swarm_read_boundary(&ctx.session_id, true);
+
+    for (tool, input) in [
+        ("read", json!({"file_path":"src/lib.rs"})),
+        ("ls", json!({"path":"src"})),
+        ("agentgrep", json!({"query":"needle"})),
+        ("bash", json!({"command":"cat src/lib.rs"})),
+    ] {
+        let error = registry.execute(tool, input, ctx.clone()).await.expect_err(tool);
+        assert!(error.to_string().contains("Request worker follow-up/artifact"), "{error}");
+    }
+
+    let batch = registry.execute(
+        "batch",
+        json!({"tool_calls":[{"tool":"read","parameters":{"file_path":"src/lib.rs"}}]}),
+        ctx.clone(),
+    ).await.expect("batch reports subcall failure");
+    assert!(batch.output.contains("Request worker follow-up/artifact"), "{}", batch.output);
+
+    super::super::set_session_delegated_swarm_read_boundary(&ctx.session_id, false);
+    registry.execute("read", json!({"file_path":"src/lib.rs"}), ctx).await.expect("explicit single-agent override restores reads");
+}
+
+#[tokio::test]
 async fn batch_fails_cleanly_after_registry_tool_map_is_dropped() {
     let registry = registry_with_batch_and_echo().await;
     let batch = registry

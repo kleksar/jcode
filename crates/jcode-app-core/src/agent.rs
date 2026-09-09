@@ -303,6 +303,9 @@ impl Agent {
             allowed_tools.clone(),
             disabled_tools.clone(),
         );
+        if session.delegated_swarm_root_read_boundary {
+            crate::tool::set_session_delegated_swarm_read_boundary(&session.id, true);
+        }
         Self {
             provider,
             registry,
