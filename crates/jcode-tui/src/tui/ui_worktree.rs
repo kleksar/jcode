@@ -236,7 +236,7 @@ pub(super) fn snapshot_for_worktree(
         return None;
     }
     let path = PathBuf::from(working_dir);
-    let mut cache = worktree_cache().lock().ok()?;
+    let path = path.canonicalize().unwrap_or(path);
     let entry = cache.entry(path.clone()).or_default();
     let fresh = entry
         .fetched_at
@@ -310,6 +310,7 @@ pub(super) fn snapshot_for_project_tree(
     working_dir: Option<&str>,
 ) -> Option<Arc<ProjectTreeSnapshot>> {
     let path = PathBuf::from(working_dir?);
+    let path = path.canonicalize().unwrap_or(path);
     project_tree_cache()
         .lock()
         .ok()?
@@ -322,6 +323,7 @@ pub(super) fn snapshot_for_worktree(
     working_dir: Option<&str>,
 ) -> Option<Arc<WorktreeChangesSnapshot>> {
     let path = PathBuf::from(working_dir?);
+    let path = path.canonicalize().unwrap_or(path);
     worktree_cache()
         .lock()
         .ok()?
@@ -349,7 +351,9 @@ pub(crate) fn prime_worktree_changes_for_tests(working_dir: &Path) {
     let snapshot = collect_worktree_changes(working_dir);
     if let Ok(mut cache) = worktree_cache().lock() {
         cache.insert(
-            working_dir.to_path_buf(),
+            working_dir
+                .canonicalize()
+                .unwrap_or_else(|_| working_dir.to_path_buf()),
             WorktreeCacheEntry {
                 fetched_at: Some(Instant::now()),
                 snapshot: snapshot.map(Arc::new),
@@ -363,7 +367,9 @@ pub(crate) fn prime_project_tree_for_tests(working_dir: &Path) {
     let snapshot = collect_project_tree(working_dir);
     if let Ok(mut cache) = project_tree_cache().lock() {
         cache.insert(
-            working_dir.to_path_buf(),
+            working_dir
+                .canonicalize()
+                .unwrap_or_else(|_| working_dir.to_path_buf()),
             ProjectTreeCacheEntry {
                 fetched_at: Some(Instant::now()),
                 snapshot: snapshot.map(Arc::new),
@@ -1173,7 +1179,14 @@ fn project_pane_tab_areas(area: Rect) -> (Rect, Rect, Rect, Rect, Rect, Rect, Re
     // inset. Hit areas must begin at the first rendered header cell.
     let header_x = area.x.saturating_add(3);
     let header = Rect::new(header_x, area.y, area.right().saturating_sub(header_x), 1);
-    let clip = |rect: Rect| rect.intersection(header);
+    let clip = |rect: Rect| {
+        let clipped = rect.intersection(header);
+        if clipped.width == 0 || clipped.height == 0 {
+            Rect::default()
+        } else {
+            clipped
+        }
+    };
     let diff = clip(Rect::new(header_x, area.y, DIFF_TAB_LABEL.len() as u16, 1));
     let files = clip(Rect::new(
         diff.right().saturating_add(1),
