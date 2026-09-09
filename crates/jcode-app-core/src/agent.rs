@@ -425,6 +425,34 @@ impl Agent {
         Self::new_with_initial_ownership(provider, registry, working_dir, parent_id, true)
     }
 
+    pub(crate) fn new_with_parent_and_initial_working_dir_and_origin(
+        provider: Arc<dyn Provider>,
+        registry: Registry,
+        working_dir: Option<&str>,
+        parent_id: Option<String>,
+        origin: crate::session::SessionOrigin,
+    ) -> anyhow::Result<Self> {
+        if origin == crate::session::SessionOrigin::Unknown {
+            return Ok(Self::new_with_parent_and_initial_working_dir(
+                provider,
+                registry,
+                working_dir,
+                parent_id,
+            ));
+        }
+        let start = Instant::now();
+        let mut session = Session::create_with_origin(parent_id, None, origin);
+        if let Some(working_dir) = working_dir {
+            session.working_dir = Some(working_dir.to_string());
+        }
+        // Immutable worker provenance must be durable before build_base,
+        // active presence, lifecycle hooks, or any other Agent side effects.
+        session.save()?;
+        Ok(Self::initialize_new_session(
+            provider, registry, session, true, start,
+        ))
+    }
+
     fn new_with_initial_ownership(
         provider: Arc<dyn Provider>,
         registry: Registry,
@@ -433,11 +461,21 @@ impl Agent {
         track_concurrency: bool,
     ) -> Self {
         let start = Instant::now();
-        let tool_selection = crate::config::config().tools.selection();
         let mut session = Session::create(parent_id, None);
         if let Some(working_dir) = working_dir {
             session.working_dir = Some(working_dir.to_string());
         }
+        Self::initialize_new_session(provider, registry, session, track_concurrency, start)
+    }
+
+    fn initialize_new_session(
+        provider: Arc<dyn Provider>,
+        registry: Registry,
+        session: Session,
+        track_concurrency: bool,
+        start: Instant,
+    ) -> Self {
+        let tool_selection = crate::config::config().tools.selection();
         let mut agent = Self::build_base(
             provider,
             registry,

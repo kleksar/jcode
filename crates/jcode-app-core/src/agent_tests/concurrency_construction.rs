@@ -81,3 +81,177 @@ async fn headless_parent_is_set_before_concurrency_tracking_begins() {
     assert!(root.session.parent_id.is_none());
     assert!(format!("{:?}", root.concurrency_session).contains("child: false"));
 }
+
+struct OriginOrderingProvider {
+    inspect: Arc<std::sync::atomic::AtomicBool>,
+}
+
+#[async_trait::async_trait]
+impl Provider for OriginOrderingProvider {
+    async fn complete(
+        &self,
+        _: &[crate::message::Message],
+        _: &[crate::message::ToolDefinition],
+        _: &str,
+        _: Option<&str>,
+    ) -> anyhow::Result<crate::provider::EventStream> {
+        panic!("no real provider calls")
+    }
+    fn name(&self) -> &str {
+        "origin-ordering-test"
+    }
+    fn model(&self) -> String {
+        if self
+            .inspect
+            .swap(false, std::sync::atomic::Ordering::SeqCst)
+        {
+            let sessions = std::fs::read_dir(crate::storage::jcode_dir().unwrap().join("sessions"))
+                .expect("initial snapshot must precede build_base");
+            let paths: Vec<_> = sessions
+                .map(|entry| entry.unwrap().path())
+                .filter(|path| path.extension().is_some_and(|ext| ext == "json"))
+                .collect();
+            assert_eq!(paths.len(), 1);
+            let snapshot: serde_json::Value =
+                serde_json::from_slice(&std::fs::read(&paths[0]).unwrap()).unwrap();
+            assert_eq!(snapshot["origin"], "swarm_worker");
+            let active = crate::storage::jcode_dir().unwrap().join("active_pids");
+            assert!(
+                !active.exists() || std::fs::read_dir(active).unwrap().next().is_none(),
+                "snapshot precedes mark_active publication"
+            );
+            assert_eq!(snapshot["working_dir"], "/worker-origin-cwd");
+            assert_eq!(snapshot["parent_id"], "origin-coordinator");
+            assert!(
+                snapshot["messages"].as_array().unwrap().is_empty(),
+                "snapshot precedes context and environment hooks"
+            );
+        }
+        "test-model".to_string()
+    }
+    fn fork(&self) -> Arc<dyn Provider> {
+        Arc::new(Self {
+            inspect: self.inspect.clone(),
+        })
+    }
+}
+
+#[tokio::test]
+async fn worker_origin_snapshot_precedes_agent_initialization() {
+    let _lock = crate::storage::lock_test_env();
+    let _env = IsolatedTelemetryEnv::new();
+    let inspect = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let provider: Arc<dyn Provider> = Arc::new(OriginOrderingProvider {
+        inspect: inspect.clone(),
+    });
+    let registry = Registry::new(provider.clone()).await;
+    inspect.store(true, std::sync::atomic::Ordering::SeqCst);
+    let agent = Agent::new_with_parent_and_initial_working_dir_and_origin(
+        provider,
+        registry,
+        Some("/worker-origin-cwd"),
+        Some("origin-coordinator".to_string()),
+        crate::session::SessionOrigin::SwarmWorker,
+    )
+    .unwrap();
+    assert!(!inspect.load(std::sync::atomic::Ordering::SeqCst));
+    assert_eq!(
+        agent.session.origin(),
+        crate::session::SessionOrigin::SwarmWorker
+    );
+    assert!(agent.has_concurrency_tracking());
+}
+
+#[tokio::test]
+async fn worker_origin_save_failure_prevents_agent_initialization() {
+    let _lock = crate::storage::lock_test_env();
+    let env = IsolatedTelemetryEnv::new();
+    let inspect = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let provider: Arc<dyn Provider> = Arc::new(OriginOrderingProvider {
+        inspect: inspect.clone(),
+    });
+    let registry = Registry::new(provider.clone()).await;
+    std::fs::write(env._home.path().join("sessions"), "block snapshots").unwrap();
+    inspect.store(true, std::sync::atomic::Ordering::SeqCst);
+    let result = Agent::new_with_parent_and_initial_working_dir_and_origin(
+        provider,
+        registry,
+        None,
+        None,
+        crate::session::SessionOrigin::SwarmWorker,
+    );
+    assert!(result.is_err());
+    assert!(
+        inspect.load(std::sync::atomic::Ordering::SeqCst),
+        "build_base must not run"
+    );
+    let active = env._home.path().join("active_pids");
+    assert!(!active.exists() || std::fs::read_dir(active).unwrap().next().is_none());
+}
+
+#[tokio::test]
+async fn worker_origin_ordinary_wrappers_and_resumed_sessions_remain_unknown() {
+    let _lock = crate::storage::lock_test_env();
+    let _env = IsolatedTelemetryEnv::new();
+    let provider: Arc<dyn Provider> = Arc::new(NativeAutoCompactionProvider);
+    let ordinary = Agent::new(provider.clone(), Registry::new(provider.clone()).await);
+    assert_eq!(
+        ordinary.session.origin(),
+        crate::session::SessionOrigin::Unknown
+    );
+    let provisional = Agent::new_provisional_with_initial_working_dir(
+        provider.clone(),
+        Registry::new(provider.clone()).await,
+        None,
+    );
+    assert_eq!(
+        provisional.session.origin(),
+        crate::session::SessionOrigin::Unknown
+    );
+    let child = Agent::new_with_parent_and_initial_working_dir(
+        provider.clone(),
+        Registry::new(provider.clone()).await,
+        None,
+        Some(ordinary.session_id().to_string()),
+    );
+    assert_eq!(
+        child.session.origin(),
+        crate::session::SessionOrigin::Unknown
+    );
+    // A normal fork, even of a worker, is not itself a swarm-created worker.
+    let worker = crate::session::Session::create_with_origin(
+        None,
+        None,
+        crate::session::SessionOrigin::SwarmWorker,
+    );
+    let mut fork = crate::session::Session::create(Some(worker.id.clone()), None);
+    fork.append_fork_notice(&worker.id, "worker");
+    fork.save().unwrap();
+    let fork = Agent::new_with_session(
+        provider.clone(),
+        Registry::new(provider.clone()).await,
+        fork,
+        None,
+    );
+    assert_eq!(
+        fork.session.origin(),
+        crate::session::SessionOrigin::Unknown
+    );
+    assert_eq!(
+        crate::session::Session::load(fork.session_id())
+            .unwrap()
+            .origin(),
+        crate::session::SessionOrigin::Unknown
+    );
+    let old = crate::session::Session::create_with_id("legacy-reused".to_string(), None, None);
+    let resumed = Agent::new_with_session(
+        provider.clone(),
+        Registry::new(provider.clone()).await,
+        old,
+        None,
+    );
+    assert_eq!(
+        resumed.session.origin(),
+        crate::session::SessionOrigin::Unknown
+    );
+}

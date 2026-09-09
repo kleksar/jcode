@@ -314,6 +314,12 @@ fn prepare_visible_spawn_session_persists_startup_before_launch() {
         Some(startup),
         |session_id, _cwd: &std::path::Path, _selfdev, provider_key| {
             assert_eq!(provider_key, None);
+            let snapshot = crate::session::Session::load(session_id)
+                .expect("worker snapshot must exist before launch");
+            assert_eq!(
+                snapshot.origin(),
+                crate::session::SessionOrigin::SwarmWorker
+            );
             let path = crate::storage::jcode_dir()
                 .expect("jcode dir")
                 .join(format!("client-input-{}", session_id));
@@ -1260,4 +1266,18 @@ fn swarm_spawn_effort_prefers_explicit_then_config_pin_then_inherit() {
     // With neither, the worker inherits the provider-wide effort.
     assert_eq!(resolve_swarm_spawn_effort(None, None), None);
     assert_eq!(resolve_swarm_spawn_effort(Some(""), Some("")), None);
+}
+
+#[test]
+fn worker_origin_visible_save_failure_prevents_launch() {
+    let _guard = crate::storage::lock_test_env();
+    let home = tempfile::TempDir::new().unwrap();
+    crate::env::set_var("JCODE_HOME", home.path());
+    std::fs::write(home.path().join("sessions"), "block snapshots").unwrap();
+    let result =
+        prepare_visible_spawn_session(None, None, None, None, None, false, None, |_, _, _, _| {
+            panic!("failed persistence must not launch")
+        });
+    assert!(result.is_err());
+    crate::env::remove_var("JCODE_HOME");
 }

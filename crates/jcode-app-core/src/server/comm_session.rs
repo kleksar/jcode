@@ -76,7 +76,8 @@ fn create_visible_spawn_session(
         .map(PathBuf::from)
         .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
 
-    let mut session = Session::create(None, None);
+    let mut session =
+        Session::create_with_origin(None, None, crate::session::SessionOrigin::SwarmWorker);
     session.working_dir = Some(cwd.display().to_string());
     if let Some(model) = model_override {
         session.model = Some(model.to_string());
@@ -694,6 +695,7 @@ pub(super) async fn spawn_swarm_agent(
                 Some(Arc::clone(mcp_pool)),
                 Some(req_session_id.to_string()),
                 super::headless::HeadlessMemoryScope::RealProject,
+                crate::session::SessionOrigin::SwarmWorker,
             )
             .await
             .and_then(|result_json| {

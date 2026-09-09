@@ -90,6 +90,7 @@ pub(super) async fn maybe_handle_session_admin_command(
             mcp_pool,
             None,
             super::headless::HeadlessMemoryScope::IsolatedTest,
+            crate::session::SessionOrigin::Unknown,
         )
         .await?;
         if let Ok(value) = serde_json::from_str::<serde_json::Value>(&created)

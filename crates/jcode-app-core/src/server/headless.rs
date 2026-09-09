@@ -52,6 +52,7 @@ pub(super) async fn create_headless_session(
     mcp_pool: Option<Arc<crate::mcp::SharedMcpPool>>,
     report_back_to_session_id: Option<String>,
     memory_scope: HeadlessMemoryScope,
+    origin: crate::session::SessionOrigin,
 ) -> Result<String> {
     let memory_enabled = crate::config::config().features.memory;
     let swarm_enabled = crate::config::config().features.swarm;
@@ -90,12 +91,13 @@ pub(super) async fn create_headless_session(
     let working_dir_string = working_dir
         .as_ref()
         .map(|dir| dir.to_string_lossy().into_owned());
-    let mut new_agent = Agent::new_with_parent_and_initial_working_dir(
+    let mut new_agent = Agent::new_with_parent_and_initial_working_dir_and_origin(
         Arc::clone(&provider),
         registry,
         working_dir_string.as_deref(),
         report_back_to_session_id.clone(),
-    );
+        origin,
+    )?;
     new_agent.set_memory_enabled(memory_enabled);
     // Inline swarm mode renders a live gallery of worker viewports in the
     // coordinator TUI; enable the per-agent output tap so this worker streams a
@@ -341,6 +343,167 @@ fn models_are_equivalent(resolved: &str, requested: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::models_are_equivalent;
+
+    use super::*;
+    use crate::session::{Session, SessionOrigin};
+
+    struct OriginTestHome {
+        home: tempfile::TempDir,
+        previous: Option<std::ffi::OsString>,
+    }
+    impl OriginTestHome {
+        fn new() -> Self {
+            let home = tempfile::TempDir::new().unwrap();
+            let previous = std::env::var_os("JCODE_HOME");
+            crate::env::set_var("JCODE_HOME", home.path());
+            Self { home, previous }
+        }
+    }
+    impl Drop for OriginTestHome {
+        fn drop(&mut self) {
+            match self.previous.take() {
+                Some(value) => crate::env::set_var("JCODE_HOME", value),
+                None => crate::env::remove_var("JCODE_HOME"),
+            }
+        }
+    }
+
+    struct OriginTestProvider;
+    #[async_trait::async_trait]
+    impl Provider for OriginTestProvider {
+        async fn complete(
+            &self,
+            _: &[crate::message::Message],
+            _: &[crate::message::ToolDefinition],
+            _: &str,
+            _: Option<&str>,
+        ) -> Result<crate::provider::EventStream> {
+            panic!("headless factory must not run a provider")
+        }
+        fn name(&self) -> &str {
+            "mock"
+        }
+        fn fork(&self) -> Arc<dyn Provider> {
+            Arc::new(Self)
+        }
+    }
+
+    async fn check_origin_factory(
+        origin: SessionOrigin,
+        memory_scope: HeadlessMemoryScope,
+        fail_save: bool,
+    ) {
+        let _lock = crate::storage::lock_test_env();
+        let env = OriginTestHome::new();
+        let home = &env.home;
+        let sessions: SessionAgents = Arc::new(RwLock::new(HashMap::new()));
+        let global = Arc::new(RwLock::new(String::new()));
+        let members = Arc::new(RwLock::new(HashMap::new()));
+        let swarms = Arc::new(RwLock::new(HashMap::new()));
+        let coordinators = Arc::new(RwLock::new(HashMap::new()));
+        let plans = Arc::new(RwLock::new(HashMap::new()));
+        let queues: SessionInterruptQueues = Arc::new(RwLock::new(HashMap::new()));
+        let provider: Arc<dyn Provider> = Arc::new(OriginTestProvider);
+        if fail_save {
+            std::fs::write(home.path().join("sessions"), "block snapshots").unwrap();
+        }
+        let result = create_headless_session(
+            &sessions,
+            &global,
+            &provider,
+            "create_session:/headless-origin-cwd",
+            &members,
+            &swarms,
+            &coordinators,
+            &plans,
+            &queues,
+            false,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some("origin-parent".to_string()),
+            memory_scope,
+            origin,
+        )
+        .await;
+        if fail_save {
+            assert!(
+                result.is_err(),
+                "failed snapshot must prevent successful spawn response"
+            );
+            assert!(sessions.read().await.is_empty());
+            assert!(global.read().await.is_empty());
+            assert!(members.read().await.is_empty());
+            assert!(swarms.read().await.is_empty());
+            assert!(coordinators.read().await.is_empty());
+            assert!(queues.read().await.is_empty());
+            let active = home.path().join("active_pids");
+            assert!(!active.exists() || std::fs::read_dir(active).unwrap().next().is_none());
+        } else {
+            let response: serde_json::Value = serde_json::from_str(&result.unwrap()).unwrap();
+            let id = response["session_id"].as_str().unwrap();
+            let snapshot = Session::load(id).unwrap();
+            assert_eq!(snapshot.origin(), origin);
+            assert_eq!(snapshot.parent_id.as_deref(), Some("origin-parent"));
+            assert_eq!(
+                snapshot.working_dir.as_deref(),
+                Some("/headless-origin-cwd")
+            );
+            assert!(snapshot.is_debug, "debug behavior is independent of origin");
+            assert!(sessions.read().await.contains_key(id));
+            assert_eq!(global.read().await.as_str(), id);
+            sessions
+                .read()
+                .await
+                .get(id)
+                .unwrap()
+                .lock()
+                .await
+                .mark_closed();
+        }
+    }
+
+    #[tokio::test]
+    async fn worker_origin_headless_factory_publishes_durable_worker() {
+        check_origin_factory(
+            SessionOrigin::SwarmWorker,
+            HeadlessMemoryScope::RealProject,
+            false,
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn worker_origin_headless_failure_publishes_nothing() {
+        check_origin_factory(
+            SessionOrigin::SwarmWorker,
+            HeadlessMemoryScope::RealProject,
+            true,
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn worker_origin_generic_debug_factory_stays_unknown() {
+        check_origin_factory(
+            SessionOrigin::Unknown,
+            HeadlessMemoryScope::IsolatedTest,
+            false,
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn worker_origin_not_inferred_from_memory_scope_or_parent() {
+        check_origin_factory(
+            SessionOrigin::Unknown,
+            HeadlessMemoryScope::RealProject,
+            false,
+        )
+        .await;
+    }
 
     #[test]
     fn equivalent_models_tolerate_route_canonicalization() {
