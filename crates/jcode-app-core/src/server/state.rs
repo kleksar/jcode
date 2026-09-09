@@ -584,7 +584,10 @@ mod tests {
             fanout_session_event(&members, "session-a", ServerEvent::Done { id: 1 }).await,
             1
         );
-        assert!(matches!(peer_rx.try_recv(), Ok(ServerEvent::Done { id: 1 })));
+        assert!(matches!(
+            peer_rx.try_recv(),
+            Ok(ServerEvent::Done { id: 1 })
+        ));
         assert!(former_rx.try_recv().is_err());
 
         unregister_session_event_sender(&members, "session-a", "peer").await;
@@ -613,7 +616,9 @@ mod tests {
         );
         unregister_session_event_sender(&members, "session-a", "former").await;
 
-        processing_tx.send(ServerEvent::Done { id: 3 }).expect("enqueue event");
+        processing_tx
+            .send(ServerEvent::Done { id: 3 })
+            .expect("enqueue event");
         assert!(
             tokio::time::timeout(std::time::Duration::from_millis(50), former_rx.recv())
                 .await

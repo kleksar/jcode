@@ -1,6 +1,7 @@
 use super::{
     ChannelSubscriptions, ClientConnectionInfo, ClientDebugState, FileTouchService,
-    SessionInterruptQueues, SwarmEvent, SwarmMember, VersionedPlan, unregister_session_event_sender,
+    SessionInterruptQueues, SwarmEvent, SwarmMember, VersionedPlan,
+    unregister_session_event_sender,
 };
 use crate::agent::Agent;
 use anyhow::Result;

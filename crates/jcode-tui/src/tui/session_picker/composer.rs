@@ -229,13 +229,13 @@ impl NewSessionComposer {
     pub(super) fn resolved_path(&self) -> Option<&str> {
         self.draft.as_ref().and_then(|draft| {
             (draft.phase == NewSessionComposerPhase::Creating)
-            .then(|| {
-                draft
-                    .confirmed_working_dir
-                    .as_ref()
-                    .map(|choice| choice.absolute_path.as_str())
-            })
-            .flatten()
+                .then(|| {
+                    draft
+                        .confirmed_working_dir
+                        .as_ref()
+                        .map(|choice| choice.absolute_path.as_str())
+                })
+                .flatten()
         })
     }
     pub(super) fn creating(&self) -> bool {

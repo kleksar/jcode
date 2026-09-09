@@ -120,8 +120,16 @@ async fn delegated_root_read_boundary_denies_repository_reads_and_all_bash_calls
         ("ls", json!({"path":"src"})),
         ("agentgrep", json!({"query":"needle"})),
     ] {
-        let error = registry.execute(tool, input, ctx.clone()).await.expect_err(tool);
-        assert!(error.to_string().contains("Request worker follow-up/artifact"), "{error}");
+        let error = registry
+            .execute(tool, input, ctx.clone())
+            .await
+            .expect_err(tool);
+        assert!(
+            error
+                .to_string()
+                .contains("Request worker follow-up/artifact"),
+            "{error}"
+        );
     }
 
     for command in [
@@ -130,25 +138,46 @@ async fn delegated_root_read_boundary_denies_repository_reads_and_all_bash_calls
         "sh -c 'cat src/lib.rs'",
         "python3 -c 'print(open(\"src/lib.rs\").read())'",
     ] {
-        let error = registry.execute("bash", json!({"command": command}), ctx.clone()).await.expect_err(command);
-        assert!(error.to_string().contains("Request worker follow-up/artifact"), "{error}");
+        let error = registry
+            .execute("bash", json!({"command": command}), ctx.clone())
+            .await
+            .expect_err(command);
+        assert!(
+            error
+                .to_string()
+                .contains("Request worker follow-up/artifact"),
+            "{error}"
+        );
     }
 
-    let batch = registry.execute(
-        "batch",
-        json!({"tool_calls":[{"tool":"read","parameters":{"file_path":"src/lib.rs"}}]}),
-        ctx.clone(),
-    ).await.expect("batch reports subcall failure");
-    assert!(batch.output.contains("Request worker follow-up/artifact"), "{}", batch.output);
+    let batch = registry
+        .execute(
+            "batch",
+            json!({"tool_calls":[{"tool":"read","parameters":{"file_path":"src/lib.rs"}}]}),
+            ctx.clone(),
+        )
+        .await
+        .expect("batch reports subcall failure");
+    assert!(
+        batch.output.contains("Request worker follow-up/artifact"),
+        "{}",
+        batch.output
+    );
 
     let worker_ctx = ToolContext {
         session_id: "delegated-worker".to_string(),
         ..ctx.clone()
     };
-    registry.execute("bash", json!({"command":"cat src/lib.rs"}), worker_ctx).await.expect("workers retain Bash capability");
+    registry
+        .execute("bash", json!({"command":"cat src/lib.rs"}), worker_ctx)
+        .await
+        .expect("workers retain Bash capability");
 
     super::super::set_session_delegated_swarm_read_boundary(&ctx.session_id, false);
-    registry.execute("bash", json!({"command":"cat src/lib.rs"}), ctx).await.expect("explicit single-agent override restores Bash capability");
+    registry
+        .execute("bash", json!({"command":"cat src/lib.rs"}), ctx)
+        .await
+        .expect("explicit single-agent override restores Bash capability");
     super::super::clear_session_tool_policy("batch-registry-lifetime");
 }
 

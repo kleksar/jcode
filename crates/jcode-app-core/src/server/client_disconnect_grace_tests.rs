@@ -227,9 +227,12 @@ async fn unsaved_idle_disconnect_only_detaches_client_attachment() {
     let _lock = crate::storage::lock_test_env();
     let _home = Home::new();
     let fixture = Fixture::new(false).await;
-    timeout(Duration::from_secs(1), fixture.cleanup(false, Duration::from_millis(60)))
-        .await
-        .unwrap();
+    timeout(
+        Duration::from_secs(1),
+        fixture.cleanup(false, Duration::from_millis(60)),
+    )
+    .await
+    .unwrap();
     assert!(fixture.sessions.read().await.contains_key(&fixture.id));
     assert!(fixture.members.read().await.contains_key(&fixture.id));
     assert!(fixture.connections.read().await.is_empty());

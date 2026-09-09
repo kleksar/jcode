@@ -3054,9 +3054,11 @@ fn session_picker_working_directory_resolution_is_request_and_path_correlated() 
     picker
         .handle_overlay_key(KeyCode::Esc, KeyModifiers::NONE)
         .unwrap();
-    assert!(picker
-        .apply_resolved_working_directory(7, &path, "/stale-after-escape".into())
-        .is_none());
+    assert!(
+        picker
+            .apply_resolved_working_directory(7, &path, "/stale-after-escape".into())
+            .is_none()
+    );
     let retry = picker
         .handle_overlay_key(KeyCode::Enter, KeyModifiers::NONE)
         .unwrap();
@@ -3064,9 +3066,11 @@ fn session_picker_working_directory_resolution_is_request_and_path_correlated() 
         panic!("expected retry resolution");
     };
     picker.begin_working_directory_resolution(9, path.clone());
-    assert!(picker
-        .apply_resolved_working_directory(8, &path, "/wrong".into())
-        .is_none());
+    assert!(
+        picker
+            .apply_resolved_working_directory(8, &path, "/wrong".into())
+            .is_none()
+    );
     assert!(matches!(
         picker.apply_resolved_working_directory(9, &path, "/server/normalized".into()),
         Some((prompt, working_dir)) if prompt == "x" && working_dir == "/server/normalized"
@@ -3074,7 +3078,10 @@ fn session_picker_working_directory_resolution_is_request_and_path_correlated() 
     picker.begin_clean_session_creation(10);
     assert!(picker.fail_creation_action(10, "create rejected".into()));
     assert_eq!(picker.clean_composer_manual_path_for_test(), Some("/"));
-    assert_eq!(picker.clean_composer_feedback_for_test(), Some("create rejected"));
+    assert_eq!(
+        picker.clean_composer_feedback_for_test(),
+        Some("create rejected")
+    );
     assert!(matches!(
         picker
             .handle_overlay_key(KeyCode::Enter, KeyModifiers::NONE)
@@ -3107,21 +3114,38 @@ fn path_completion_down_starts_at_first_and_edits_clear_selection() {
     picker
         .handle_overlay_key(KeyCode::Down, KeyModifiers::NONE)
         .unwrap();
-    assert_eq!(picker.new_session_composer.completion_candidates().unwrap().1, Some(0));
+    assert_eq!(
+        picker
+            .new_session_composer
+            .completion_candidates()
+            .unwrap()
+            .1,
+        Some(0)
+    );
     picker
         .handle_overlay_key(KeyCode::Down, KeyModifiers::NONE)
         .unwrap();
-    assert_eq!(picker.new_session_composer.completion_candidates().unwrap().1, Some(1));
+    assert_eq!(
+        picker
+            .new_session_composer
+            .completion_candidates()
+            .unwrap()
+            .1,
+        Some(1)
+    );
 
     picker
         .handle_overlay_key(KeyCode::Char('x'), KeyModifiers::NONE)
         .unwrap();
-    assert_eq!(picker.new_session_composer.completion_candidates().unwrap().1, None);
-    assert!(!picker.apply_working_directory_completions(
-        "/",
-        vec!["/stale".into()],
-        false,
-    ));
+    assert_eq!(
+        picker
+            .new_session_composer
+            .completion_candidates()
+            .unwrap()
+            .1,
+        None
+    );
+    assert!(!picker.apply_working_directory_completions("/", vec!["/stale".into()], false,));
 }
 
 #[test]

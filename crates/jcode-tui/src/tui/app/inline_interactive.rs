@@ -3188,35 +3188,35 @@ impl App {
             && self.in_flight_clean_session_create.is_none()
         {
             let selected_route = self.remote_provider_model.as_ref().and_then(|model| {
+                self.remote_model_options
+                    .iter()
+                    .find(|route| {
+                        route.model == *model
+                            && self
+                                .remote_provider_name
+                                .as_ref()
+                                .is_none_or(|provider| route.provider == *provider)
+                    })
+                    .or_else(|| {
                         self.remote_model_options
                             .iter()
-                            .find(|route| {
-                                route.model == *model
-                                    && self
-                                        .remote_provider_name
-                                        .as_ref()
-                                        .is_none_or(|provider| route.provider == *provider)
-                            })
-                            .or_else(|| {
-                                self.remote_model_options
-                                    .iter()
-                                    .find(|route| route.model == *model)
-                            })
-                            .cloned()
-                    });
+                            .find(|route| route.model == *model)
+                    })
+                    .cloned()
+            });
             self.pending_clean_session_create = Some(super::PendingCleanSessionCreate {
                 prompt,
                 working_dir,
                 runtime: crate::protocol::SessionRuntimeSelection {
-                            provider_key: selected_route
-                                .as_ref()
-                                .map(|route| route.provider.clone())
-                                .or_else(|| self.remote_provider_name.clone()),
-                            model: self.remote_provider_model.clone(),
-                            route_api_method: selected_route
-                                .as_ref()
-                                .map(|route| route.api_method.clone()),
-                            reasoning_effort: self.remote_reasoning_effort_hint(),
+                    provider_key: selected_route
+                        .as_ref()
+                        .map(|route| route.provider.clone())
+                        .or_else(|| self.remote_provider_name.clone()),
+                    model: self.remote_provider_model.clone(),
+                    route_api_method: selected_route
+                        .as_ref()
+                        .map(|route| route.api_method.clone()),
+                    reasoning_effort: self.remote_reasoning_effort_hint(),
                 },
             });
         }

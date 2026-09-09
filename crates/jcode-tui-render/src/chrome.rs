@@ -88,10 +88,7 @@ pub fn draw_right_rail_chrome(
         .borders(Borders::LEFT)
         .border_style(border_style);
     frame.render_widget(block, area);
-    frame.render_widget(
-        Paragraph::new(title),
-        header_area,
-    );
+    frame.render_widget(Paragraph::new(title), header_area);
 
     Some(content_area)
 }

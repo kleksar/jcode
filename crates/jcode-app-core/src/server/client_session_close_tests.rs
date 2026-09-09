@@ -38,7 +38,10 @@ impl Home {
         let dir = tempfile::tempdir().unwrap();
         let previous = std::env::var_os("JCODE_HOME");
         crate::env::set_var("JCODE_HOME", dir.path());
-        Self { _dir: dir, previous }
+        Self {
+            _dir: dir,
+            previous,
+        }
     }
 }
 
@@ -58,7 +61,9 @@ async fn live_session() -> (String, Arc<Mutex<Agent>>, SessionAgents) {
     session.title = Some("Close but retain transcript metadata".to_string());
     session.save().unwrap();
     let id = session.id.clone();
-    let agent = Arc::new(Mutex::new(Agent::new_with_session(provider, registry, session, None)));
+    let agent = Arc::new(Mutex::new(Agent::new_with_session(
+        provider, registry, session, None,
+    )));
     let sessions = Arc::new(RwLock::new(HashMap::from([(id.clone(), agent.clone())])));
     (id, agent, sessions)
 }
@@ -100,7 +105,10 @@ async fn close_idle_persisted_session_marks_closed_retains_metadata_and_emits_ev
     assert!(sessions.read().await.get(&id).is_none());
     let persisted = Session::load(&id).expect("closed session remains resumable from storage");
     assert_eq!(persisted.status, SessionStatus::Closed);
-    assert_eq!(persisted.title.as_deref(), Some("Close but retain transcript metadata"));
+    assert_eq!(
+        persisted.title.as_deref(),
+        Some("Close but retain transcript metadata")
+    );
     assert!(matches!(
         event_rx.recv().await,
         Some(ServerEvent::SessionClosed { id: 7, session_id }) if session_id == id
@@ -116,7 +124,13 @@ async fn close_busy_session_is_refused_without_cancellation_or_state_change() {
     let _busy = agent.lock().await;
 
     super::client_session_close::handle_close_session(
-        8, &id, "requester", &sessions, &connections, &members, &event_tx,
+        8,
+        &id,
+        "requester",
+        &sessions,
+        &connections,
+        &members,
+        &event_tx,
     )
     .await
     .unwrap();
@@ -229,7 +243,13 @@ async fn close_attached_idle_session_disconnects_its_client() {
     );
 
     super::client_session_close::handle_close_session(
-        12, &id, "requester", &sessions, &connections, &members, &event_tx,
+        12,
+        &id,
+        "requester",
+        &sessions,
+        &connections,
+        &members,
+        &event_tx,
     )
     .await
     .unwrap();

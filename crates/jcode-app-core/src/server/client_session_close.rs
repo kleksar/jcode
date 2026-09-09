@@ -42,7 +42,11 @@ pub(super) async fn handle_close_session(
         if !matches!(persisted.status, crate::session::SessionStatus::Closed) {
             persisted.mark_closed();
             if let Err(error) = persisted.save() {
-                refuse(id, format!("Failed to close session: {error}"), client_event_tx);
+                refuse(
+                    id,
+                    format!("Failed to close session: {error}"),
+                    client_event_tx,
+                );
                 return Ok(());
             }
         }
@@ -74,7 +78,11 @@ pub(super) async fn handle_close_session(
     let mut persisted = agent.session_for_split().clone();
     persisted.mark_closed();
     if let Err(error) = persisted.save() {
-        refuse(id, format!("Failed to close session: {error}"), client_event_tx);
+        refuse(
+            id,
+            format!("Failed to close session: {error}"),
+            client_event_tx,
+        );
         return Ok(());
     }
     drop(agent);
