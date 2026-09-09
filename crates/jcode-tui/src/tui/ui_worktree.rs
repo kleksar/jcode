@@ -1130,27 +1130,31 @@ fn project_pane_tab_style(active: bool) -> Style {
 
 pub(super) fn project_pane_title(
     active_tab: crate::tui::app::worktree_pane::WorktreePaneTab,
+    keyboard_focused: bool,
     mut suffix: Vec<Span<'static>>,
 ) -> Line<'static> {
     let mut spans = vec![
         Span::styled(
             DIFF_TAB_LABEL,
             project_pane_tab_style(
-                active_tab == crate::tui::app::worktree_pane::WorktreePaneTab::Diff,
+                keyboard_focused
+                    && active_tab == crate::tui::app::worktree_pane::WorktreePaneTab::Diff,
             ),
         ),
         Span::raw(" "),
         Span::styled(
             FILES_TAB_LABEL,
             project_pane_tab_style(
-                active_tab == crate::tui::app::worktree_pane::WorktreePaneTab::Files,
+                keyboard_focused
+                    && active_tab == crate::tui::app::worktree_pane::WorktreePaneTab::Files,
             ),
         ),
         Span::raw(" "),
         Span::styled(
             DOCUMENTS_TAB_LABEL,
             project_pane_tab_style(
-                active_tab == crate::tui::app::worktree_pane::WorktreePaneTab::Documents,
+                keyboard_focused
+                    && active_tab == crate::tui::app::worktree_pane::WorktreePaneTab::Documents,
             ),
         ),
         Span::raw("  "),
@@ -1574,6 +1578,7 @@ pub(super) fn draw_project_files(
     };
     let title = project_pane_title(
         crate::tui::app::worktree_pane::WorktreePaneTab::Files,
+        focused,
         suffix,
     );
     let border = Style::default().fg(if focused { tool_color() } else { dim_color() });
@@ -1784,6 +1789,7 @@ pub(super) fn draw_empty_worktree_changes(
     }
     let title = project_pane_title(
         crate::tui::app::worktree_pane::WorktreePaneTab::Diff,
+        focused,
         vec![Span::styled(
             "working tree clean",
             Style::default().fg(dim_color()),
@@ -1844,6 +1850,7 @@ pub(super) fn draw_worktree_changes(
     }
     let title = project_pane_title(
         crate::tui::app::worktree_pane::WorktreePaneTab::Diff,
+        focused,
         vec![
             Span::styled("changes ", Style::default().fg(tool_color())),
             Span::styled(
@@ -2194,6 +2201,32 @@ mod tests {
     #[test]
     fn project_tree_labels_escape_terminal_control_characters() {
         assert_eq!(project_path_label("bad\nname\tesc\u{1b}"), "bad␤name⇥esc�");
+    }
+
+    #[test]
+    fn project_pane_title_only_emphasizes_active_tab_when_keyboard_focused() {
+        use ratatui::style::Modifier;
+
+        let focused = project_pane_title(
+            crate::tui::app::worktree_pane::WorktreePaneTab::Diff,
+            true,
+            Vec::new(),
+        );
+        let unfocused = project_pane_title(
+            crate::tui::app::worktree_pane::WorktreePaneTab::Diff,
+            false,
+            Vec::new(),
+        );
+
+        assert!(focused.spans[0].style.add_modifier.contains(Modifier::BOLD));
+        assert_eq!(focused.spans[0].style.bg, Some(rgb(55, 55, 68)));
+        assert!(
+            !unfocused.spans[0]
+                .style
+                .add_modifier
+                .contains(Modifier::BOLD)
+        );
+        assert_eq!(unfocused.spans[0].style.bg, None);
     }
 
     #[test]

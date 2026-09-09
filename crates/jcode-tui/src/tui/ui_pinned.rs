@@ -1372,6 +1372,7 @@ pub(super) fn draw_side_panel_markdown(
     {
         let title = super::worktree_ui::project_pane_title(
             crate::tui::app::worktree_pane::WorktreePaneTab::Documents,
+            focused,
             vec![
                 Span::styled(
                     super::worktree_ui::DOCUMENT_PREVIOUS_PAGE_LABEL,
@@ -1436,6 +1437,7 @@ pub(super) fn draw_side_panel_markdown(
     {
         let title = super::worktree_ui::project_pane_title(
             crate::tui::app::worktree_pane::WorktreePaneTab::Documents,
+            focused,
             vec![
                 Span::styled(
                     super::worktree_ui::DOCUMENT_PREVIOUS_PAGE_LABEL,
@@ -1507,6 +1509,7 @@ pub(super) fn draw_side_panel_markdown(
     let mut title_parts = if app.worktree_documents_tab_active() {
         super::worktree_ui::project_pane_title(
             crate::tui::app::worktree_pane::WorktreePaneTab::Documents,
+            focused,
             vec![
                 Span::styled(
                     super::worktree_ui::DOCUMENT_PREVIOUS_PAGE_LABEL,
