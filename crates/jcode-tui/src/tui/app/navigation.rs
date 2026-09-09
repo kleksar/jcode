@@ -599,7 +599,7 @@ impl App {
                             super::worktree_pane::WorktreePaneTab::Files
                         }
                         super::worktree_pane::WorktreePaneTab::Files => {
-                            if self.side_panel.has_pages() {
+                            if self.worktree_documents_available() {
                                 super::worktree_pane::WorktreePaneTab::Documents
                             } else {
                                 super::worktree_pane::WorktreePaneTab::Diff
@@ -615,7 +615,7 @@ impl App {
                 KeyCode::BackTab => {
                     let next = match self.worktree_pane.tab {
                         super::worktree_pane::WorktreePaneTab::Diff => {
-                            if self.side_panel.has_pages() {
+                            if self.worktree_documents_available() {
                                 super::worktree_pane::WorktreePaneTab::Documents
                             } else {
                                 super::worktree_pane::WorktreePaneTab::Files
@@ -1197,6 +1197,9 @@ impl App {
         }
 
         if self.side_panel.focused_page().is_some() {
+            if self.worktree_documents_tab_active() {
+                self.set_worktree_pane_tab(super::worktree_pane::WorktreePaneTab::Diff);
+            }
             self.last_side_panel_focus_id = self.side_panel.focused_page_id.clone();
             self.side_panel.focused_page_id = None;
             self.side_panel_user_hidden = true;

@@ -2206,11 +2206,21 @@ fn handle_disconnected_key_internal(
         return Ok(());
     }
 
-    if input::handle_navigation_shortcuts(app, code, modifiers) {
+    app.normalize_diagram_state();
+    let diagram_available = app.diagram_available();
+    if app.handle_diagram_focus_key(code, modifiers, diagram_available) {
         return Ok(());
     }
 
     if app.handle_empty_composer_horizontal_navigation(code, modifiers) {
+        return Ok(());
+    }
+
+    if app.handle_diff_pane_focus_key(code, modifiers) {
+        return Ok(());
+    }
+
+    if input::handle_navigation_shortcuts(app, code, modifiers) {
         return Ok(());
     }
 

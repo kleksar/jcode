@@ -94,11 +94,11 @@ impl App {
     }
 
     pub(super) fn worktree_documents_tab_active(&self) -> bool {
-        self.worktree_pane.tab == WorktreePaneTab::Documents && self.side_panel.has_pages()
+        self.worktree_pane.tab == WorktreePaneTab::Documents && self.worktree_documents_available()
     }
 
     pub(super) fn worktree_documents_available(&self) -> bool {
-        self.side_panel.has_pages() && !self.worktree_pane.document_ui.is_empty()
+        self.side_panel.focused_page().is_some()
     }
 
     pub(super) fn markdown_document_mode(&self, page_id: &str) -> MarkdownDocumentMode {
@@ -240,6 +240,16 @@ impl App {
         modifiers: KeyModifiers,
     ) -> bool {
         if !self.input.is_empty() || !modifiers.is_empty() {
+            return false;
+        }
+
+        // The render snapshot is authoritative: stale focus must never enter a
+        // hidden worktree pane after a resize or while another side panel owns
+        // the right surface.
+        if crate::tui::ui::worktree_pane_layout().is_none() {
+            if self.diff_pane_focus {
+                self.set_diff_pane_focus(false);
+            }
             return false;
         }
 

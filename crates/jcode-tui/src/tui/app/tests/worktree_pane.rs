@@ -424,6 +424,8 @@ fn test_empty_composer_horizontal_arrows_navigate_worktree_tabs_and_preserve_tex
     app.apply_side_panel_snapshot(document_snapshot("one", &[("one", "One", "# one")]));
     app.set_worktree_pane_tab(super::worktree_pane::WorktreePaneTab::Diff);
     app.set_diff_pane_focus(false);
+    let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(140, 30)).unwrap();
+    render_and_snap(&app, &mut terminal);
 
     app.handle_key(KeyCode::Right, KeyModifiers::NONE).unwrap();
     assert!(app.diff_pane_focus);
@@ -459,6 +461,12 @@ fn test_empty_composer_horizontal_arrows_navigate_worktree_tabs_and_preserve_tex
     app.handle_key(KeyCode::Left, KeyModifiers::NONE).unwrap();
     assert!(!app.diff_pane_focus);
 
+    app.handle_key(KeyCode::Right, KeyModifiers::SHIFT).unwrap();
+    assert!(
+        !app.diff_pane_focus,
+        "modified arrows must not traverse into a worktree pane"
+    );
+
     app.set_input_for_test("ab");
     app.cursor_pos = 1;
     app.handle_key(KeyCode::Right, KeyModifiers::NONE).unwrap();
@@ -474,6 +482,8 @@ fn test_remote_empty_composer_horizontal_arrows_match_local_navigation() {
     app.apply_side_panel_snapshot(document_snapshot("one", &[("one", "One", "# one")]));
     app.set_worktree_pane_tab(super::worktree_pane::WorktreePaneTab::Diff);
     app.set_diff_pane_focus(false);
+    let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(140, 30)).unwrap();
+    render_and_snap(&app, &mut terminal);
     let rt = tokio::runtime::Runtime::new().unwrap();
     let _guard = rt.enter();
     let mut remote = crate::tui::backend::RemoteConnection::dummy();
@@ -507,6 +517,114 @@ fn test_remote_empty_composer_horizontal_arrows_match_local_navigation() {
     assert_eq!(
         app.worktree_pane.tab,
         super::worktree_pane::WorktreePaneTab::Documents
+    );
+}
+
+#[test]
+fn test_disconnected_files_navigation_opens_markdown_after_arrow_traversal() {
+    let _lock = scroll_render_test_lock();
+    let repo = init_worktree_pane_test_repo();
+    std::fs::write(repo.path().join("README.md"), "# Read me\n").expect("write Markdown");
+    crate::tui::ui::prime_project_tree_for_tests(repo.path());
+    let mut app = create_test_app();
+    app.session.working_dir = Some(repo.path().to_string_lossy().into_owned());
+    app.open_project_files_pane();
+    app.worktree_pane.tree_selected_path = Some("demo.rs".into());
+    let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(140, 30)).unwrap();
+    render_and_snap(&app, &mut terminal);
+
+    super::remote::handle_disconnected_key(&mut app, KeyCode::Down, KeyModifiers::NONE).unwrap();
+    super::remote::handle_disconnected_key(&mut app, KeyCode::Down, KeyModifiers::NONE).unwrap();
+    assert_eq!(
+        app.worktree_pane.tree_selected_path.as_deref(),
+        Some("README.md")
+    );
+    super::remote::handle_disconnected_key(&mut app, KeyCode::Enter, KeyModifiers::NONE).unwrap();
+
+    assert!(
+        app.side_panel
+            .focused_page()
+            .is_some_and(|page| page.file_path.ends_with("README.md")),
+        "disconnected activation should open the selected Markdown page"
+    );
+    assert_eq!(
+        app.worktree_pane.tab,
+        super::worktree_pane::WorktreePaneTab::Documents
+    );
+}
+
+#[test]
+fn test_disconnected_diagram_focus_consumes_right_before_worktree_traversal() {
+    let _lock = scroll_render_test_lock();
+    let mut app = create_test_app();
+    app.diagram_mode = crate::config::DiagramDisplayMode::Pinned;
+    app.diagram_pane_enabled = true;
+    app.diagram_focus = true;
+    app.set_worktree_pane_tab(super::worktree_pane::WorktreePaneTab::Diff);
+    crate::tui::mermaid::clear_active_diagrams();
+    crate::tui::mermaid::register_active_diagram(0x1, 100, 80, None);
+
+    super::remote::handle_disconnected_key(&mut app, KeyCode::Right, KeyModifiers::NONE).unwrap();
+
+    assert_eq!(app.diagram_scroll_x, 4);
+    assert_eq!(
+        app.worktree_pane.tab,
+        super::worktree_pane::WorktreePaneTab::Diff
+    );
+    crate::tui::mermaid::clear_active_diagrams();
+}
+
+#[test]
+fn test_empty_composer_navigation_ignores_hidden_or_generic_worktree_surfaces() {
+    let _lock = scroll_render_test_lock();
+    let repo = init_worktree_pane_test_repo();
+    let mut app = create_test_app();
+    app.session.working_dir = Some(repo.path().to_string_lossy().into_owned());
+    let mut narrow = ratatui::Terminal::new(ratatui::backend::TestBackend::new(70, 24)).unwrap();
+    render_and_snap(&app, &mut narrow);
+    assert!(crate::tui::ui::worktree_pane_layout().is_none());
+
+    app.handle_key(KeyCode::Right, KeyModifiers::NONE).unwrap();
+    assert!(
+        !app.diff_pane_focus,
+        "Right must not focus a hidden worktree pane"
+    );
+
+    app.apply_side_panel_snapshot(document_snapshot("one", &[("one", "One", "# one")]));
+    app.set_worktree_pane_tab(super::worktree_pane::WorktreePaneTab::Diff);
+    app.set_diff_pane_focus(true);
+    // A retained generic side panel must not make an old worktree layout focusable.
+    render_and_snap(&app, &mut narrow);
+    assert!(crate::tui::ui::worktree_pane_layout().is_none());
+    app.handle_key(KeyCode::Right, KeyModifiers::NONE).unwrap();
+    assert!(
+        !app.diff_pane_focus,
+        "stale right-pane focus returns to Chat"
+    );
+
+    app.handle_key(KeyCode::Right, KeyModifiers::SHIFT).unwrap();
+    assert!(
+        !app.diff_pane_focus,
+        "modified arrows must not traverse hidden panes"
+    );
+}
+
+#[test]
+fn test_hiding_active_documents_normalizes_worktree_tab_and_availability() {
+    let mut app = create_test_app();
+    app.apply_side_panel_snapshot(document_snapshot("one", &[("one", "One", "# one")]));
+    assert!(app.worktree_documents_available());
+    assert_eq!(
+        app.worktree_pane.tab,
+        super::worktree_pane::WorktreePaneTab::Documents
+    );
+
+    app.toggle_side_panel();
+
+    assert!(!app.worktree_documents_available());
+    assert_eq!(
+        app.worktree_pane.tab,
+        super::worktree_pane::WorktreePaneTab::Diff
     );
 }
 
