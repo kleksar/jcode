@@ -642,6 +642,17 @@ impl App {
             return false;
         }
         if layout.files_tab_active {
+            if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left))
+                && let Some((_, mode)) = layout.inspector_mode_areas.iter().find(|(area, _)| {
+                    crate::tui::layout_utils::point_in_rect(mouse.column, mouse.row, *area)
+                })
+            {
+                if self.files_inspector.select_mode(*mode) {
+                    self.files_inspector.enter_focus();
+                    self.set_diff_pane_focus(true);
+                }
+                return true;
+            }
             if let Some(tree_area) = layout.tree_area
                 && crate::tui::layout_utils::point_in_rect(mouse.column, mouse.row, tree_area)
             {
@@ -691,7 +702,7 @@ impl App {
                 match mouse.kind {
                     MouseEventKind::Down(MouseButton::Left) => {
                         self.prepare_worktree_pane_state();
-                        self.worktree_pane.tree_preview_focused = true;
+                        self.files_inspector.enter_focus();
                         self.set_diff_pane_focus(true);
                     }
                     MouseEventKind::ScrollUp => self.scroll_project_preview(&layout, -3),

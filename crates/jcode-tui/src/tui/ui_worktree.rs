@@ -29,6 +29,7 @@ pub(crate) struct WorktreePaneLayout {
     pub document_source_area: Rect,
     pub document_changes_area: Rect,
     pub document_next_page_area: Rect,
+    pub inspector_mode_areas: Vec<(Rect, crate::tui::app::files_inspector::FileInspectorMode)>,
     pub files_tab_active: bool,
     pub list_area: Rect,
     pub body_area: Rect,
@@ -1239,6 +1240,7 @@ pub(super) fn record_documents_worktree_layout(area: Rect, app: &dyn TuiState) {
             document_source_area,
             document_changes_area,
             document_next_page_area,
+            inspector_mode_areas: Vec::new(),
             files_tab_active: false,
             list_area: area,
             body_area: area,
@@ -1656,6 +1658,7 @@ pub(super) fn draw_project_files(
                 document_source_area: Rect::default(),
                 document_changes_area: Rect::default(),
                 document_next_page_area: Rect::default(),
+                inspector_mode_areas: Vec::new(),
                 files_tab_active: true,
                 list_area: inner,
                 body_area: inner,
@@ -1724,6 +1727,7 @@ pub(super) fn draw_project_files(
     let mut preview_area = None;
     let mut preview_total_lines = 0;
     let mut preview_scroll = 0;
+    let mut inspector_mode_areas = Vec::new();
     if let (Some(path), Some(lines)) = (selected_file.as_deref(), preview_lines.as_ref())
         && show_preview
     {
@@ -1756,10 +1760,15 @@ pub(super) fn draw_project_files(
             header_area,
         );
         let mode_area = Rect::new(inner.x, header_area.bottom(), inner.width, 1);
+        let mode_areas = &mut inspector_mode_areas;
+        let mut mode_x = mode_area.x;
         let mode_line = app
             .files_inspector_modes()
             .into_iter()
             .flat_map(|mode| {
+                let width = (inspector_mode_label(mode).len() + 4) as u16;
+                mode_areas.push((Rect::new(mode_x, mode_area.y, width, 1), mode));
+                mode_x = mode_x.saturating_add(width);
                 let selected = mode == selected_mode;
                 [
                     Span::styled(" ", Style::default()),
@@ -1834,6 +1843,7 @@ pub(super) fn draw_project_files(
             document_source_area: Rect::default(),
             document_changes_area: Rect::default(),
             document_next_page_area: Rect::default(),
+            inspector_mode_areas: inspector_mode_areas.clone(),
             files_tab_active: true,
             list_area: tree_area,
             body_area: preview_area.unwrap_or(tree_area),
@@ -1893,6 +1903,7 @@ pub(super) fn draw_empty_worktree_changes(
             document_source_area: Rect::default(),
             document_changes_area: Rect::default(),
             document_next_page_area: Rect::default(),
+            inspector_mode_areas: Vec::new(),
             files_tab_active: false,
             list_area: inner,
             body_area: inner,
@@ -2033,6 +2044,7 @@ pub(super) fn draw_worktree_changes(
             document_source_area: Rect::default(),
             document_changes_area: Rect::default(),
             document_next_page_area: Rect::default(),
+            inspector_mode_areas: Vec::new(),
             files_tab_active: false,
             list_area,
             body_area: body,
