@@ -2198,7 +2198,11 @@ fn handle_disconnected_key_internal(
         return Ok(());
     }
 
-    if app.diff_pane_focus && app.handle_diff_pane_focus_key(code, modifiers) {
+    // Plain horizontal arrows must reach the same diagram/composer traversal
+    // priority as local and connected input. The later pane handler still owns
+    // inspector/content arrows and tree navigation with a nonempty composer.
+    let plain_horizontal = modifiers.is_empty() && matches!(code, KeyCode::Left | KeyCode::Right);
+    if !plain_horizontal && app.diff_pane_focus && app.handle_diff_pane_focus_key(code, modifiers) {
         return Ok(());
     }
     if crate::tui::app::input::newline::enter_inserts_newline(app, code, modifiers) {

@@ -391,6 +391,236 @@ fn files_inspector_left_then_escape_returns_to_chat() {
     assert!(!app.diff_pane_focus);
 }
 
+fn route_worktree_arrow(app: &mut App, route: usize, code: KeyCode, rt: &tokio::runtime::Runtime) {
+    match route {
+        0 => app.handle_key(code, KeyModifiers::NONE).unwrap(),
+        1 => {
+            let mut remote = crate::tui::backend::RemoteConnection::dummy();
+            rt.block_on(app.handle_remote_key(code, KeyModifiers::NONE, &mut remote))
+                .unwrap();
+        }
+        _ => super::remote::handle_disconnected_key(app, code, KeyModifiers::NONE).unwrap(),
+    }
+}
+
+#[test]
+fn routed_worktree_arrows_retain_final_tab_content_after_focus_exit() {
+    use super::worktree_pane::WorktreePaneTab::{Diff, Files};
+    use ratatui::style::Modifier;
+    let _lock = scroll_render_test_lock();
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let _guard = rt.enter();
+    for route in 0..3 {
+        for initial_tab in [Diff, Files] {
+            let (_repo, mut app, mut terminal) = inspector_fixture();
+            select_inspector_file(&mut app, &mut terminal, "script.py");
+            assert!(app.files_inspector.select_next_mode(1));
+            app.files_inspector.set_scroll_offset(7);
+            app.set_worktree_pane_tab(initial_tab);
+            app.worktree_pane.selected_file = Some("script.py".into());
+            app.diff_pane_scroll = 3;
+            app.diff_pane_auto_scroll = false;
+            render_and_snap(&app, &mut terminal);
+            if initial_tab == Files {
+                // This is an intentional tab transition, not a pure focus exit.
+                route_worktree_arrow(&mut app, route, KeyCode::Left, &rt);
+                assert_eq!(app.worktree_pane.tab, Diff, "route={route}");
+                assert!(app.diff_pane_focus, "Files -> Diff must not skip to Chat");
+                render_and_snap(&app, &mut terminal);
+                // Seed nondefault state on the FINAL tab. Tab switching may reset
+                // selection/scroll, but the following focus exit must not do so.
+                app.worktree_pane.selected_file = Some("script.py".into());
+                app.diff_pane_scroll = 3;
+                app.diff_pane_auto_scroll = false;
+            }
+            render_and_snap(&app, &mut terminal);
+            let layout = crate::tui::ui::worktree_pane_layout().unwrap();
+            let title = layout.diff_tab_area;
+            let content = worktree_rendered_region(&terminal, layout.body_area);
+            assert!(content.contains("function_"), "{content}");
+            let state = (
+                app.worktree_pane.selected_file.clone(),
+                app.worktree_pane.tree_selected_path.clone(),
+                app.files_inspector.mode(),
+                app.files_inspector.scroll_offset(),
+                app.diff_pane_scroll,
+            );
+            let cell = &terminal.backend().buffer()[(title.x + 1, title.y)];
+            assert!(cell.modifier.contains(Modifier::BOLD));
+            assert_eq!(cell.bg, crate::tui::color_support::rgb(55, 55, 68));
+            route_worktree_arrow(&mut app, route, KeyCode::Left, &rt);
+            assert!(
+                !app.diff_pane_focus,
+                "route={route} initial={initial_tab:?}"
+            );
+            assert_eq!(app.worktree_pane.tab, Diff);
+            render_and_snap(&app, &mut terminal);
+            assert_eq!(
+                state,
+                (
+                    app.worktree_pane.selected_file.clone(),
+                    app.worktree_pane.tree_selected_path.clone(),
+                    app.files_inspector.mode(),
+                    app.files_inspector.scroll_offset(),
+                    app.diff_pane_scroll,
+                )
+            );
+            assert_eq!(
+                worktree_rendered_region(&terminal, layout.body_area),
+                content
+            );
+            let cell = &terminal.backend().buffer()[(title.x + 1, title.y)];
+            assert!(!cell.modifier.contains(Modifier::BOLD));
+            assert_ne!(cell.bg, crate::tui::color_support::rgb(55, 55, 68));
+            route_worktree_arrow(&mut app, route, KeyCode::Right, &rt);
+            assert!(app.diff_pane_focus);
+            assert_eq!(app.worktree_pane.tab, Diff);
+            route_worktree_arrow(&mut app, route, KeyCode::Right, &rt);
+            assert_eq!(app.worktree_pane.tab, Files);
+            route_worktree_arrow(&mut app, route, KeyCode::Right, &rt);
+            assert_eq!(app.worktree_pane.tab, Files);
+        }
+    }
+}
+
+#[test]
+fn routed_worktree_tree_local_left_collapses_and_selects_parent() {
+    let _lock = scroll_render_test_lock();
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let _guard = rt.enter();
+    for route in 0..3 {
+        let (repo, mut app, mut terminal) = inspector_fixture();
+        std::fs::create_dir(repo.path().join("nested")).unwrap();
+        std::fs::write(repo.path().join("nested/child.rs"), "fn child() {}\n").unwrap();
+        crate::tui::ui::prime_project_tree_for_tests(repo.path());
+        // Existing contract: a nonempty composer disables the empty-composer
+        // rail traversal. The focused Files tree then owns horizontal arrows.
+        app.input = "draft".into();
+        app.cursor_pos = app.input.len();
+        render_and_snap(&app, &mut terminal);
+        app.worktree_pane.tree_selected_path = Some("nested".into());
+        route_worktree_arrow(&mut app, route, KeyCode::Right, &rt);
+        render_and_snap(&app, &mut terminal);
+        assert!(
+            crate::tui::ui::worktree_pane_layout()
+                .unwrap()
+                .tree_rows
+                .iter()
+                .any(|row| row.path == "nested/child.rs")
+        );
+        app.worktree_pane.tree_selected_path = Some("nested/child.rs".into());
+        route_worktree_arrow(&mut app, route, KeyCode::Left, &rt);
+        assert_eq!(
+            app.worktree_pane.tree_selected_path.as_deref(),
+            Some("nested")
+        );
+        route_worktree_arrow(&mut app, route, KeyCode::Left, &rt);
+        render_and_snap(&app, &mut terminal);
+        assert!(
+            !crate::tui::ui::worktree_pane_layout()
+                .unwrap()
+                .tree_rows
+                .iter()
+                .any(|row| row.path == "nested/child.rs")
+        );
+        assert!(app.diff_pane_focus);
+        assert_eq!(
+            app.worktree_pane.tab,
+            super::worktree_pane::WorktreePaneTab::Files
+        );
+        assert_eq!(app.input, "draft");
+        // With the same focused tree but an empty composer, the rail chain
+        // takes precedence even when Left could collapse or select a parent.
+        route_worktree_arrow(&mut app, route, KeyCode::Right, &rt);
+        render_and_snap(&app, &mut terminal);
+        app.worktree_pane.tree_selected_path = Some("nested/child.rs".into());
+        app.input.clear();
+        app.cursor_pos = 0;
+        route_worktree_arrow(&mut app, route, KeyCode::Left, &rt);
+        assert_eq!(
+            app.worktree_pane.tab,
+            super::worktree_pane::WorktreePaneTab::Diff
+        );
+        assert!(app.diff_pane_focus);
+        assert_eq!(
+            app.worktree_pane.tree_selected_path.as_deref(),
+            Some("nested/child.rs")
+        );
+        app.set_worktree_pane_tab(super::worktree_pane::WorktreePaneTab::Files);
+        app.worktree_pane.tree_selected_path = Some("nested".into());
+        render_and_snap(&app, &mut terminal);
+        assert!(
+            crate::tui::ui::worktree_pane_layout()
+                .unwrap()
+                .tree_rows
+                .iter()
+                .any(|row| row.path == "nested" && row.expanded)
+        );
+        route_worktree_arrow(&mut app, route, KeyCode::Left, &rt);
+        assert_eq!(
+            app.worktree_pane.tab,
+            super::worktree_pane::WorktreePaneTab::Diff
+        );
+        assert!(app.diff_pane_focus);
+    }
+}
+
+#[test]
+fn routed_worktree_inspector_left_returns_to_tree_before_two_stop_rail_exit() {
+    use super::worktree_pane::WorktreePaneTab::{Diff, Files};
+    let _lock = scroll_render_test_lock();
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let _guard = rt.enter();
+    for route in 0..3 {
+        let (_repo, mut app, mut terminal) = inspector_fixture();
+        select_inspector_file(&mut app, &mut terminal, "script.py");
+        route_worktree_arrow(&mut app, route, KeyCode::Enter, &rt);
+        assert!(app.files_inspector.is_focused());
+        route_worktree_arrow(&mut app, route, KeyCode::Right, &rt);
+        assert_eq!(
+            app.files_inspector.mode(),
+            Some(super::files_inspector::FileInspectorMode::Changes)
+        );
+        app.files_inspector.set_scroll_offset(7);
+        render_and_snap(&app, &mut terminal);
+        let preview = crate::tui::ui::worktree_pane_layout()
+            .unwrap()
+            .preview_area
+            .unwrap();
+        let content = worktree_rendered_region(&terminal, preview);
+        assert!(content.contains("function_"));
+        route_worktree_arrow(&mut app, route, KeyCode::Left, &rt);
+        assert!(!app.files_inspector.is_focused());
+        assert!(app.diff_pane_focus);
+        assert_eq!(app.worktree_pane.tab, Files);
+        assert_eq!(app.files_inspector.scroll_offset(), 7);
+        assert_eq!(
+            app.files_inspector.mode(),
+            Some(super::files_inspector::FileInspectorMode::Changes)
+        );
+        render_and_snap(&app, &mut terminal);
+        // Inspector -> tree changes the preview's render-scroll source today.
+        // This is not the final rail -> Chat exit under test. Retain the stored
+        // inspector mode/offset assertions above without redefining that view.
+        assert!(worktree_rendered_region(&terminal, preview).contains("function_"));
+        route_worktree_arrow(&mut app, route, KeyCode::Left, &rt);
+        assert!(app.diff_pane_focus);
+        assert_eq!(app.worktree_pane.tab, Diff);
+        render_and_snap(&app, &mut terminal);
+        let body = crate::tui::ui::worktree_pane_layout().unwrap().body_area;
+        let final_content = worktree_rendered_region(&terminal, body);
+        let final_selection = app.worktree_pane.selected_file.clone();
+        let final_scroll = app.diff_pane_scroll;
+        route_worktree_arrow(&mut app, route, KeyCode::Left, &rt);
+        assert!(!app.diff_pane_focus);
+        assert_eq!(app.worktree_pane.tab, Diff);
+        render_and_snap(&app, &mut terminal);
+        assert_eq!(app.worktree_pane.selected_file, final_selection);
+        assert_eq!(app.diff_pane_scroll, final_scroll);
+        assert_eq!(worktree_rendered_region(&terminal, body), final_content);
+    }
+}
+
 #[test]
 fn files_inspector_scroll_is_per_file_and_mode() {
     let _lock = scroll_render_test_lock();
@@ -885,12 +1115,15 @@ fn test_documents_body_wheel_uses_smooth_side_pane_scroll_without_changing_focus
     app.set_diff_pane_focus(false);
     let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(140, 30)).unwrap();
     render_and_snap(&app, &mut terminal);
-    let layout = crate::tui::ui::worktree_pane_layout().expect("documents pane layout");
+    let pane = crate::tui::ui::last_layout_snapshot()
+        .expect("rendered layout")
+        .diff_pane_area
+        .expect("generic side-panel area");
 
     app.handle_mouse_event(worktree_test_mouse(
         MouseEventKind::ScrollDown,
-        layout.body_area.x + 1,
-        layout.body_area.y + 1,
+        pane.x + 1,
+        pane.y + 1,
     ));
 
     assert!(
