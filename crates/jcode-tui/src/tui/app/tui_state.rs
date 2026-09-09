@@ -1948,6 +1948,9 @@ impl crate::tui::TuiState for App {
     fn files_inspector_scroll_offset(&self) -> u16 {
         self.files_inspector.scroll_offset()
     }
+    fn files_inspector_modes(&self) -> Vec<crate::tui::app::files_inspector::FileInspectorMode> {
+        self.files_inspector.available_modes().collect()
+    }
     fn side_panel_image_zoom_percent(&self) -> u8 {
         self.side_panel_image_zoom_percent
     }

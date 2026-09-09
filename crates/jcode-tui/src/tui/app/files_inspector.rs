@@ -112,15 +112,15 @@ impl FileInspectorUiState {
             .map(|identity| (&identity.root, &identity.path))
     }
 
-    pub(super) fn capabilities(&self) -> FileInspectorCapabilities {
+    pub(crate) fn capabilities(&self) -> FileInspectorCapabilities {
         self.capabilities
     }
 
-    pub(super) fn mode(&self) -> Option<FileInspectorMode> {
+    pub(crate) fn mode(&self) -> Option<FileInspectorMode> {
         self.mode
     }
 
-    pub(super) fn select_mode(&mut self, mode: FileInspectorMode) -> bool {
+    pub(crate) fn select_mode(&mut self, mode: FileInspectorMode) -> bool {
         if !self.capabilities.supports(mode) {
             return false;
         }
@@ -129,7 +129,7 @@ impl FileInspectorUiState {
         true
     }
 
-    pub(super) fn available_modes(&self) -> impl Iterator<Item = FileInspectorMode> {
+    pub(crate) fn available_modes(&self) -> impl Iterator<Item = FileInspectorMode> {
         self.capabilities.modes()
     }
 
@@ -147,11 +147,11 @@ impl FileInspectorUiState {
         self.focused = false;
     }
 
-    pub(super) fn is_focused(&self) -> bool {
+    pub(crate) fn is_focused(&self) -> bool {
         self.focused
     }
 
-    pub(super) fn scroll_offset(&self) -> u16 {
+    pub(crate) fn scroll_offset(&self) -> u16 {
         self.selected
             .as_ref()
             .zip(self.mode)

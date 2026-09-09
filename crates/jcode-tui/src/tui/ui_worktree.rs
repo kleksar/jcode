@@ -1548,6 +1548,52 @@ fn project_tree_line(row: &ProjectTreeRow, selected: bool, focused: bool) -> Lin
     ])
 }
 
+fn inspector_mode_label(mode: crate::tui::app::files_inspector::FileInspectorMode) -> &'static str {
+    match mode {
+        crate::tui::app::files_inspector::FileInspectorMode::Read => "Read",
+        crate::tui::app::files_inspector::FileInspectorMode::Source => "Source",
+        crate::tui::app::files_inspector::FileInspectorMode::Changes => "Changes",
+    }
+}
+
+fn inspector_lines(
+    app: &dyn TuiState,
+    root: &Path,
+    path: &str,
+    mode: crate::tui::app::files_inspector::FileInspectorMode,
+) -> Arc<Vec<Line<'static>>> {
+    if mode != crate::tui::app::files_inspector::FileInspectorMode::Changes {
+        return build_project_preview(root, path);
+    }
+    let Some(snapshot) = snapshot_for_worktree(Some(root.to_string_lossy().as_ref())) else {
+        return preview_message("Loading changes…");
+    };
+    let Some(file) = snapshot.files.iter().find(|file| file.path == path) else {
+        return preview_message("No changes for this file");
+    };
+    let mut lines = Vec::with_capacity(file.lines.len().saturating_add(1));
+    for diff in &file.lines {
+        let (prefix, color) = match diff.kind {
+            WorktreeLineKind::Add => ("+", diff_add_color()),
+            WorktreeLineKind::Del => ("-", diff_del_color()),
+            WorktreeLineKind::Hunk => ("", tool_color()),
+            WorktreeLineKind::Meta => ("", dim_color()),
+            WorktreeLineKind::Context => (" ", rgb(190, 190, 205)),
+        };
+        lines.push(Line::from(Span::styled(
+            format!("{prefix}{}", diff.content),
+            Style::default().fg(color),
+        )));
+    }
+    if lines.is_empty() {
+        lines.push(Line::from(Span::styled(
+            "No changes for this file",
+            Style::default().fg(dim_color()),
+        )));
+    }
+    Arc::new(lines)
+}
+
 pub(super) fn draw_project_files(
     frame: &mut Frame,
     area: Rect,
@@ -1637,9 +1683,12 @@ pub(super) fn draw_project_files(
         .get(selected_index)
         .filter(|row| !row.is_dir)
         .map(|row| row.path.clone());
+    let selected_mode = app
+        .files_inspector_mode()
+        .unwrap_or(crate::tui::app::files_inspector::FileInspectorMode::Source);
     let preview_lines = selected_file
         .as_deref()
-        .map(|path| build_project_preview(&snapshot.root, path));
+        .map(|path| inspector_lines(app, &snapshot.root, path, selected_mode));
     let show_preview = preview_lines.is_some() && inner.height >= 10;
     let tree_height = if show_preview {
         (inner.height / 2).clamp(4, inner.height.saturating_sub(5))
@@ -1706,15 +1755,43 @@ pub(super) fn draw_project_files(
             ])),
             header_area,
         );
+        let mode_area = Rect::new(inner.x, header_area.bottom(), inner.width, 1);
+        let mode_line = app
+            .files_inspector_modes()
+            .into_iter()
+            .flat_map(|mode| {
+                let selected = mode == selected_mode;
+                [
+                    Span::styled(" ", Style::default()),
+                    Span::styled(
+                        format!(" {} ", inspector_mode_label(mode)),
+                        Style::default()
+                            .fg(if selected { tool_color() } else { dim_color() })
+                            .add_modifier(if selected {
+                                ratatui::style::Modifier::BOLD
+                            } else {
+                                ratatui::style::Modifier::empty()
+                            }),
+                    ),
+                    Span::styled(" ", Style::default()),
+                ]
+            })
+            .collect::<Vec<_>>();
+        frame.render_widget(Paragraph::new(Line::from(mode_line)), mode_area);
         let body = Rect::new(
             inner.x,
-            header_area.bottom(),
+            mode_area.bottom(),
             inner.width,
-            inner.bottom().saturating_sub(header_area.bottom()),
+            inner.bottom().saturating_sub(mode_area.bottom()),
         );
         preview_total_lines = lines.len();
         let max_scroll = preview_total_lines.saturating_sub(body.height as usize);
-        preview_scroll = app.project_tree_preview_scroll().min(max_scroll);
+        preview_scroll = if app.files_inspector_focused() {
+            usize::from(app.files_inspector_scroll_offset())
+        } else {
+            app.project_tree_preview_scroll()
+        }
+        .min(max_scroll);
         let visible = lines
             .iter()
             .skip(preview_scroll)

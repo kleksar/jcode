@@ -732,9 +732,18 @@ pub trait TuiState {
     fn project_tree_preview_focused(&self) -> bool {
         false
     }
-    fn files_inspector_focused(&self) -> bool { false }
-    fn files_inspector_mode(&self) -> Option<crate::tui::app::files_inspector::FileInspectorMode> { None }
-    fn files_inspector_scroll_offset(&self) -> u16 { 0 }
+    fn files_inspector_focused(&self) -> bool {
+        false
+    }
+    fn files_inspector_mode(&self) -> Option<crate::tui::app::files_inspector::FileInspectorMode> {
+        None
+    }
+    fn files_inspector_scroll_offset(&self) -> u16 {
+        0
+    }
+    fn files_inspector_modes(&self) -> Vec<crate::tui::app::files_inspector::FileInspectorMode> {
+        Vec::new()
+    }
     /// Zoom percentage for image widgets rendered inside the side panel.
     fn side_panel_image_zoom_percent(&self) -> u8;
     /// Image shown in the dismissible full-screen panel preview.
