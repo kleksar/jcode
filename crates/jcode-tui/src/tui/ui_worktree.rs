@@ -2328,6 +2328,27 @@ mod tests {
         assert!(!paths.iter().any(|path| path == "ignored.log"));
     }
 
+    fn assert_same_project_root(actual: &Path, expected: &Path) {
+        // macOS volume aliases can retain different canonical spellings while
+        // referring to the very same directory. Compare filesystem identity.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            let actual = std::fs::metadata(actual).unwrap();
+            let expected = std::fs::metadata(expected).unwrap();
+            assert!(actual.is_dir() && expected.is_dir());
+            assert_eq!(
+                (actual.dev(), actual.ino()),
+                (expected.dev(), expected.ino())
+            );
+        }
+        #[cfg(not(unix))]
+        assert_eq!(
+            actual.canonicalize().unwrap(),
+            expected.canonicalize().unwrap()
+        );
+    }
+
     #[test]
     fn project_tree_uses_git_root_when_session_starts_in_subdirectory() {
         let dir = tempfile::tempdir().unwrap();
@@ -2346,7 +2367,7 @@ mod tests {
             .unwrap();
 
         let snapshot = collect_project_tree(&dir.path().join("project")).expect("project tree");
-        assert_eq!(snapshot.root, dir.path().canonicalize().unwrap());
+        assert_same_project_root(&snapshot.root, dir.path());
         assert!(snapshot.nodes.iter().any(|node| node.path == "project"));
         assert!(snapshot.nodes.iter().any(|node| node.path == "outside.rs"));
     }
@@ -2410,7 +2431,7 @@ mod tests {
         std::fs::create_dir(linked.join("nested")).unwrap();
 
         let snapshot = collect_project_tree(&linked.join("nested")).expect("worktree tree");
-        assert_eq!(snapshot.root, linked.canonicalize().unwrap());
+        assert_same_project_root(&snapshot.root, &linked);
         assert_eq!(snapshot.root_label, "linked");
         assert!(snapshot.nodes.iter().any(|node| node.path == "tracked.rs"));
     }
@@ -2440,26 +2461,37 @@ mod tests {
     fn project_pane_title_only_emphasizes_active_tab_when_keyboard_focused() {
         use ratatui::style::Modifier;
 
-        let focused = project_pane_title(
-            crate::tui::app::worktree_pane::WorktreePaneTab::Diff,
-            true,
-            Vec::new(),
-        );
-        let unfocused = project_pane_title(
-            crate::tui::app::worktree_pane::WorktreePaneTab::Diff,
-            false,
-            Vec::new(),
-        );
-
-        assert!(focused.spans[0].style.add_modifier.contains(Modifier::BOLD));
-        assert_eq!(focused.spans[0].style.bg, Some(rgb(55, 55, 68)));
-        assert!(
-            !unfocused.spans[0]
-                .style
-                .add_modifier
-                .contains(Modifier::BOLD)
-        );
-        assert_eq!(unfocused.spans[0].style.bg, None);
+        use crate::tui::app::worktree_pane::WorktreePaneTab::{Diff, Files};
+        for (tab, active) in [(Diff, 0), (Files, 2)] {
+            let focused = project_pane_title(tab, true, Vec::new());
+            let unfocused = project_pane_title(tab, false, Vec::new());
+            assert!(
+                focused.spans[active]
+                    .style
+                    .add_modifier
+                    .contains(Modifier::BOLD)
+            );
+            assert_eq!(focused.spans[active].style.bg, Some(rgb(55, 55, 68)));
+            for index in [0, 2] {
+                assert_eq!(focused.spans[index].content, unfocused.spans[index].content);
+                assert!(
+                    !unfocused.spans[index]
+                        .style
+                        .add_modifier
+                        .contains(Modifier::BOLD)
+                );
+                assert_eq!(unfocused.spans[index].style.bg, None);
+                if index != active {
+                    assert!(
+                        !focused.spans[index]
+                            .style
+                            .add_modifier
+                            .contains(Modifier::BOLD)
+                    );
+                    assert_eq!(focused.spans[index].style.bg, None);
+                }
+            }
+        }
     }
 
     #[test]

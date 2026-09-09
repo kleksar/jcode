@@ -362,7 +362,7 @@ fn test_explicit_side_panel_takes_precedence_over_worktree_changes() {
 
     let mut app = create_test_app();
     app.session.working_dir = Some(repo.path().to_string_lossy().into_owned());
-    app.side_panel = crate::side_panel::SidePanelSnapshot {
+    app.apply_side_panel_snapshot(crate::side_panel::SidePanelSnapshot {
         focused_page_id: Some("plan".to_string()),
         pages: vec![crate::side_panel::SidePanelPage {
             id: "plan".to_string(),
@@ -373,7 +373,8 @@ fn test_explicit_side_panel_takes_precedence_over_worktree_changes() {
             content: "explicit-panel-content".to_string(),
             updated_at_ms: 1,
         }],
-    };
+    });
+    assert!(!app.worktree_pane.explicit_open);
 
     let backend = ratatui::backend::TestBackend::new(140, 20);
     let mut terminal = ratatui::Terminal::new(backend).expect("test terminal");
