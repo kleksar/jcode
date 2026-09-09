@@ -47,7 +47,7 @@ pub use crash::{
     find_session_by_name_or_id, recover_crashed_sessions, recover_crashed_sessions_by_ids,
 };
 pub use jcode_session_types::{
-    EnvSnapshot, GitState, SessionImproveMode, SessionStatus, StoredCompactionState,
+    EnvSnapshot, GitState, SessionImproveMode, SessionOrigin, SessionStatus, StoredCompactionState,
     StoredDisplayRole, StoredMemoryInjection, StoredMessage, StoredTokenUsage,
 };
 use journal::{PersistVectorMode, SessionJournalMeta, SessionPersistState};
@@ -104,6 +104,9 @@ pub fn is_scheduled_task_message(message: &StoredMessage) -> bool {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Session {
     pub id: String,
+    /// Immutable creation provenance, restored only from the authoritative snapshot.
+    #[serde(default)]
+    origin: SessionOrigin,
     pub parent_id: Option<String>,
     pub title: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -205,6 +208,8 @@ pub struct Session {
 #[derive(Debug, Deserialize)]
 struct SessionStartupStub {
     id: String,
+    #[serde(default)]
+    origin: SessionOrigin,
     #[serde(default)]
     parent_id: Option<String>,
     #[serde(default)]
@@ -326,6 +331,7 @@ pub fn derive_session_provider_key(provider_name: &str) -> Option<String> {
 impl Session {
     fn session_from_startup_stub(stub: SessionStartupStub) -> Self {
         let mut session = Self::create_with_id(stub.id, stub.parent_id, stub.title);
+        session.origin = stub.origin;
         session.custom_title = stub.custom_title;
         session.created_at = stub.created_at;
         session.updated_at = stub.updated_at;
@@ -361,6 +367,7 @@ impl Session {
 
     fn session_from_remote_startup_snapshot(snapshot: RemoteStartupSessionSnapshot) -> Self {
         let mut session = Self::create_with_id(snapshot.id, snapshot.parent_id, snapshot.title);
+        session.origin = snapshot.origin;
         session.custom_title = snapshot.custom_title;
         session.created_at = snapshot.created_at;
         session.updated_at = snapshot.updated_at;
@@ -499,6 +506,7 @@ impl Session {
 
     fn journal_meta(&self) -> SessionJournalMeta {
         SessionJournalMeta {
+            origin: self.origin,
             parent_id: self.parent_id.clone(),
             title: self.title.clone(),
             custom_title: self.custom_title.clone(),
@@ -701,6 +709,7 @@ impl Session {
     }
 
     fn apply_journal_meta(&mut self, meta: SessionJournalMeta) {
+        // Snapshot provenance is authoritative, even for missing or contradictory journal origin.
         self.parent_id = meta.parent_id;
         self.title = meta.title;
         self.custom_title = meta.custom_title;
@@ -738,6 +747,7 @@ impl Session {
         let short_name = extract_session_name(&session_id).map(|s| s.to_string());
         let mut session = Self {
             id: session_id,
+            origin: SessionOrigin::Unknown,
             parent_id,
             title,
             custom_title: None,
@@ -780,7 +790,22 @@ impl Session {
         session
     }
 
+    /// Creation provenance cannot be changed by reparenting or journal replay.
+    pub fn origin(&self) -> SessionOrigin {
+        self.origin
+    }
+
     pub fn create(parent_id: Option<String>, title: Option<String>) -> Self {
+        Self::create_with_origin(parent_id, title, SessionOrigin::Unknown)
+    }
+
+    /// Allocate a new identity with explicit provenance before its first save.
+    /// This never retags an existing session ID and does not itself persist it.
+    pub fn create_with_origin(
+        parent_id: Option<String>,
+        title: Option<String>,
+        origin: SessionOrigin,
+    ) -> Self {
         let now = Utc::now();
         // Keep memorable identities distinct across all currently active
         // sessions. This naturally covers swarm members and survives a server
@@ -793,6 +818,7 @@ impl Session {
         let is_debug = default_is_test_session();
         let mut session = Self {
             id,
+            origin,
             parent_id,
             title,
             custom_title: None,
@@ -1606,6 +1632,8 @@ fn is_sensitive_json_key(key: &str) -> bool {
 #[derive(Debug, Deserialize)]
 struct RemoteStartupSessionSnapshot {
     id: String,
+    #[serde(default)]
+    origin: SessionOrigin,
     #[serde(default)]
     parent_id: Option<String>,
     #[serde(default)]

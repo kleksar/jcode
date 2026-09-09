@@ -387,7 +387,10 @@ impl Session {
         // id find no file and silently treat the session as missing.
         // Parent linkage is also explicit state: an empty fork carries only a
         // hidden fork notice but must be loadable when its new client attaches.
+        // Explicit worker provenance must be durable before worker publication,
+        // even when the initial session has no title, parent, or visible message.
         if !self.persist_state.snapshot_exists
+            && self.origin == super::SessionOrigin::Unknown
             && !self
                 .messages
                 .iter()

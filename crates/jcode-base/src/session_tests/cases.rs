@@ -2541,3 +2541,204 @@ fn test_rewind_after_undo_uses_the_new_target_not_the_previous_one() {
     assert_eq!(after.last().unwrap(), "prompt-6");
     assert_eq!(session.rewind_target_count(), 11);
 }
+
+#[test]
+fn origin_snapshot_hydration_roundtrip() -> Result<()> {
+    let _lock = lock_env();
+    let home = tempfile::tempdir()?;
+    let _home = EnvVarGuard::set("JCODE_HOME", home.path());
+    let session = Session::create_with_id("origin_snapshot_test".into(), None, None);
+    let mut value = serde_json::to_value(&session)?;
+    value["origin"] = serde_json::json!("swarm_worker");
+    let mut worker: Session = serde_json::from_value(value)?;
+    assert_eq!(serde_json::to_value(&worker)?["origin"], "swarm_worker");
+    worker.save()?;
+    for loaded in [
+        worker.clone(),
+        Session::load(&worker.id)?,
+        Session::load_startup_stub(&worker.id)?,
+        Session::load_for_remote_startup(&worker.id)?,
+    ] {
+        assert_eq!(serde_json::to_value(loaded)?["origin"], "swarm_worker");
+    }
+    Ok(())
+}
+
+#[test]
+fn origin_constructor_and_serde_compatibility() -> Result<()> {
+    let _lock = lock_env();
+    let home = tempfile::tempdir()?;
+    let _home = EnvVarGuard::set("JCODE_HOME", home.path());
+    let worker = Session::create_with_origin(None, None, SessionOrigin::SwarmWorker);
+    assert_eq!(worker.origin(), SessionOrigin::SwarmWorker);
+    assert_eq!(worker.clone().id, worker.id);
+    assert_eq!(worker.clone().origin(), SessionOrigin::SwarmWorker);
+    let second = Session::create_with_origin(None, None, SessionOrigin::SwarmWorker);
+    assert_ne!(second.id, worker.id);
+    for ordinary in [
+        Session::create(None, None),
+        Session::create(Some(worker.id.clone()), None),
+        Session::create_with_id("ordinary".into(), Some(worker.id.clone()), None),
+        Session::create_with_origin(None, None, SessionOrigin::Unknown),
+    ] {
+        assert_eq!(ordinary.origin(), SessionOrigin::Unknown);
+        assert_ne!(ordinary.id, worker.id);
+    }
+    for (origin, wire) in [
+        (SessionOrigin::Unknown, "unknown"),
+        (SessionOrigin::SwarmWorker, "swarm_worker"),
+    ] {
+        assert_eq!(serde_json::to_value(origin)?, wire);
+        assert_eq!(
+            serde_json::from_value::<SessionOrigin>(serde_json::json!(wire))?,
+            origin
+        );
+    }
+    for wire in [None, Some("future_origin")] {
+        let mut value = serde_json::to_value(&worker)?;
+        value.as_object_mut().unwrap().remove("origin");
+        if let Some(wire) = wire {
+            value["origin"] = serde_json::json!(wire);
+        }
+        let loaded: Session = serde_json::from_value(value)?;
+        assert_eq!(loaded.origin(), SessionOrigin::Unknown);
+    }
+    Ok(())
+}
+
+#[test]
+fn origin_worker_initial_snapshot_and_persistence() -> Result<()> {
+    let _lock = lock_env();
+    let home = tempfile::tempdir()?;
+    let _home = EnvVarGuard::set("JCODE_HOME", home.path());
+    let mut worker = Session::create_with_origin(None, None, SessionOrigin::SwarmWorker);
+    assert_eq!(worker.origin(), SessionOrigin::SwarmWorker);
+    worker.save()?;
+    let path = session_path(&worker.id)?;
+    assert!(
+        path.exists(),
+        "empty worker must have a durable initial snapshot"
+    );
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&std::fs::read(&path)?)?["origin"],
+        "swarm_worker"
+    );
+    worker.model = Some("metadata-only".into());
+    worker.save()?;
+    worker.add_message(
+        Role::User,
+        vec![ContentBlock::Text {
+            text: "worker message".into(),
+            cache_control: None,
+        }],
+    );
+    worker.save()?;
+    let journal_path = session_journal_path(&worker.id)?;
+    let journal = std::fs::read_to_string(&journal_path)?;
+    assert!(!journal.is_empty());
+    for line in journal.lines() {
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(line)?["meta"]["origin"],
+            "swarm_worker"
+        );
+    }
+    for loaded in [
+        Session::load(&worker.id)?,
+        Session::load_for_remote_startup(&worker.id)?,
+    ] {
+        assert_eq!(loaded.origin(), SessionOrigin::SwarmWorker);
+        assert_eq!(loaded.messages.len(), 1);
+        assert_eq!(loaded.model.as_deref(), Some("metadata-only"));
+    }
+    worker.parent_id = Some("new-parent".into());
+    worker.title = Some("checkpoint".into());
+    worker.is_debug = !worker.is_debug;
+    worker.save()?;
+    assert!(!journal_path.exists(), "metadata change must checkpoint");
+    for loaded in [
+        Session::load(&worker.id)?,
+        Session::load_startup_stub(&worker.id)?,
+        Session::load_for_remote_startup(&worker.id)?,
+    ] {
+        assert_eq!(loaded.origin(), SessionOrigin::SwarmWorker);
+        assert_eq!(loaded.parent_id.as_deref(), Some("new-parent"));
+    }
+    Ok(())
+}
+
+#[test]
+fn origin_snapshot_authority_over_journal() -> Result<()> {
+    let _lock = lock_env();
+    let home = tempfile::tempdir()?;
+    let _home = EnvVarGuard::set("JCODE_HOME", home.path());
+    for snapshot_origin in [
+        None,
+        Some("unknown"),
+        Some("swarm_worker"),
+        Some("future_origin"),
+    ] {
+        for journal_origin in [
+            None,
+            Some("unknown"),
+            Some("swarm_worker"),
+            Some("future_origin"),
+        ] {
+            let mut session = Session::create_with_origin(
+                None,
+                Some("snapshot".into()),
+                SessionOrigin::SwarmWorker,
+            );
+            session.save()?;
+            let path = session_path(&session.id)?;
+            let mut snapshot: serde_json::Value = serde_json::from_slice(&std::fs::read(&path)?)?;
+            snapshot.as_object_mut().unwrap().remove("origin");
+            if let Some(origin) = snapshot_origin {
+                snapshot["origin"] = serde_json::json!(origin);
+            }
+            std::fs::write(&path, serde_json::to_vec(&snapshot)?)?;
+            session.add_message(
+                Role::User,
+                vec![ContentBlock::Text {
+                    text: "journal survives".into(),
+                    cache_control: None,
+                }],
+            );
+            session.save()?;
+            let journal_path = session_journal_path(&session.id)?;
+            let mut entry: serde_json::Value =
+                serde_json::from_str(std::fs::read_to_string(&journal_path)?.trim())?;
+            let meta = entry["meta"].as_object_mut().unwrap();
+            meta.remove("origin");
+            if let Some(origin) = journal_origin {
+                meta.insert("origin".into(), serde_json::json!(origin));
+            }
+            meta.insert("parent_id".into(), serde_json::json!("journal-parent"));
+            std::fs::write(
+                &journal_path,
+                format!("{}\n", serde_json::to_string(&entry)?),
+            )?;
+            let expected = if snapshot_origin == Some("swarm_worker") {
+                SessionOrigin::SwarmWorker
+            } else {
+                SessionOrigin::Unknown
+            };
+            assert_eq!(Session::load_startup_stub(&session.id)?.origin(), expected);
+            for mut loaded in [
+                Session::load(&session.id)?,
+                Session::load_for_remote_startup(&session.id)?,
+            ] {
+                assert_eq!(
+                    loaded.origin(),
+                    expected,
+                    "snapshot={snapshot_origin:?}, journal={journal_origin:?}"
+                );
+                assert_eq!(loaded.messages.len(), 1);
+                assert_eq!(loaded.parent_id.as_deref(), Some("journal-parent"));
+                loaded.title = Some("checkpoint after replay".into());
+                loaded.save()?;
+                assert_eq!(Session::load(&session.id)?.origin(), expected);
+            }
+        }
+    }
+    Ok(())
+}

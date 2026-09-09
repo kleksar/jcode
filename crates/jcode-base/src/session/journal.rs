@@ -2,12 +2,14 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 use super::{
-    EnvSnapshot, SessionImproveMode, SessionStatus, StoredCompactionState, StoredMemoryInjection,
-    StoredMessage, StoredReplayEvent,
+    EnvSnapshot, SessionImproveMode, SessionOrigin, SessionStatus, StoredCompactionState,
+    StoredMemoryInjection, StoredMessage, StoredReplayEvent,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub(super) struct SessionJournalMeta {
+    #[serde(default)]
+    pub(super) origin: SessionOrigin,
     pub(super) parent_id: Option<String>,
     pub(super) title: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -76,7 +78,8 @@ pub(super) fn metadata_requires_snapshot(
     prev: &SessionJournalMeta,
     current: &SessionJournalMeta,
 ) -> bool {
-    prev.parent_id != current.parent_id
+    prev.origin != current.origin
+        || prev.parent_id != current.parent_id
         || prev.title != current.title
         || prev.custom_title != current.custom_title
         || prev.provider_key != current.provider_key

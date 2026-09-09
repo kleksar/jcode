@@ -3,6 +3,16 @@ use jcode_message_types::{ContentBlock, Message, Role, ToolCall};
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 
+/// Immutable creation provenance. Unknown includes legacy and future producers.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SessionOrigin {
+    SwarmWorker,
+    #[default]
+    #[serde(other)]
+    Unknown,
+}
+
 /// Identifies a session to resume, across the agent backends jcode can import
 /// from. This is pure data (only ids/paths) with no UI dependency; it lives in
 /// `jcode-session-types` so the foundation/import layer can match on it without
@@ -1062,5 +1072,30 @@ mod session_search_tests {
         let fenced = session_search_markdown_code_block("contains ``` fence");
         assert!(fenced.starts_with("````text\n"));
         assert!(fenced.ends_with("\n````"));
+    }
+}
+
+#[cfg(test)]
+mod origin_tests {
+    use super::*;
+    use serde::de::value::{Error, StrDeserializer};
+
+    #[test]
+    fn origin_defaults_to_unknown() {
+        assert_eq!(SessionOrigin::default(), SessionOrigin::Unknown);
+    }
+
+    #[test]
+    fn origin_deserializes_known_and_future_variants() {
+        for (wire, expected) in [
+            ("unknown", SessionOrigin::Unknown),
+            ("swarm_worker", SessionOrigin::SwarmWorker),
+            ("future_origin", SessionOrigin::Unknown),
+        ] {
+            assert_eq!(
+                SessionOrigin::deserialize(StrDeserializer::<Error>::new(wire)).unwrap(),
+                expected
+            );
+        }
     }
 }
