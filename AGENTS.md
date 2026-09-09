@@ -19,6 +19,30 @@
 
 ## Local deployment and runtime verification
 
+### Build storage and end-of-work cleanup
+
+- Finish code changes and required tests before one final application build.
+  Reuse the existing target for the active compilation lane instead of creating
+  duplicate target trees. If isolation is necessary, identify its owner and
+  cleanup scope before creating another target.
+- Before closing build-related work, review session-created artifacts and
+  report storage reclaimed and storage deferred, with reasons. This reminder
+  is not authorization for blanket or automatic deletion.
+- Delete only explicitly authorized, exact paths after resolving symlinks and
+  refreshing loaded-executable, open-file, working-directory, channel, and
+  active-build references. Skip any used or ambiguous artifact. Never use broad
+  `cargo clean` while a compilation lane is active.
+- Preserve the current incremental target and final binary, every loaded or
+  channel-pinned binary, rollback and pending candidates, source/Git data, and
+  sessions, transcripts, memory, auth, and configuration. Keep concise manifests,
+  build/audit logs, source snapshots, and rollback journals when removing an
+  explicitly superseded binary. A scratch directory is not inherently disposable.
+- Record exact deleted paths and allocated sizes, then measure filesystem free
+  space before and after. Deduplicate path aliases and hardlinks. Report observed
+  recovery separately from nominal allocation because APFS clones and snapshots
+  can retain shared extents. Cleanup never implies build, activation, or restart
+  approval. Artifact replacement still requires the provenance gate below.
+
 Before replacing any local artifact, follow the mandatory provenance and
 rollback gate in [`docs/LOCAL_DEVELOPMENT.md`](docs/LOCAL_DEVELOPMENT.md).
 Identify the loaded client and daemon independently: checkout `HEAD`, channel
