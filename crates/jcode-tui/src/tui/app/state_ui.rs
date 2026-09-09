@@ -669,11 +669,11 @@ impl App {
         &mut self,
         mut snapshot: crate::side_panel::SidePanelSnapshot,
     ) {
-        if snapshot
+        let focused_page_fell_back = snapshot
             .focused_page_id
             .as_deref()
-            .is_some_and(|focused| !snapshot.pages.iter().any(|page| page.id == focused))
-        {
+            .is_some_and(|focused| !snapshot.pages.iter().any(|page| page.id == focused));
+        if focused_page_fell_back {
             snapshot.focused_page_id = snapshot.pages.first().map(|page| page.id.clone());
         }
         let session_changed = !self.worktree_pane_matches_session();
@@ -716,15 +716,17 @@ impl App {
             {
                 self.worktree_pane.tab = super::worktree_pane::WorktreePaneTab::Files;
             }
-        } else if focused_changed {
+        } else if focused_changed || focused_page_fell_back || session_changed {
             self.prepare_worktree_pane_state();
-            if focused_is_new && let Some(id) = focused_after.as_deref() {
+            let reset_focused_document_ui =
+                focused_is_new || focused_page_fell_back || session_changed;
+            if reset_focused_document_ui && let Some(id) = focused_after.as_deref() {
                 self.worktree_pane
                     .document_ui
                     .insert(id.to_string(), Default::default());
             }
             self.set_worktree_pane_tab(super::worktree_pane::WorktreePaneTab::Documents);
-            if !focused_is_new {
+            if !reset_focused_document_ui {
                 self.restore_focused_document_ui();
             }
         }

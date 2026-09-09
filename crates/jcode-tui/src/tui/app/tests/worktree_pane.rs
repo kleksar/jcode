@@ -1009,6 +1009,26 @@ fn test_invalid_focused_document_snapshot_normalizes_to_an_existing_read_page() 
 }
 
 #[test]
+fn test_invalid_focused_document_snapshot_resets_existing_page_to_read_mode() {
+    let mut app = create_test_app();
+    app.apply_side_panel_snapshot(document_snapshot("one", &[("one", "One", "# one")]));
+    assert!(app.cycle_markdown_document_mode());
+    assert_eq!(
+        app.focused_markdown_document_mode(),
+        super::worktree_pane::MarkdownDocumentMode::Source
+    );
+
+    app.apply_side_panel_snapshot(document_snapshot("missing", &[("one", "One", "# one")]));
+
+    assert_eq!(app.side_panel.focused_page_id.as_deref(), Some("one"));
+    assert_eq!(
+        app.focused_markdown_document_mode(),
+        super::worktree_pane::MarkdownDocumentMode::Read,
+        "fallback must not retain the old page mode"
+    );
+}
+
+#[test]
 fn test_narrow_clean_session_does_not_auto_open_files_without_documents() {
     let _lock = scroll_render_test_lock();
     let repo = init_worktree_pane_test_repo();
@@ -1155,7 +1175,37 @@ fn test_document_scroll_survives_refresh_but_not_a_new_session() {
     app.session.id = "new-session".into();
     app.apply_side_panel_snapshot(snapshot);
     assert_eq!(app.diff_pane_scroll, 0, "new sessions start at the top");
-    assert!(app.worktree_pane.document_ui.is_empty());
+    assert_eq!(
+        app.focused_markdown_document_mode(),
+        super::worktree_pane::MarkdownDocumentMode::Read,
+        "new sessions initialize the focused document state"
+    );
+}
+
+#[test]
+fn test_session_transition_with_same_focused_document_id_initializes_documents_workspace() {
+    let _lock = scroll_render_test_lock();
+    let mut app = create_test_app();
+    let snapshot = document_snapshot("one", &[("one", "One", "# one")]);
+    app.apply_side_panel_snapshot(snapshot.clone());
+
+    app.session.id = "new-session".into();
+    app.apply_side_panel_snapshot(snapshot);
+
+    assert!(
+        app.worktree_pane.document_ui.contains_key("one"),
+        "new session must initialize its colliding focused page"
+    );
+    assert_eq!(
+        app.focused_markdown_document_mode(),
+        super::worktree_pane::MarkdownDocumentMode::Read
+    );
+    let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(90, 24)).unwrap();
+    let text = render_and_snap(&app, &mut terminal);
+    assert!(
+        crate::tui::ui::worktree_pane_layout().is_some(),
+        "Documents workspace must remain visible: {text}"
+    );
 }
 
 #[test]
