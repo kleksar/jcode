@@ -660,59 +660,22 @@ fn test_files_tree_opens_markdown_documents_case_insensitively_and_deduplicates(
     let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(140, 30)).unwrap();
 
     app.worktree_pane.tree_selected_path = Some("README.md".into());
-    render_and_snap(&app, &mut terminal);
-    let files_layout = crate::tui::ui::worktree_pane_layout().expect("files pane layout");
+    let text = render_and_snap(&app, &mut terminal);
+    let layout = crate::tui::ui::worktree_pane_layout().expect("files pane layout");
     assert!(
-        files_layout.preview_area.is_none(),
-        "Markdown selection must not render a second raw inline preview"
+        layout.preview_area.is_some(),
+        "Markdown gets exactly one inline inspector"
     );
-    assert_eq!(
-        files_layout.tree_area,
-        Some(files_layout.body_area),
-        "the Files tree should use the whole body while Markdown is selected"
-    );
+    assert!(text.contains("Read") && text.contains("Files"));
     assert!(app.handle_diff_pane_focus_key(KeyCode::Enter, KeyModifiers::NONE));
     assert_eq!(
         app.worktree_pane.tab,
-        super::worktree_pane::WorktreePaneTab::Documents
+        super::worktree_pane::WorktreePaneTab::Files
     );
-    assert_eq!(app.side_panel.pages.len(), 1);
+    assert!(app.files_inspector.is_focused());
     assert_eq!(
-        app.focused_markdown_document_mode(),
-        super::worktree_pane::MarkdownDocumentMode::Read
-    );
-
-    app.set_worktree_pane_tab(super::worktree_pane::WorktreePaneTab::Files);
-    app.worktree_pane.tree_selected_path = Some("README.md".into());
-    render_and_snap(&app, &mut terminal);
-    assert!(app.handle_diff_pane_focus_key(KeyCode::Char('l'), KeyModifiers::NONE));
-    assert_eq!(
-        app.side_panel.pages.len(),
-        1,
-        "reopening must update the existing page"
-    );
-
-    app.set_worktree_pane_tab(super::worktree_pane::WorktreePaneTab::Files);
-    render_and_snap(&app, &mut terminal);
-    assert!(app.handle_diff_pane_focus_key(KeyCode::Right, KeyModifiers::NONE));
-    assert_eq!(
-        app.side_panel.pages.len(),
-        1,
-        "Right must reuse the existing page"
-    );
-
-    app.set_worktree_pane_tab(super::worktree_pane::WorktreePaneTab::Files);
-    app.worktree_pane.tree_selected_path = Some("NOTES.MD".into());
-    render_and_snap(&app, &mut terminal);
-    assert!(app.handle_diff_pane_focus_key(KeyCode::Char(' '), KeyModifiers::NONE));
-    assert_eq!(app.side_panel.pages.len(), 2);
-    assert_eq!(
-        app.worktree_pane.tab,
-        super::worktree_pane::WorktreePaneTab::Documents
-    );
-    assert_eq!(
-        app.focused_markdown_document_mode(),
-        super::worktree_pane::MarkdownDocumentMode::Read
+        app.files_inspector.mode(),
+        Some(crate::tui::app::files_inspector::FileInspectorMode::Read)
     );
 }
 
@@ -1627,7 +1590,7 @@ fn test_narrow_clean_session_does_not_auto_open_files_without_documents() {
 }
 
 #[test]
-fn test_reopening_focused_markdown_from_files_returns_to_documents_and_resets_read_mode() {
+fn test_reopening_focused_markdown_from_files_stays_in_files_inspector() {
     let _lock = scroll_render_test_lock();
     let repo = init_worktree_pane_test_repo();
     std::fs::write(repo.path().join("README.md"), "# Read me\n").expect("write Markdown");
@@ -1637,30 +1600,17 @@ fn test_reopening_focused_markdown_from_files_returns_to_documents_and_resets_re
     app.open_project_files_pane();
     app.worktree_pane.tree_selected_path = Some("README.md".into());
     let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(140, 30)).unwrap();
-
     render_and_snap(&app, &mut terminal);
     assert!(app.handle_diff_pane_focus_key(KeyCode::Enter, KeyModifiers::NONE));
-    assert!(app.handle_diff_pane_focus_key(KeyCode::Char('m'), KeyModifiers::NONE));
-    assert_eq!(
-        app.focused_markdown_document_mode(),
-        super::worktree_pane::MarkdownDocumentMode::Source
-    );
-    app.set_worktree_pane_tab(super::worktree_pane::WorktreePaneTab::Files);
-    render_and_snap(&app, &mut terminal);
-
-    assert!(app.handle_diff_pane_focus_key(KeyCode::Enter, KeyModifiers::NONE));
-    assert_eq!(
-        app.side_panel.pages.len(),
-        1,
-        "explicit reopen must not duplicate the page"
-    );
     assert_eq!(
         app.worktree_pane.tab,
-        super::worktree_pane::WorktreePaneTab::Documents
+        super::worktree_pane::WorktreePaneTab::Files
     );
+    assert!(app.files_inspector.is_focused());
+    assert_eq!(app.side_panel.pages.len(), 0);
     assert_eq!(
-        app.focused_markdown_document_mode(),
-        super::worktree_pane::MarkdownDocumentMode::Read
+        app.files_inspector.mode(),
+        Some(crate::tui::app::files_inspector::FileInspectorMode::Read)
     );
 }
 
