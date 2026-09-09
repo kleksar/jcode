@@ -33,6 +33,23 @@ fn worktree_filter_fixture() -> (
     (repo, app, terminal)
 }
 
+fn diff_route_fixture() -> (
+    tempfile::TempDir,
+    App,
+    ratatui::Terminal<ratatui::backend::TestBackend>,
+) {
+    let repo = init_worktree_pane_test_repo();
+    crate::tui::ui::prime_worktree_changes_for_tests(repo.path());
+    let mut app = create_test_app();
+    app.session.working_dir = Some(repo.path().to_string_lossy().into_owned());
+    app.diff_mode = crate::config::DiffDisplayMode::Inline;
+    app.set_worktree_pane_tab(super::worktree_pane::WorktreePaneTab::Diff);
+    app.set_diff_pane_focus(false);
+    let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(140, 30)).unwrap();
+    render_and_snap(&app, &mut terminal);
+    (repo, app, terminal)
+}
+
 fn inspector_fixture() -> (
     tempfile::TempDir,
     App,
@@ -2032,14 +2049,7 @@ fn test_worktree_file_click_filters_and_second_click_shows_all() {
 #[test]
 fn diff_routed_list_content_and_reentry_transitions_preserve_selection() {
     let _lock = scroll_render_test_lock();
-    let (_repo, mut app, mut terminal) = worktree_filter_fixture();
-    let list = crate::tui::ui::worktree_pane_layout().unwrap().list_area;
-    app.handle_mouse_event(worktree_test_mouse(
-        MouseEventKind::Down(MouseButton::Left),
-        list.x + 1,
-        list.y,
-    ));
-    let _ = render_and_snap(&app, &mut terminal);
+    let (_repo, mut app, mut terminal) = diff_route_fixture();
     app.set_diff_pane_focus(false);
     app.handle_key(KeyCode::Right, KeyModifiers::NONE);
     assert_eq!(
@@ -2070,7 +2080,7 @@ fn diff_routed_list_content_and_reentry_transitions_preserve_selection() {
 #[test]
 fn disconnected_diff_content_arrows_do_not_escape() {
     let _lock = scroll_render_test_lock();
-    let (_repo, mut app, mut terminal) = worktree_filter_fixture();
+    let (_repo, mut app, mut terminal) = diff_route_fixture();
     app.set_diff_pane_focus(false);
     super::remote::handle_disconnected_key(&mut app, KeyCode::Right, KeyModifiers::NONE).unwrap();
     super::remote::handle_disconnected_key(&mut app, KeyCode::Enter, KeyModifiers::NONE).unwrap();
