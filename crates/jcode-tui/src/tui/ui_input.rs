@@ -1215,7 +1215,7 @@ mod tests {
             .iter()
             .map(|span| span.content.as_ref())
             .collect::<String>();
-        assert_eq!(text, "82k/114k");
+        assert_eq!(text, "82/114k");
 
         let estimated = crate::tui::info_widget::InfoWidgetData {
             context_info: Some(crate::prompt::ContextInfo {
@@ -1229,7 +1229,7 @@ mod tests {
             .iter()
             .map(|span| span.content.as_ref())
             .collect::<String>();
-        assert_eq!(estimated_text, "82k/114k");
+        assert_eq!(estimated_text, "82/114k");
 
         let zero = crate::tui::info_widget::InfoWidgetData {
             context_limit: Some(114_000),
@@ -1239,6 +1239,36 @@ mod tests {
         assert!(footer_context_spans(&zero).is_empty());
         assert!(
             footer_context_spans(&crate::tui::info_widget::InfoWidgetData::default()).is_empty()
+        );
+    }
+
+    #[test]
+    fn footer_compositor_keeps_model_context_and_quota_on_normal_width() {
+        let facts = vec![Span::raw("model"), Span::raw("  │  "), Span::raw("82/114k")];
+        let quota = footer_quota_spans(Some(crate::tui::FooterQuota {
+            remaining_percent: 77,
+            reset_in: "6d 20h".to_string(),
+        }));
+
+        let text = footer_compositor_spans(facts, quota, 80)
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect::<String>();
+
+        assert_eq!(text, "model  │  82/114k  7-day 77% · 6d 20h");
+    }
+
+    #[test]
+    fn narrow_context_fact_hides_zero_or_unavailable_usage() {
+        let zero = crate::tui::info_widget::InfoWidgetData {
+            context_limit: Some(114_000),
+            observed_context_tokens: Some(0),
+            ..Default::default()
+        };
+
+        assert!(right_fact_context_line(&zero).is_none());
+        assert!(
+            right_fact_context_line(&crate::tui::info_widget::InfoWidgetData::default()).is_none()
         );
     }
     #[test]
@@ -2464,17 +2494,14 @@ fn footer_context_spans(data: &crate::tui::info_widget::InfoWidgetData) -> Vec<S
     let Some((used, limit)) = overscroll_context_usage(data) else {
         return Vec::new();
     };
-    if used == 0 || limit == 0 {
+    let Some(text) = compact_context_usage_text(used, limit) else {
         return Vec::new();
-    }
-    vec![Span::styled(
-        format!(
-            "{}/{}",
-            overscroll_format_tokens(used),
-            overscroll_format_tokens(limit)
-        ),
-        Style::default().fg(rgb(140, 140, 150)),
-    )]
+    };
+    vec![Span::styled(text, Style::default().fg(rgb(140, 140, 150)))]
+}
+
+fn compact_context_usage_text(used: usize, limit: usize) -> Option<String> {
+    (used > 0 && limit > 0).then(|| format!("{}/{}", used / 1_000, overscroll_format_tokens(limit)))
 }
 
 fn footer_fact_spans(app: &dyn TuiState) -> Vec<Span<'static>> {
@@ -2551,19 +2578,33 @@ pub(super) fn draw_session_footer(frame: &mut Frame, app: &dyn TuiState, area: R
         return;
     }
 
-    let facts = footer_fact_spans(app);
-    let mut quota = footer_quota_spans(app.footer_quota());
+    let spans = footer_compositor_spans(
+        footer_fact_spans(app),
+        footer_quota_spans(app.footer_quota()),
+        area.width as usize,
+    );
+    frame.render_widget(
+        Paragraph::new(Line::from(spans)),
+        Rect::new(area.x, area.y, area.width, 1),
+    );
+}
+
+fn footer_compositor_spans(
+    facts: Vec<Span<'static>>,
+    mut quota: Vec<Span<'static>>,
+    width: usize,
+) -> Vec<Span<'static>> {
     // Prefer the percentage over the reset clock on narrow terminals, without
     // letting an over-wide quota erase the entire model/footer row.
-    if quota.iter().map(|span| span.width()).sum::<usize>() > area.width as usize / 2 {
+    if quota.iter().map(|span| span.width()).sum::<usize>() > width / 2 {
         quota.truncate(2);
     }
-    if quota.iter().map(|span| span.width()).sum::<usize>() > area.width as usize {
+    if quota.iter().map(|span| span.width()).sum::<usize>() > width {
         quota.clear();
     }
     let quota_width = quota.iter().map(|span| span.width()).sum::<usize>();
     let gap = usize::from(!facts.is_empty() && !quota.is_empty()) * 2;
-    let facts_width = (area.width as usize).saturating_sub(quota_width + gap);
+    let facts_width = width.saturating_sub(quota_width + gap);
 
     // Keep the quota adjacent to the model rather than anchoring it to the
     // right edge. Reserve its width before truncating the session facts.
@@ -2572,10 +2613,7 @@ pub(super) fn draw_session_footer(frame: &mut Frame, app: &dyn TuiState, area: R
         spans.push(Span::raw("  "));
     }
     spans.extend(quota);
-    frame.render_widget(
-        Paragraph::new(Line::from(spans)),
-        Rect::new(area.x, area.y, area.width, 1),
-    );
+    spans
 }
 
 const RIGHT_FACT_CONTEXT_CELLS: usize = 6;
@@ -2742,26 +2780,25 @@ fn right_fact_lines(app: &dyn TuiState) -> Vec<RightFactLine> {
         }
     }
 
-    if let Some((used, limit)) = overscroll_context_usage(&data) {
-        let mut spans = vec![Span::styled(
-            format!(
-                "{}/{} ",
-                overscroll_format_tokens(used),
-                overscroll_format_tokens(limit)
-            ),
-            right_fact_neutral_style(),
-        )];
-        spans.extend(overscroll_context_bar(
-            used,
-            limit,
-            RIGHT_FACT_CONTEXT_CELLS,
-        ));
-        if let Some(line) = RightFactLine::new(spans) {
-            lines.push(line);
-        }
+    if let Some(line) = right_fact_context_line(&data) {
+        lines.push(line);
     }
 
     lines
+}
+
+fn right_fact_context_line(
+    data: &crate::tui::info_widget::InfoWidgetData,
+) -> Option<RightFactLine> {
+    let (used, limit) = overscroll_context_usage(data)?;
+    let text = compact_context_usage_text(used, limit)?;
+    let mut spans = vec![Span::styled(format!("{text} "), right_fact_neutral_style())];
+    spans.extend(overscroll_context_bar(
+        used,
+        limit,
+        RIGHT_FACT_CONTEXT_CELLS,
+    ));
+    RightFactLine::new(spans)
 }
 
 #[allow(clippy::too_many_arguments)]
