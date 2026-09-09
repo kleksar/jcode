@@ -3244,3 +3244,247 @@ fn composer_empty_draft_enter_selects_row_and_control_shortcuts_remain_picker_ow
         Ok(OverlayAction::Selected(PickerResult::CloseSession { ref session_id })) if session_id == "idle"
     ));
 }
+
+#[test]
+fn live_identity_missing_cache_worker_stays_hidden() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("worker.json"),
+        r#"{"parent_id":"root","is_debug":true,"messages":[]}"#,
+    )
+    .unwrap();
+    let mut picker = SessionPicker::new(Vec::new());
+    picker.filter_mode = SessionFilterMode::Active;
+    let mut presence = live_presence("worker", false);
+    presence.internal = true;
+    picker.live_presence.clear();
+    picker.live_presence.insert("worker".into(), presence);
+    picker.add_missing_live_session_rows_from(Some(dir.path()));
+    picker.rebuild_items();
+    assert_eq!(
+        picker.visible_session_count(),
+        0,
+        "persisted debug child must not become a visible root when cache omits it"
+    );
+}
+
+fn hydrate_live_identity_fixture(
+    picker: &mut SessionPicker,
+    dir: &std::path::Path,
+    presences: Vec<crate::session::SessionPresence>,
+) {
+    picker.live_presence = presences
+        .into_iter()
+        .map(|p| (p.session_id.clone(), p))
+        .collect();
+    picker.refresh_live_session_rows_from(Some(dir));
+}
+
+#[test]
+fn live_identity_visibility_matrix_matches_cached_rows() {
+    let dir = tempfile::tempdir().unwrap();
+    for (parent, debug) in [
+        (None, false),
+        (None, true),
+        (Some("root"), false),
+        (Some("root"), true),
+    ] {
+        std::fs::write(
+            dir.path().join("id.json"),
+            serde_json::json!({
+                "parent_id": parent, "is_debug": debug, "messages": []
+            })
+            .to_string(),
+        )
+        .unwrap();
+        for internal in [false, true] {
+            let mut presence = live_presence("id", false);
+            presence.internal = internal;
+            let mut synthetic = SessionPicker::new(Vec::new());
+            hydrate_live_identity_fixture(&mut synthetic, dir.path(), vec![presence.clone()]);
+            let mut normal = make_session("id", "id", debug, SessionStatus::Active);
+            normal.parent_id = parent.map(str::to_owned);
+            let mut cached = SessionPicker::new(vec![normal]);
+            cached.set_live_presence_for_test(vec![presence]);
+            for mode in [SessionFilterMode::Active, SessionFilterMode::All] {
+                for show_debug in [false, true] {
+                    for picker in [&mut synthetic, &mut cached] {
+                        picker.filter_mode = mode;
+                        picker.show_test_sessions = show_debug;
+                        picker.rebuild_items();
+                    }
+                    let expected = usize::from(
+                        show_debug
+                            || !debug
+                            || (mode == SessionFilterMode::Active && parent.is_none()),
+                    );
+                    assert_eq!(synthetic.visible_session_count(), expected);
+                    assert_eq!(cached.visible_session_count(), expected);
+                    assert_eq!(synthetic.all_sessions[0].parent_id.as_deref(), parent);
+                    assert_eq!(synthetic.all_sessions[0].is_debug, debug);
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn live_identity_unknown_internal_compatibility_and_negative_cache() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut picker = SessionPicker::new(Vec::new());
+    let mut presence = live_presence("unknown", false);
+    presence.internal = true;
+    hydrate_live_identity_fixture(&mut picker, dir.path(), vec![presence.clone()]);
+    assert_eq!(picker.live_identities.get("unknown"), Some(&None));
+    for (mode, show_debug, expected) in [
+        (SessionFilterMode::Active, false, 1),
+        (SessionFilterMode::All, false, 0),
+        (SessionFilterMode::All, true, 1),
+        (SessionFilterMode::Active, true, 1),
+    ] {
+        picker.filter_mode = mode;
+        picker.show_test_sessions = show_debug;
+        picker.rebuild_items();
+        assert_eq!(picker.visible_session_count(), expected);
+    }
+    std::fs::write(
+        dir.path().join("unknown.json"),
+        r#"{"parent_id":"root","is_debug":true}"#,
+    )
+    .unwrap();
+    hydrate_live_identity_fixture(&mut picker, dir.path(), vec![presence.clone()]);
+    assert_eq!(
+        picker.live_identities.get("unknown"),
+        Some(&None),
+        "presence-only ticks must not retry missing metadata"
+    );
+    picker.reseed_grouped(Vec::new(), Vec::new());
+    hydrate_live_identity_fixture(&mut picker, dir.path(), vec![presence]);
+    assert_eq!(picker.all_sessions[0].parent_id.as_deref(), Some("root"));
+}
+
+#[test]
+fn live_identity_refresh_replacement_counts_and_current_selection() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("worker.json"),
+        r#"{"parent_id":"root","is_debug":true,"messages":[]}"#,
+    )
+    .unwrap();
+    let mut worker = live_presence("worker", true);
+    worker.internal = true;
+    let presences = vec![
+        worker,
+        live_presence("ready", false),
+        live_presence("working", true),
+    ];
+    let mut picker = SessionPicker::new(Vec::new());
+    picker.filter_mode = SessionFilterMode::Active;
+    picker.set_current_session_id(Some("ready".into()));
+    hydrate_live_identity_fixture(&mut picker, dir.path(), presences.clone());
+    select_session(&mut picker, "ready");
+    // A later invalid source proves presence refresh reuses successful identity.
+    std::fs::write(dir.path().join("worker.json"), "invalid now").unwrap();
+    hydrate_live_identity_fixture(&mut picker, dir.path(), presences.clone());
+    assert_eq!(picker.visible_session_count(), 2);
+    assert_eq!(
+        picker
+            .visible_session_iter()
+            .filter(|s| picker.session_is_streaming(s))
+            .count(),
+        1
+    );
+    assert_eq!(
+        picker
+            .visible_session_iter()
+            .filter(|s| !picker.session_is_streaming(s))
+            .count(),
+        1
+    );
+    assert!(picker.session_is_current(picker.selected_session().unwrap()));
+    let mut replacement = make_session("worker", "normal", false, SessionStatus::Active);
+    replacement.title = "Full loaded transcript row".into();
+    let ready = make_session("ready", "ready", false, SessionStatus::Active);
+    let working = make_session("working", "working", false, SessionStatus::Active);
+    picker.reseed_grouped(Vec::new(), vec![replacement, ready, working]);
+    picker.set_live_presence_for_test(presences.clone());
+    for _ in 0..2 {
+        hydrate_live_identity_fixture(&mut picker, dir.path(), presences.clone());
+        assert_eq!(picker.all_sessions.len(), 3);
+        let worker = picker
+            .all_sessions
+            .iter()
+            .find(|s| s.id == "worker")
+            .unwrap();
+        assert_eq!(worker.title, "Full loaded transcript row");
+        assert_eq!(worker.parent_id.as_deref(), Some("root"));
+        assert!(worker.is_debug);
+        assert!(!picker.synthetic_live_session_ids.contains("worker"));
+        assert_eq!(picker.visible_session_count(), 2);
+        assert_eq!(picker.selected_session().unwrap().id, "ready");
+    }
+}
+
+#[test]
+fn live_identity_observed_root_survives_stale_child_replacement() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("root.json"),
+        r#"{"parent_id":null,"is_debug":false}"#,
+    )
+    .unwrap();
+    let mut picker = SessionPicker::new(Vec::new());
+    picker.filter_mode = SessionFilterMode::Active;
+    hydrate_live_identity_fixture(&mut picker, dir.path(), vec![live_presence("root", false)]);
+    let mut stale = make_session("root", "root", true, SessionStatus::Active);
+    stale.parent_id = Some("stale".into());
+    picker.reseed_grouped(Vec::new(), vec![stale]);
+    picker.set_live_presence_for_test(vec![live_presence("root", false)]);
+    assert_eq!(picker.visible_session_count(), 1);
+    assert_eq!(picker.all_sessions[0].parent_id, None);
+    assert!(!picker.all_sessions[0].is_debug);
+}
+
+#[test]
+fn live_identity_grouped_orphan_replacement_and_cache_pruning() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("worker.json"),
+        r#"{"parent_id":"root","is_debug":true}"#,
+    )
+    .unwrap();
+    let group = |sessions| ServerGroup {
+        name: "local".into(),
+        icon: "●".into(),
+        version: "test".into(),
+        git_hash: "test".into(),
+        is_running: true,
+        sessions,
+    };
+    let mut picker = SessionPicker::new_grouped(vec![group(Vec::new())], Vec::new());
+    picker.filter_mode = SessionFilterMode::Active;
+    let presence = live_presence("worker", false);
+    hydrate_live_identity_fixture(&mut picker, dir.path(), vec![presence.clone()]);
+    assert_eq!(picker.all_orphan_sessions.len(), 1);
+    assert_eq!(picker.visible_session_count(), 0);
+    let replacement = make_session("worker", "normal", false, SessionStatus::Active);
+    picker.reseed_grouped(vec![group(vec![replacement])], Vec::new());
+    hydrate_live_identity_fixture(&mut picker, dir.path(), vec![presence]);
+    assert!(picker.all_orphan_sessions.is_empty());
+    assert_eq!(picker.all_server_groups[0].sessions.len(), 1);
+    assert_eq!(
+        picker.all_server_groups[0].sessions[0].parent_id.as_deref(),
+        Some("root")
+    );
+    assert_eq!(picker.visible_session_count(), 0);
+    hydrate_live_identity_fixture(&mut picker, dir.path(), Vec::new());
+    assert!(
+        picker.live_identities.is_empty(),
+        "cache must not grow with historical live IDs"
+    );
+    assert_eq!(
+        picker.all_server_groups[0].sessions.len(),
+        1,
+        "normal replacement survives disconnect"
+    );
+}

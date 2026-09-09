@@ -27,6 +27,7 @@ pub use jcode_tui_session_picker::{
 
 mod composer;
 mod filter;
+mod live_identity;
 mod loading;
 mod memory;
 mod navigation;
@@ -34,6 +35,7 @@ mod render;
 
 #[cfg(test)]
 use loading::collect_recent_session_stems;
+use live_identity::{LiveSessionIdentity, load_live_session_identity};
 use loading::{build_messages_preview, build_search_index, crashed_sessions_from_all_sessions};
 pub use loading::{
     invalidate_session_list_cache, load_cached_sessions_grouped, load_servers, load_sessions,
@@ -328,6 +330,8 @@ pub struct SessionPicker {
     /// Placeholder rows synthesized for live sessions that do not yet have a
     /// persisted snapshot. Rebuilt with each presence refresh.
     synthetic_live_session_ids: HashSet<String>,
+    // Observed identity survives refresh. Unavailable reads retry on reseed.
+    live_identities: HashMap<String, Option<LiveSessionIdentity>>,
     /// When `live_presence` was last snapshotted (throttles periodic refresh).
     live_presence_refreshed_at: Option<std::time::Instant>,
     /// ID of the session the picker was opened from, labeled "current" in the
@@ -393,6 +397,7 @@ impl SessionPicker {
             current_dir: None,
             live_presence: std::collections::HashMap::new(),
             synthetic_live_session_ids: HashSet::new(),
+            live_identities: HashMap::new(),
             live_presence_refreshed_at: None,
             current_session_id: None,
             pending_claude_takeover: None,
@@ -447,6 +452,7 @@ impl SessionPicker {
             current_dir: None,
             live_presence: std::collections::HashMap::new(),
             synthetic_live_session_ids: HashSet::new(),
+            live_identities: HashMap::new(),
             live_presence_refreshed_at: None,
             current_session_id: None,
             pending_claude_takeover: None,
@@ -533,6 +539,7 @@ impl SessionPicker {
             current_dir: None,
             live_presence: std::collections::HashMap::new(),
             synthetic_live_session_ids: HashSet::new(),
+            live_identities: HashMap::new(),
             live_presence_refreshed_at: None,
             current_session_id: None,
             pending_claude_takeover: None,
@@ -709,18 +716,8 @@ impl SessionPicker {
     /// Snapshot the active-pid registry + streaming markers into the picker.
     pub(super) fn refresh_live_presence(&mut self) {
         let previous_presence = self.live_presence.clone();
-        if !self.synthetic_live_session_ids.is_empty() {
-            self.all_sessions
-                .retain(|session| !self.synthetic_live_session_ids.contains(&session.id));
-            self.all_orphan_sessions
-                .retain(|session| !self.synthetic_live_session_ids.contains(&session.id));
-            for group in &mut self.all_server_groups {
-                group
-                    .sessions
-                    .retain(|session| !self.synthetic_live_session_ids.contains(&session.id));
-            }
-            self.synthetic_live_session_ids.clear();
-        }
+        #[cfg(test)]
+        self.remove_synthetic_live_session_rows();
         self.live_presence = crate::session::session_presence()
             .into_iter()
             .map(|presence| (presence.session_id.clone(), presence))
@@ -787,7 +784,49 @@ impl SessionPicker {
             .retain(|session_id, _| session_ids.contains(session_id));
     }
 
+    fn remove_synthetic_live_session_rows(&mut self) {
+        if !self.synthetic_live_session_ids.is_empty() {
+            self.all_sessions
+                .retain(|session| !self.synthetic_live_session_ids.contains(&session.id));
+            self.all_orphan_sessions
+                .retain(|session| !self.synthetic_live_session_ids.contains(&session.id));
+            for group in &mut self.all_server_groups {
+                group
+                    .sessions
+                    .retain(|session| !self.synthetic_live_session_ids.contains(&session.id));
+            }
+            self.synthetic_live_session_ids.clear();
+        }
+    }
+
     fn add_missing_live_session_rows(&mut self) {
+        #[cfg(not(test))]
+        let sessions_dir = crate::storage::jcode_dir().ok().map(|dir| dir.join("sessions"));
+        #[cfg(test)]
+        let sessions_dir: Option<std::path::PathBuf> = None;
+        self.refresh_live_session_rows_from(sessions_dir.as_deref());
+    }
+
+    fn refresh_live_session_rows_from(&mut self, sessions_dir: Option<&std::path::Path>) {
+        let selected_id = self.selected_session().map(|session| session.id.clone());
+        self.remove_synthetic_live_session_rows();
+        self.add_missing_live_session_rows_from(sessions_dir);
+        self.cached_search_query.clear();
+        self.cached_search_refs.clear();
+        // Synthetic backing indices can change when the presence HashMap is
+        // rebuilt. Restore by exact ID rather than interpreting stale indices.
+        self.rebuild_items();
+        if let Some(index) = selected_id
+            .as_deref()
+            .and_then(|id| self.find_item_index_for_session_id(id))
+        {
+            self.list_state.select(Some(index));
+        }
+    }
+
+    fn add_missing_live_session_rows_from(&mut self, sessions_dir: Option<&std::path::Path>) {
+        self.live_identities
+            .retain(|id, _| self.live_presence.contains_key(id));
         let existing_ids: HashSet<String> = self
             .all_sessions
             .iter()
@@ -808,13 +847,17 @@ impl SessionPicker {
 
         for presence in missing {
             let id = presence.session_id;
+            let identity = self.live_identities
+                .entry(id.clone())
+                .or_insert_with(|| sessions_dir.and_then(|dir| load_live_session_identity(dir, &id)))
+                .as_ref();
             let short_name = crate::id::extract_session_name(&id)
                 .unwrap_or("live")
                 .to_string();
             let now = chrono::Utc::now();
             let session = SessionInfo {
                 id: id.clone(),
-                parent_id: None,
+                parent_id: identity.and_then(|value| value.parent_id.clone()),
                 short_name: short_name.clone(),
                 icon: "●".to_string(),
                 title: short_name.clone(),
@@ -828,7 +871,7 @@ impl SessionPicker {
                 model: None,
                 provider_key: None,
                 is_canary: false,
-                is_debug: presence.internal,
+                is_debug: identity.map_or(presence.internal, |value| value.is_debug),
                 saved: false,
                 save_label: None,
                 status: SessionStatus::Active,
@@ -978,14 +1021,31 @@ impl SessionPicker {
     /// async load completed a second or two after opening).
     pub fn reseed_grouped(
         &mut self,
-        server_groups: Vec<ServerGroup>,
-        orphan_sessions: Vec<SessionInfo>,
+        mut server_groups: Vec<ServerGroup>,
+        mut orphan_sessions: Vec<SessionInfo>,
     ) {
         // Remember what the user was looking at so we can restore it after the
         // data swap + item rebuild.
         let selected_id = self.selected_session().map(|session| session.id.clone());
         let preview_scroll = self.scroll_offset;
         let list_offset = self.list_state.offset();
+
+        // A normal row now owns each replacement ID. Never remove it as an
+        // old synthetic row, or let stale grouped-cache defaults erase identity.
+        self.synthetic_live_session_ids.clear();
+        self.live_identities.retain(|_, identity| identity.is_some());
+        for session in server_groups
+            .iter_mut()
+            .flat_map(|group| group.sessions.iter_mut())
+            .chain(orphan_sessions.iter_mut())
+        {
+            if session.source == SessionSource::Jcode
+                && let Some(Some(identity)) = self.live_identities.get(&session.id)
+            {
+                session.parent_id = identity.parent_id.clone();
+                session.is_debug = identity.is_debug;
+            }
+        }
 
         let hidden_test_count: usize = server_groups
             .iter()
