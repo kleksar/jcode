@@ -2326,6 +2326,75 @@ mod tests {
     }
 
     #[test]
+    fn inspector_read_is_semantic_while_source_preserves_raw_text() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(
+            root.path().join("README.md"),
+            "# Heading\n\n```python\n  print(1)\n```\n",
+        )
+        .unwrap();
+        let root = root.path().canonicalize().unwrap();
+        let read = build_project_preview(&root, "README.md");
+        let source = read_project_source(&root, "README.md");
+        let read_text = read
+            .iter()
+            .flat_map(|line| line.spans.iter())
+            .map(|span| span.content.as_ref())
+            .collect::<String>();
+        let source_text = source
+            .iter()
+            .flat_map(|line| line.spans.iter())
+            .map(|span| span.content.as_ref())
+            .collect::<String>();
+        assert!(read_text.contains("Heading"));
+        assert!(!read_text.contains("```python"));
+        assert!(source_text.contains("```python"));
+        assert!(source_text.contains("  print(1)"));
+    }
+
+    #[test]
+    fn python_preview_is_source_only_not_read_capable() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("main.py"), "def main():\n    return 1\n").unwrap();
+        let root = root.path().canonicalize().unwrap();
+        let source = read_project_source(&root, "main.py");
+        let text = source
+            .iter()
+            .flat_map(|line| line.spans.iter())
+            .map(|span| span.content.as_ref())
+            .collect::<String>();
+        assert!(text.contains("def main():"));
+        assert!(text.contains("    return 1"));
+    }
+
+    #[test]
+    fn tracked_diff_failure_has_explicit_error_without_fake_metadata() {
+        let root = tempfile::tempdir().unwrap();
+        Command::new("git")
+            .current_dir(root.path())
+            .args(["init", "-q"])
+            .status()
+            .unwrap();
+        let change = collect_tracked_file(root.path(), "missing.txt", true);
+        assert!(change.error.is_some());
+        assert!(change.lines.is_empty());
+        assert!(
+            !change
+                .lines
+                .iter()
+                .any(|line| line.content == "file metadata changed")
+        );
+    }
+
+    #[test]
+    fn inspector_mode_hit_rectangles_are_clipped_to_mode_area() {
+        let area = Rect::new(0, 0, 8, 1);
+        let (_, _, _, _, _, _, changes, _) = project_pane_tab_areas(area);
+        assert!(changes.width <= area.width);
+        assert!(changes.right() <= area.right());
+    }
+
+    #[test]
     fn project_preview_blocks_paths_outside_root() {
         let root = tempfile::tempdir().unwrap();
         let parent = root.path().parent().unwrap();
