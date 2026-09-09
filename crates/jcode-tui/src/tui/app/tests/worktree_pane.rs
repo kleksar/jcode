@@ -31,6 +31,185 @@ fn worktree_filter_fixture() -> (
     (repo, app, terminal)
 }
 
+fn inspector_fixture() -> (
+    tempfile::TempDir,
+    App,
+    ratatui::Terminal<ratatui::backend::TestBackend>,
+) {
+    let repo = init_worktree_pane_test_repo();
+    let git = |args: &[&str]| {
+        assert!(
+            std::process::Command::new("git")
+                .current_dir(repo.path())
+                .args(args)
+                .status()
+                .expect("run git")
+                .success()
+        );
+    };
+    std::fs::write(repo.path().join("README.md"), "# Heading\n\n**bold**\n").unwrap();
+    std::fs::write(repo.path().join("script.py"), "def old():\n    return 1\n").unwrap();
+    git(&["add", "README.md", "script.py"]);
+    git(&["commit", "-qm", "inspector fixture"]);
+    std::fs::write(repo.path().join("README.md"), "# Heading\n\n**changed**\n").unwrap();
+    std::fs::write(repo.path().join("script.py"), "def new():\n    return 2\n").unwrap();
+    crate::tui::ui::prime_worktree_changes_for_tests(repo.path());
+    crate::tui::ui::prime_project_tree_for_tests(repo.path());
+    let mut app = create_test_app();
+    app.session.working_dir = Some(repo.path().to_string_lossy().into_owned());
+    app.open_project_files_pane();
+    let terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(140, 30)).unwrap();
+    (repo, app, terminal)
+}
+
+fn select_inspector_file(
+    app: &mut App,
+    terminal: &mut ratatui::Terminal<ratatui::backend::TestBackend>,
+    path: &str,
+) {
+    render_and_snap(app, terminal);
+    let layout = crate::tui::ui::worktree_pane_layout().unwrap();
+    let index = layout
+        .tree_rows
+        .iter()
+        .position(|row| row.path == path)
+        .unwrap();
+    app.handle_worktree_pane_mouse(worktree_test_mouse(
+        MouseEventKind::Down(MouseButton::Left),
+        layout.tree_area.unwrap().x + 1,
+        layout.tree_area.unwrap().y + index as u16,
+    ));
+    render_and_snap(app, terminal);
+}
+
+#[test]
+fn files_inspector_markdown_read_source_and_changes_are_real_views() {
+    let _lock = scroll_render_test_lock();
+    let (_repo, mut app, mut terminal) = inspector_fixture();
+    select_inspector_file(&mut app, &mut terminal, "README.md");
+    let read = render_and_snap(&app, &mut terminal);
+    assert_eq!(
+        app.files_inspector.mode(),
+        Some(crate::tui::app::files_inspector::FileInspectorMode::Read)
+    );
+    assert!(
+        read.contains("Read") && read.contains("**changed**"),
+        "read view: {read}"
+    );
+    assert!(
+        app.handle_worktree_pane_mouse(worktree_test_mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            crate::tui::ui::worktree_pane_layout()
+                .unwrap()
+                .inspector_mode_areas[1]
+                .0
+                .x
+                + 1,
+            crate::tui::ui::worktree_pane_layout()
+                .unwrap()
+                .inspector_mode_areas[1]
+                .0
+                .y
+        ))
+    );
+    let source = render_and_snap(&app, &mut terminal);
+    assert_eq!(
+        app.files_inspector.mode(),
+        Some(crate::tui::app::files_inspector::FileInspectorMode::Source)
+    );
+    assert!(
+        source.contains("**changed**"),
+        "source view must preserve markdown syntax: {source}"
+    );
+    assert!(
+        app.handle_worktree_pane_mouse(worktree_test_mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            crate::tui::ui::worktree_pane_layout()
+                .unwrap()
+                .inspector_mode_areas[2]
+                .0
+                .x
+                + 1,
+            crate::tui::ui::worktree_pane_layout()
+                .unwrap()
+                .inspector_mode_areas[2]
+                .0
+                .y
+        ))
+    );
+    let changes = render_and_snap(&app, &mut terminal);
+    assert!(
+        changes.contains("-**bold**") && changes.contains("+**changed**"),
+        "changes view: {changes}"
+    );
+}
+
+#[test]
+fn files_inspector_python_exposes_only_source_and_changes_with_source_default() {
+    let _lock = scroll_render_test_lock();
+    let (_repo, mut app, mut terminal) = inspector_fixture();
+    select_inspector_file(&mut app, &mut terminal, "script.py");
+    let text = render_and_snap(&app, &mut terminal);
+    assert_eq!(
+        app.files_inspector.mode(),
+        Some(crate::tui::app::files_inspector::FileInspectorMode::Source)
+    );
+    assert_eq!(
+        app.files_inspector.available_modes().collect::<Vec<_>>(),
+        vec![
+            crate::tui::app::files_inspector::FileInspectorMode::Source,
+            crate::tui::app::files_inspector::FileInspectorMode::Changes,
+        ]
+    );
+    assert!(
+        text.contains("def new()") && !text.contains(" Read "),
+        "python source: {text}"
+    );
+}
+
+#[test]
+fn files_inspector_enter_focus_stays_in_files_without_side_panel_page() {
+    let _lock = scroll_render_test_lock();
+    let (_repo, mut app, mut terminal) = inspector_fixture();
+    select_inspector_file(&mut app, &mut terminal, "script.py");
+    assert!(app.handle_diff_pane_focus_key(KeyCode::Enter, KeyModifiers::NONE));
+    assert!(app.files_inspector.is_focused());
+    assert_eq!(
+        app.worktree_pane.tab,
+        super::worktree_pane::WorktreePaneTab::Files
+    );
+    assert!(app.side_panel.pages.is_empty());
+}
+
+#[test]
+fn files_inspector_left_then_escape_returns_to_chat() {
+    let _lock = scroll_render_test_lock();
+    let (_repo, mut app, mut terminal) = inspector_fixture();
+    select_inspector_file(&mut app, &mut terminal, "script.py");
+    app.handle_diff_pane_focus_key(KeyCode::Enter, KeyModifiers::NONE);
+    app.handle_diff_pane_focus_key(KeyCode::Left, KeyModifiers::NONE);
+    assert!(!app.files_inspector.is_focused());
+    assert!(app.diff_pane_focus);
+    app.handle_diff_pane_focus_key(KeyCode::Esc, KeyModifiers::NONE);
+    assert!(!app.diff_pane_focus);
+}
+
+#[test]
+fn files_inspector_scroll_is_per_file_and_mode() {
+    let _lock = scroll_render_test_lock();
+    let (_repo, mut app, mut terminal) = inspector_fixture();
+    select_inspector_file(&mut app, &mut terminal, "script.py");
+    app.handle_diff_pane_focus_key(KeyCode::Enter, KeyModifiers::NONE);
+    for _ in 0..3 {
+        app.handle_diff_pane_focus_key(KeyCode::Down, KeyModifiers::NONE);
+    }
+    assert!(app.files_inspector.scroll_offset() > 0);
+    app.handle_diff_pane_focus_key(KeyCode::Left, KeyModifiers::NONE);
+    app.worktree_pane.tree_selected_path = Some("README.md".into());
+    render_and_snap(&app, &mut terminal);
+    assert_eq!(app.files_inspector.scroll_offset(), 0);
+}
+
 #[test]
 fn test_worktree_header_has_padded_heavy_boundary() {
     let _lock = scroll_render_test_lock();
