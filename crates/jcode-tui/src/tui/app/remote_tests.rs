@@ -1781,16 +1781,49 @@ fn q2_pending_and_stale_automatic_server_reloads_remain_passive() {
     let _lock = crate::storage::lock_test_env();
     let _env = ResumeAuthorityEnv::new();
     tokio::runtime::Runtime::new().unwrap().block_on(async {
-        for session in ["automatic-pending", "automatic-stale"] {
+        for (session, producer) in [
+            ("automatic-stale-runtime", "stale-runtime-identity"),
+            ("automatic-server-update", "server-has-update"),
+        ] {
             let (mut app, _) = resume_authority_app(session);
             let mut remote = crate::tui::backend::RemoteConnection::dummy();
             let mut peer = remote.take_dummy_peer().unwrap();
-            app.pending_server_reload = true;
             app.auto_server_reload = true;
 
-            // This is the production pending/stale dispatch before History is
-            // loaded. It may request a server reload, but it cannot mint client
-            // recovery authority.
+            let mut history = resume_authority_history(session, false, None);
+            let crate::protocol::ServerEvent::History {
+                server_version,
+                server_has_update,
+                ..
+            } = &mut history
+            else {
+                unreachable!("resume_authority_history always returns History");
+            };
+            match producer {
+                // Exercise the early deferral producer itself rather than
+                // manufacturing its pending flag. The test-only clean-release
+                // override makes a dev test client prove this server is stale.
+                "stale-runtime-identity" => {
+                    crate::env::remove_var("JCODE_ALLOW_SERVER_VERSION_MISMATCH");
+                    crate::env::set_var("JCODE_TEST_CLIENT_VERSION_OVERRIDE", "v2.0.0");
+                    *server_version = Some("v1.0.0".to_string());
+                    *server_has_update = None;
+                }
+                // Permit the History to finish applying so the later
+                // server_has_update producer at server_events.rs:1995 runs.
+                "server-has-update" => {
+                    crate::env::set_var("JCODE_ALLOW_SERVER_VERSION_MISMATCH", "1");
+                    crate::env::remove_var("JCODE_TEST_CLIENT_VERSION_OVERRIDE");
+                    *server_has_update = Some(true);
+                }
+                _ => unreachable!("bounded producer cases"),
+            }
+            handle_server_event(&mut app, history, &mut remote);
+            assert!(app.pending_server_reload, "{producer} must arm reload");
+
+            // Both real producers reach the production automatic dispatch. It
+            // may request a server reload, but cannot mint client recovery
+            // authority.
             process_remote_followups(&mut app, &mut remote).await;
             assert!(!app.pending_server_reload);
             assert!(!app.reload_recovery_is_authorized(session));
@@ -1896,6 +1929,8 @@ impl ResumeAuthorityEnv {
             "JCODE_RELOAD_RECOVERY_SESSION",
             "JCODE_RELOAD_FAST_START",
             "JCODE_SSH_REMOTE",
+            "JCODE_ALLOW_SERVER_VERSION_MISMATCH",
+            "JCODE_TEST_CLIENT_VERSION_OVERRIDE",
         ]
         .into_iter()
         .map(|key| (key, std::env::var_os(key)))
@@ -1905,6 +1940,8 @@ impl ResumeAuthorityEnv {
         crate::env::remove_var("JCODE_RELOAD_RECOVERY_SESSION");
         crate::env::remove_var("JCODE_RELOAD_FAST_START");
         crate::env::remove_var("JCODE_SSH_REMOTE");
+        crate::env::remove_var("JCODE_ALLOW_SERVER_VERSION_MISMATCH");
+        crate::env::remove_var("JCODE_TEST_CLIENT_VERSION_OVERRIDE");
         Self {
             _home: home,
             previous,
