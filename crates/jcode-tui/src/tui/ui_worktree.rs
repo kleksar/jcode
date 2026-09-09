@@ -2348,6 +2348,13 @@ mod tests {
             .collect::<String>();
         assert!(read_text.contains("Heading"));
         assert!(!read_text.contains("```python"));
+        assert!(read.iter().flat_map(|line| line.spans.iter()).any(|span| {
+            span.content.as_ref() == "Heading"
+                && span
+                    .style
+                    .add_modifier
+                    .contains(ratatui::style::Modifier::BOLD)
+        }));
         assert!(source_text.contains("```python"));
         assert!(source_text.contains("  print(1)"));
     }
