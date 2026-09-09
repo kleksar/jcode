@@ -659,7 +659,7 @@ fn test_files_tree_opens_markdown_documents_case_insensitively_and_deduplicates(
     app.open_project_files_pane();
     let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(140, 30)).unwrap();
 
-    app.worktree_pane.tree_selected_path = Some("README.md".into());
+    select_inspector_file(&mut app, &mut terminal, "README.md");
     let text = render_and_snap(&app, &mut terminal);
     let layout = crate::tui::ui::worktree_pane_layout().expect("files pane layout");
     assert!(
@@ -667,6 +667,7 @@ fn test_files_tree_opens_markdown_documents_case_insensitively_and_deduplicates(
         "Markdown gets exactly one inline inspector"
     );
     assert!(text.contains("Read") && text.contains("Files"));
+    app.set_diff_pane_focus(true);
     assert!(app.handle_diff_pane_focus_key(KeyCode::Enter, KeyModifiers::NONE));
     assert_eq!(
         app.worktree_pane.tab,
@@ -1590,7 +1591,7 @@ fn test_narrow_clean_session_does_not_auto_open_files_without_documents() {
 }
 
 #[test]
-fn test_reopening_focused_markdown_from_files_stays_in_files_inspector() {
+fn test_markdown_reopen_from_files_stays_in_files_inspector() {
     let _lock = scroll_render_test_lock();
     let repo = init_worktree_pane_test_repo();
     std::fs::write(repo.path().join("README.md"), "# Read me\n").expect("write Markdown");
@@ -1598,9 +1599,8 @@ fn test_reopening_focused_markdown_from_files_stays_in_files_inspector() {
     let mut app = create_test_app();
     app.session.working_dir = Some(repo.path().to_string_lossy().into_owned());
     app.open_project_files_pane();
-    app.worktree_pane.tree_selected_path = Some("README.md".into());
     let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(140, 30)).unwrap();
-    render_and_snap(&app, &mut terminal);
+    select_inspector_file(&mut app, &mut terminal, "README.md");
     assert!(app.handle_diff_pane_focus_key(KeyCode::Enter, KeyModifiers::NONE));
     assert_eq!(
         app.worktree_pane.tab,
