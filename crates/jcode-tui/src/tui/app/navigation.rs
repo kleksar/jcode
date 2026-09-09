@@ -312,45 +312,32 @@ impl App {
             return true;
         }
 
-        let content = match std::fs::read_to_string(&path) {
-            Ok(content) => content,
-            Err(error) => {
-                self.set_status_notice(format!("Failed to read Markdown file: {}", error));
-                return true;
-            }
-        };
         let title = path
             .file_name()
             .and_then(|name| name.to_str())
             .unwrap_or(path_target)
             .to_string();
-        let id = format!("linked-markdown:{}", path.display());
-        let page = crate::side_panel::SidePanelPage {
-            id: id.clone(),
-            title: title.clone(),
-            file_path: path.to_string_lossy().into_owned(),
-            format: crate::side_panel::SidePanelPageFormat::Markdown,
-            source: crate::side_panel::SidePanelPageSource::LinkedFile,
-            content,
-            updated_at_ms: 0,
-        };
-
-        let mut snapshot = self.side_panel.clone();
-        if let Some(existing) = snapshot.pages.iter_mut().find(|existing| existing.id == id) {
-            *existing = page;
-        } else {
-            snapshot.pages.push(page);
-        }
-        snapshot.focused_page_id = Some(id);
-        self.side_panel_user_hidden = false;
-        self.apply_side_panel_snapshot(snapshot);
-        // This is an explicit Files activation, not a passive snapshot refresh.
-        // Reopening an already-focused page must return to Documents and start
-        // in its normal Read state.
-        self.reset_focused_document_ui();
-        self.set_worktree_pane_tab(super::worktree_pane::WorktreePaneTab::Documents);
+        self.prepare_worktree_pane_state();
+        let relative = path
+            .strip_prefix(&repository)
+            .ok()
+            .map(|path| path.to_string_lossy().replace('\\', "/"))
+            .unwrap_or_else(|| path_target.to_string());
+        self.worktree_pane.tree_selected_path = Some(relative.clone());
+        self.files_inspector.select_file(
+            repository.to_string_lossy().into_owned(),
+            relative,
+            super::files_inspector::FileInspectorCapabilities {
+                read: true,
+                source: true,
+                changes: true,
+            },
+        );
+        self.set_worktree_pane_tab(super::worktree_pane::WorktreePaneTab::Files);
         self.set_diff_pane_focus(true);
-        self.set_status_notice(format!("Opened Markdown: {}", title));
+        self.files_inspector
+            .select_mode(super::files_inspector::FileInspectorMode::Read);
+        self.set_status_notice(format!("Selected Markdown: {}", title));
         true
     }
 
@@ -583,6 +570,78 @@ impl App {
         }
 
         self.note_worktree_pane_activity();
+        if self.worktree_pane.tab == super::worktree_pane::WorktreePaneTab::Diff {
+            if let Some(layout) = crate::tui::ui::worktree_pane_layout() {
+                let paths = layout.paths.as_ref();
+                self.prepare_worktree_pane_state();
+                if self.worktree_pane.diff_focus == super::worktree_pane::DiffFocus::FileList {
+                    match code {
+                        KeyCode::Up | KeyCode::Char('k') | KeyCode::Down | KeyCode::Char('j') => {
+                            if !paths.is_empty() {
+                                let current = self
+                                    .worktree_pane
+                                    .selected_file
+                                    .as_ref()
+                                    .and_then(|p| paths.iter().position(|x| x == p))
+                                    .unwrap_or(0);
+                                let next = if matches!(code, KeyCode::Up | KeyCode::Char('k')) {
+                                    current.saturating_sub(1)
+                                } else {
+                                    (current + 1).min(paths.len() - 1)
+                                };
+                                self.worktree_pane.selected_file = Some(paths[next].clone());
+                                self.worktree_pane.list_scroll = next
+                                    .saturating_sub(
+                                        layout.list_area.height.saturating_sub(1) as usize
+                                    )
+                                    .min(
+                                        paths
+                                            .len()
+                                            .saturating_sub(layout.list_area.height as usize),
+                                    );
+                                self.reset_worktree_diff_scroll();
+                            }
+                            return true;
+                        }
+                        KeyCode::Enter => {
+                            if !paths.is_empty() {
+                                self.worktree_pane.diff_focus =
+                                    super::worktree_pane::DiffFocus::Content;
+                            }
+                            return true;
+                        }
+                        KeyCode::Esc | KeyCode::Left => {
+                            self.set_diff_pane_focus(false);
+                            return true;
+                        }
+                        KeyCode::Right => {
+                            self.set_worktree_pane_tab(
+                                super::worktree_pane::WorktreePaneTab::Files,
+                            );
+                            return true;
+                        }
+                        _ => {}
+                    }
+                } else {
+                    match code {
+                        KeyCode::Up | KeyCode::Char('k') => {
+                            self.side_pane_scroll_by(-1);
+                            return true;
+                        }
+                        KeyCode::Down | KeyCode::Char('j') => {
+                            self.side_pane_scroll_by(1);
+                            return true;
+                        }
+                        KeyCode::Esc => {
+                            self.worktree_pane.diff_focus =
+                                super::worktree_pane::DiffFocus::FileList;
+                            return true;
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
         if self.worktree_documents_tab_active() {
             match code {
                 KeyCode::Char('[') => return self.focus_adjacent_document_page(-1),
@@ -602,11 +661,7 @@ impl App {
                             super::worktree_pane::WorktreePaneTab::Files
                         }
                         super::worktree_pane::WorktreePaneTab::Files => {
-                            if self.worktree_documents_available() {
-                                super::worktree_pane::WorktreePaneTab::Documents
-                            } else {
-                                super::worktree_pane::WorktreePaneTab::Diff
-                            }
+                            super::worktree_pane::WorktreePaneTab::Diff
                         }
                         super::worktree_pane::WorktreePaneTab::Documents => {
                             super::worktree_pane::WorktreePaneTab::Diff
@@ -618,11 +673,7 @@ impl App {
                 KeyCode::BackTab => {
                     let next = match self.worktree_pane.tab {
                         super::worktree_pane::WorktreePaneTab::Diff => {
-                            if self.worktree_documents_available() {
-                                super::worktree_pane::WorktreePaneTab::Documents
-                            } else {
-                                super::worktree_pane::WorktreePaneTab::Files
-                            }
+                            super::worktree_pane::WorktreePaneTab::Files
                         }
                         super::worktree_pane::WorktreePaneTab::Files => {
                             super::worktree_pane::WorktreePaneTab::Diff

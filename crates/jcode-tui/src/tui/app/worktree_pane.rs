@@ -1,6 +1,13 @@
 use super::*;
 pub(crate) use crate::tui::MarkdownDocumentMode;
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum DiffFocus {
+    #[default]
+    FileList,
+    Content,
+}
+
 const FILTER_IDLE_TIMEOUT: Duration = Duration::from_secs(60);
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -28,6 +35,7 @@ impl MarkdownDocumentUiState {
 }
 
 pub(super) struct WorktreePaneState {
+    pub(super) diff_focus: DiffFocus,
     pub(super) selected_file: Option<String>,
     pub(super) list_scroll: usize,
     pub(super) last_activity: Option<Instant>,
@@ -46,6 +54,7 @@ pub(super) struct WorktreePaneState {
 impl Default for WorktreePaneState {
     fn default() -> Self {
         Self {
+            diff_focus: DiffFocus::FileList,
             selected_file: None,
             list_scroll: 0,
             last_activity: None,
@@ -262,25 +271,29 @@ impl App {
         match (self.diff_pane_focus, code) {
             (false, KeyCode::Right) => {
                 self.set_worktree_pane_tab(WorktreePaneTab::Diff);
+                self.prepare_worktree_pane_state();
+                self.worktree_pane.diff_focus = DiffFocus::FileList;
+                if self.worktree_pane.selected_file.is_none()
+                    && let Some(path) = crate::tui::ui::worktree_pane_layout()
+                        .and_then(|layout| layout.paths.first().cloned())
+                {
+                    self.worktree_pane.selected_file = Some(path);
+                }
                 self.set_diff_pane_focus(true);
                 true
             }
             (true, KeyCode::Right) => {
                 match self.worktree_pane.tab {
                     WorktreePaneTab::Diff => self.set_worktree_pane_tab(WorktreePaneTab::Files),
-                    WorktreePaneTab::Files if self.worktree_documents_available() => {
-                        self.set_worktree_pane_tab(WorktreePaneTab::Documents)
-                    }
                     WorktreePaneTab::Files | WorktreePaneTab::Documents => {}
                 }
                 true
             }
             (true, KeyCode::Left) => {
                 match self.worktree_pane.tab {
-                    WorktreePaneTab::Documents => {
-                        self.set_worktree_pane_tab(WorktreePaneTab::Files)
+                    WorktreePaneTab::Documents | WorktreePaneTab::Files => {
+                        self.set_worktree_pane_tab(WorktreePaneTab::Diff)
                     }
-                    WorktreePaneTab::Files => self.set_worktree_pane_tab(WorktreePaneTab::Diff),
                     WorktreePaneTab::Diff => self.set_diff_pane_focus(false),
                 }
                 true
@@ -522,7 +535,7 @@ impl App {
         }
     }
 
-    fn reset_worktree_diff_scroll(&mut self) {
+    pub(super) fn reset_worktree_diff_scroll(&mut self) {
         self.diff_pane_scroll = 0;
         self.diff_pane_scroll_x = 0;
         self.diff_pane_auto_scroll = false;
