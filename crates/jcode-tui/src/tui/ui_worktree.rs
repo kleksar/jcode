@@ -1632,10 +1632,15 @@ pub(super) fn draw_project_files(
         .get(selected_index)
         .filter(|row| !row.is_dir)
         .map(|row| row.path.clone());
+    let selected_file_is_markdown = selected_file.as_deref().is_some_and(|path| {
+        Path::new(path)
+            .extension()
+            .is_some_and(|extension| extension.eq_ignore_ascii_case("md"))
+    });
     let preview_lines = selected_file
         .as_deref()
         .map(|path| build_project_preview(&snapshot.root, path));
-    let show_preview = preview_lines.is_some() && inner.height >= 10;
+    let show_preview = !selected_file_is_markdown && preview_lines.is_some() && inner.height >= 10;
     let tree_height = if show_preview {
         (inner.height / 2).clamp(4, inner.height.saturating_sub(5))
     } else {

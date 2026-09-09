@@ -329,6 +329,16 @@ fn test_files_tree_opens_markdown_documents_case_insensitively_and_deduplicates(
 
     app.worktree_pane.tree_selected_path = Some("README.md".into());
     render_and_snap(&app, &mut terminal);
+    let files_layout = crate::tui::ui::worktree_pane_layout().expect("files pane layout");
+    assert!(
+        files_layout.preview_area.is_none(),
+        "Markdown selection must not render a second raw inline preview"
+    );
+    assert_eq!(
+        files_layout.tree_area,
+        Some(files_layout.body_area),
+        "the Files tree should use the whole body while Markdown is selected"
+    );
     assert!(app.handle_diff_pane_focus_key(KeyCode::Enter, KeyModifiers::NONE));
     assert_eq!(
         app.worktree_pane.tab,
@@ -371,6 +381,132 @@ fn test_files_tree_opens_markdown_documents_case_insensitively_and_deduplicates(
     assert_eq!(
         app.focused_markdown_document_mode(),
         super::worktree_pane::MarkdownDocumentMode::Read
+    );
+}
+
+#[test]
+fn test_documents_body_wheel_uses_smooth_side_pane_scroll_without_changing_focus() {
+    let _lock = scroll_render_test_lock();
+    let mut app = create_test_app();
+    app.apply_side_panel_snapshot(document_snapshot(
+        "one",
+        &[(
+            "one",
+            "One",
+            &(1..=120)
+                .map(|line| format!("document line {line}"))
+                .collect::<Vec<_>>()
+                .join("\n"),
+        )],
+    ));
+    app.set_diff_pane_focus(false);
+    let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(140, 30)).unwrap();
+    render_and_snap(&app, &mut terminal);
+    let layout = crate::tui::ui::worktree_pane_layout().expect("documents pane layout");
+
+    app.handle_mouse_event(worktree_test_mouse(
+        MouseEventKind::ScrollDown,
+        layout.body_area.x + 1,
+        layout.body_area.y + 1,
+    ));
+
+    assert!(
+        app.diff_pane_scroll > 0,
+        "wheel over document body should advance the rendered side pane"
+    );
+    assert!(!app.diff_pane_focus, "wheel must not change keyboard focus");
+}
+
+#[test]
+fn test_empty_composer_horizontal_arrows_navigate_worktree_tabs_and_preserve_text_cursor() {
+    let _lock = scroll_render_test_lock();
+    let mut app = create_test_app();
+    app.apply_side_panel_snapshot(document_snapshot("one", &[("one", "One", "# one")]));
+    app.set_worktree_pane_tab(super::worktree_pane::WorktreePaneTab::Diff);
+    app.set_diff_pane_focus(false);
+
+    app.handle_key(KeyCode::Right, KeyModifiers::NONE).unwrap();
+    assert!(app.diff_pane_focus);
+    assert_eq!(
+        app.worktree_pane.tab,
+        super::worktree_pane::WorktreePaneTab::Diff
+    );
+    app.handle_key(KeyCode::Right, KeyModifiers::NONE).unwrap();
+    assert_eq!(
+        app.worktree_pane.tab,
+        super::worktree_pane::WorktreePaneTab::Files
+    );
+    app.handle_key(KeyCode::Right, KeyModifiers::NONE).unwrap();
+    assert_eq!(
+        app.worktree_pane.tab,
+        super::worktree_pane::WorktreePaneTab::Documents
+    );
+    app.handle_key(KeyCode::Right, KeyModifiers::NONE).unwrap();
+    assert_eq!(
+        app.worktree_pane.tab,
+        super::worktree_pane::WorktreePaneTab::Documents
+    );
+    app.handle_key(KeyCode::Left, KeyModifiers::NONE).unwrap();
+    assert_eq!(
+        app.worktree_pane.tab,
+        super::worktree_pane::WorktreePaneTab::Files
+    );
+    app.handle_key(KeyCode::Left, KeyModifiers::NONE).unwrap();
+    assert_eq!(
+        app.worktree_pane.tab,
+        super::worktree_pane::WorktreePaneTab::Diff
+    );
+    app.handle_key(KeyCode::Left, KeyModifiers::NONE).unwrap();
+    assert!(!app.diff_pane_focus);
+
+    app.set_input_for_test("ab");
+    app.cursor_pos = 1;
+    app.handle_key(KeyCode::Right, KeyModifiers::NONE).unwrap();
+    assert_eq!(app.cursor_pos, 2, "nonempty composer keeps cursor movement");
+    app.handle_key(KeyCode::Left, KeyModifiers::NONE).unwrap();
+    assert_eq!(app.cursor_pos, 1, "nonempty composer keeps cursor movement");
+}
+
+#[test]
+fn test_remote_empty_composer_horizontal_arrows_match_local_navigation() {
+    let _lock = scroll_render_test_lock();
+    let mut app = create_test_app();
+    app.apply_side_panel_snapshot(document_snapshot("one", &[("one", "One", "# one")]));
+    app.set_worktree_pane_tab(super::worktree_pane::WorktreePaneTab::Diff);
+    app.set_diff_pane_focus(false);
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let _guard = rt.enter();
+    let mut remote = crate::tui::backend::RemoteConnection::dummy();
+
+    rt.block_on(app.handle_remote_key(KeyCode::Right, KeyModifiers::NONE, &mut remote))
+        .unwrap();
+    assert!(app.diff_pane_focus);
+    rt.block_on(app.handle_remote_key(KeyCode::Right, KeyModifiers::NONE, &mut remote))
+        .unwrap();
+    assert_eq!(
+        app.worktree_pane.tab,
+        super::worktree_pane::WorktreePaneTab::Files
+    );
+    rt.block_on(app.handle_remote_key(KeyCode::Right, KeyModifiers::NONE, &mut remote))
+        .unwrap();
+    assert_eq!(
+        app.worktree_pane.tab,
+        super::worktree_pane::WorktreePaneTab::Documents
+    );
+
+    app.set_worktree_pane_tab(super::worktree_pane::WorktreePaneTab::Diff);
+    app.set_diff_pane_focus(false);
+    super::remote::handle_disconnected_key(&mut app, KeyCode::Right, KeyModifiers::NONE).unwrap();
+    assert!(app.diff_pane_focus);
+    super::remote::handle_disconnected_key(&mut app, KeyCode::Right, KeyModifiers::NONE).unwrap();
+    assert_eq!(
+        app.worktree_pane.tab,
+        super::worktree_pane::WorktreePaneTab::Files
+    );
+    super::remote::handle_disconnected_key(&mut app, KeyCode::Right, KeyModifiers::NONE).unwrap();
+    assert_eq!(
+        app.worktree_pane.tab,
+        super::worktree_pane::WorktreePaneTab::Documents
     );
 }
 

@@ -220,7 +220,7 @@ impl App {
         self.set_status_notice(match tab {
             WorktreePaneTab::Diff => "Right pane: Diff (Tab switches to Files)",
             WorktreePaneTab::Files => {
-                "Right pane: Files (arrows navigate, Enter expands/previews, Tab switches)"
+                "Right pane: Files (arrows navigate, Enter opens Markdown or previews, Tab switches)"
             }
             WorktreePaneTab::Documents => "Right pane: Documents ([/] pages, m mode, Tab switches)",
         });
@@ -229,6 +229,48 @@ impl App {
     pub(super) fn open_project_files_pane(&mut self) {
         self.set_worktree_pane_tab(WorktreePaneTab::Files);
         self.set_diff_pane_focus(true);
+    }
+
+    /// Plain horizontal arrows leave an empty composer for the right-pane tabs.
+    /// Keep this ahead of pane-local handlers so arrows never activate a Files
+    /// selection or pan a document while performing the linear pane traversal.
+    pub(super) fn handle_empty_composer_horizontal_navigation(
+        &mut self,
+        code: KeyCode,
+        modifiers: KeyModifiers,
+    ) -> bool {
+        if !self.input.is_empty() || !modifiers.is_empty() {
+            return false;
+        }
+
+        match (self.diff_pane_focus, code) {
+            (false, KeyCode::Right) => {
+                self.set_worktree_pane_tab(WorktreePaneTab::Diff);
+                self.set_diff_pane_focus(true);
+                true
+            }
+            (true, KeyCode::Right) => {
+                match self.worktree_pane.tab {
+                    WorktreePaneTab::Diff => self.set_worktree_pane_tab(WorktreePaneTab::Files),
+                    WorktreePaneTab::Files if self.worktree_documents_available() => {
+                        self.set_worktree_pane_tab(WorktreePaneTab::Documents)
+                    }
+                    WorktreePaneTab::Files | WorktreePaneTab::Documents => {}
+                }
+                true
+            }
+            (true, KeyCode::Left) => {
+                match self.worktree_pane.tab {
+                    WorktreePaneTab::Documents => {
+                        self.set_worktree_pane_tab(WorktreePaneTab::Files)
+                    }
+                    WorktreePaneTab::Files => self.set_worktree_pane_tab(WorktreePaneTab::Diff),
+                    WorktreePaneTab::Diff => self.set_diff_pane_focus(false),
+                }
+                true
+            }
+            _ => false,
+        }
     }
 
     pub(super) fn close_project_files_pane(&mut self) {
@@ -527,6 +569,17 @@ impl App {
             && mouse.row == layout.area.y
         {
             // Header padding and the left rail chrome are not body controls.
+            return false;
+        }
+        // Documents share the standard right-pane renderer and its smooth wheel
+        // queue. Do not let the old worktree list fallback swallow body wheels.
+        if self.worktree_documents_tab_active()
+            && matches!(
+                mouse.kind,
+                MouseEventKind::ScrollUp | MouseEventKind::ScrollDown
+            )
+            && crate::tui::layout_utils::point_in_rect(mouse.column, mouse.row, layout.body_area)
+        {
             return false;
         }
         if layout.files_tab_active {

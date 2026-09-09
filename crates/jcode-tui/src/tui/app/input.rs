@@ -2475,6 +2475,9 @@ pub(super) fn handle_pre_control_shortcuts(
     if app.handle_diagram_focus_key(code, modifiers, diagram_available) {
         return true;
     }
+    if app.handle_empty_composer_horizontal_navigation(code, modifiers) {
+        return true;
+    }
     if app.handle_diff_pane_focus_key(code, modifiers) {
         return true;
     }

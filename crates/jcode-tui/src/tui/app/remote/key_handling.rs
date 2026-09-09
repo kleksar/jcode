@@ -570,6 +570,9 @@ async fn handle_remote_key_internal(
     if app.handle_diagram_focus_key(code, modifiers, diagram_available) {
         return Ok(());
     }
+    if app.handle_empty_composer_horizontal_navigation(code, modifiers) {
+        return Ok(());
+    }
     if app.handle_diff_pane_focus_key(code, modifiers) {
         return Ok(());
     }

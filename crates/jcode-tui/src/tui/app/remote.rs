@@ -2210,6 +2210,10 @@ fn handle_disconnected_key_internal(
         return Ok(());
     }
 
+    if app.handle_empty_composer_horizontal_navigation(code, modifiers) {
+        return Ok(());
+    }
+
     if modifiers.contains(KeyModifiers::CONTROL) {
         match code {
             KeyCode::Char('c') | KeyCode::Char('d') => {
