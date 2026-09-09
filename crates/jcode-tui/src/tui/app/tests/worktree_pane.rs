@@ -581,8 +581,13 @@ fn routed_worktree_inspector_left_returns_to_tree_before_two_stop_rail_exit() {
             app.files_inspector.mode(),
             Some(super::files_inspector::FileInspectorMode::Changes)
         );
-        app.files_inspector.set_scroll_offset(7);
         render_and_snap(&app, &mut terminal);
+        route_worktree_arrow(&mut app, route, KeyCode::PageDown, &rt);
+        render_and_snap(&app, &mut terminal);
+        let offset = app.files_inspector.scroll_offset();
+        assert!(offset > 0);
+        let before = crate::tui::ui::worktree_pane_layout().unwrap();
+        assert_eq!(before.preview_scroll, usize::from(offset));
         let preview = crate::tui::ui::worktree_pane_layout()
             .unwrap()
             .preview_area
@@ -593,16 +598,33 @@ fn routed_worktree_inspector_left_returns_to_tree_before_two_stop_rail_exit() {
         assert!(!app.files_inspector.is_focused());
         assert!(app.diff_pane_focus);
         assert_eq!(app.worktree_pane.tab, Files);
-        assert_eq!(app.files_inspector.scroll_offset(), 7);
+        assert_eq!(app.files_inspector.scroll_offset(), offset);
+        assert_eq!(
+            app.worktree_pane.tree_selected_path.as_deref(),
+            Some("script.py")
+        );
         assert_eq!(
             app.files_inspector.mode(),
             Some(super::files_inspector::FileInspectorMode::Changes)
         );
         render_and_snap(&app, &mut terminal);
-        // Inspector -> tree changes the preview's render-scroll source today.
-        // This is not the final rail -> Chat exit under test. Retain the stored
-        // inspector mode/offset assertions above without redefining that view.
-        assert!(worktree_rendered_region(&terminal, preview).contains("function_"));
+        let after = crate::tui::ui::worktree_pane_layout().unwrap();
+        assert_eq!(after.preview_area, Some(preview));
+        assert_eq!(after.preview_scroll, before.preview_scroll);
+        assert_eq!(worktree_rendered_region(&terminal, preview), content);
+        route_worktree_arrow(&mut app, route, KeyCode::Enter, &rt);
+        render_and_snap(&app, &mut terminal);
+        assert!(app.files_inspector.is_focused());
+        assert_eq!(app.files_inspector.scroll_offset(), offset);
+        assert_eq!(
+            crate::tui::ui::worktree_pane_layout()
+                .unwrap()
+                .preview_scroll,
+            before.preview_scroll
+        );
+        assert_eq!(worktree_rendered_region(&terminal, preview), content);
+        route_worktree_arrow(&mut app, route, KeyCode::Left, &rt);
+        render_and_snap(&app, &mut terminal);
         route_worktree_arrow(&mut app, route, KeyCode::Left, &rt);
         assert!(app.diff_pane_focus);
         assert_eq!(app.worktree_pane.tab, Diff);
@@ -621,19 +643,329 @@ fn routed_worktree_inspector_left_returns_to_tree_before_two_stop_rail_exit() {
     }
 }
 
+// Keep the small semantic fixture unchanged. These documents deliberately exceed
+// the preview height in Read, Source and Changes, with unique visible line labels.
+fn long_inspector_fixture() -> (
+    tempfile::TempDir,
+    App,
+    ratatui::Terminal<ratatui::backend::TestBackend>,
+) {
+    let (repo, app, terminal) = inspector_fixture();
+    let markdown = |version: &str| {
+        (0..100)
+            .map(|line| format!("{version} paragraph_{line:03}\n\n"))
+            .collect::<String>()
+    };
+    std::fs::write(repo.path().join("README.md"), markdown("original")).unwrap();
+    for args in [
+        vec!["add", "README.md"],
+        vec!["commit", "-qm", "long markdown baseline"],
+    ] {
+        assert!(
+            std::process::Command::new("git")
+                .current_dir(repo.path())
+                .args(args)
+                .status()
+                .unwrap()
+                .success()
+        );
+    }
+    std::fs::write(repo.path().join("README.md"), markdown("changed")).unwrap();
+    crate::tui::ui::prime_worktree_changes_for_tests(repo.path());
+    crate::tui::ui::prime_project_tree_for_tests(repo.path());
+    (repo, app, terminal)
+}
+
+fn inspector_view(
+    app: &App,
+    terminal: &mut ratatui::Terminal<ratatui::backend::TestBackend>,
+) -> (ratatui::layout::Rect, usize, String) {
+    render_and_snap(app, terminal);
+    let layout = crate::tui::ui::worktree_pane_layout().unwrap();
+    let body = layout.preview_area.unwrap();
+    (
+        body,
+        layout.preview_scroll,
+        worktree_rendered_region(terminal, body),
+    )
+}
+
+#[test]
+fn routed_worktree_inspector_focus_return_preserves_all_long_modes() {
+    use super::files_inspector::FileInspectorMode::{Changes, Read, Source};
+    let _lock = scroll_render_test_lock();
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let _guard = rt.enter();
+    for route in 0..3 {
+        let (_repo, mut app, mut terminal) = long_inspector_fixture();
+        for (path, modes, distinctive) in [
+            ("README.md", vec![Read, Source, Changes], "paragraph_"),
+            ("script.py", vec![Source, Changes], "function_"),
+        ] {
+            select_inspector_file(&mut app, &mut terminal, path);
+            route_worktree_arrow(&mut app, route, KeyCode::Enter, &rt);
+            for (index, mode) in modes.into_iter().enumerate() {
+                if index > 0 {
+                    route_worktree_arrow(&mut app, route, KeyCode::Right, &rt);
+                }
+                render_and_snap(&app, &mut terminal);
+                assert_eq!(app.files_inspector.mode(), Some(mode));
+                let top = inspector_view(&app, &mut terminal);
+                route_worktree_arrow(&mut app, route, KeyCode::PageDown, &rt);
+                let before = inspector_view(&app, &mut terminal);
+                let offset = app.files_inspector.scroll_offset();
+                let layout = crate::tui::ui::worktree_pane_layout().unwrap();
+                assert!(layout.preview_total_lines > before.0.height as usize);
+                assert!(offset > 0 && before.1 > 0);
+                assert_ne!(before.2, top.2);
+                assert!(
+                    before.2.contains(distinctive),
+                    "route={route} {path} {mode:?}: {}",
+                    before.2
+                );
+                for exit in [KeyCode::Left, KeyCode::Char('h'), KeyCode::Esc] {
+                    route_worktree_arrow(&mut app, route, exit, &rt);
+                    assert!(!app.files_inspector.is_focused());
+                    assert!(app.diff_pane_focus);
+                    assert_eq!(
+                        app.worktree_pane.tab,
+                        super::worktree_pane::WorktreePaneTab::Files
+                    );
+                    assert_eq!(app.worktree_pane.tree_selected_path.as_deref(), Some(path));
+                    assert_eq!(app.files_inspector.mode(), Some(mode));
+                    assert_eq!(app.files_inspector.scroll_offset(), offset);
+                    assert_eq!(
+                        inspector_view(&app, &mut terminal),
+                        before,
+                        "route={route} {path} {mode:?} {exit:?}"
+                    );
+                    route_worktree_arrow(&mut app, route, KeyCode::Enter, &rt);
+                    assert!(app.files_inspector.is_focused());
+                    assert_eq!(app.files_inspector.scroll_offset(), offset);
+                    assert_eq!(inspector_view(&app, &mut terminal), before);
+                }
+            }
+            route_worktree_arrow(&mut app, route, KeyCode::Left, &rt);
+            render_and_snap(&app, &mut terminal);
+        }
+    }
+}
+
+#[test]
+fn routed_worktree_inspector_resize_clamps_only_effective_offset() {
+    let _lock = scroll_render_test_lock();
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let _guard = rt.enter();
+    for route in 0..3 {
+        let (_repo, mut app, mut terminal) = long_inspector_fixture();
+        select_inspector_file(&mut app, &mut terminal, "script.py");
+        route_worktree_arrow(&mut app, route, KeyCode::Enter, &rt);
+        route_worktree_arrow(&mut app, route, KeyCode::Right, &rt);
+        render_and_snap(&app, &mut terminal);
+        route_worktree_arrow(&mut app, route, KeyCode::End, &rt);
+        let stored = app.files_inspector.scroll_offset();
+        let mode = app.files_inspector.mode();
+        assert!(stored > 0);
+        for height in [40, 30] {
+            terminal.backend_mut().resize(140, height);
+            terminal
+                .resize(ratatui::layout::Rect::new(0, 0, 140, height))
+                .unwrap();
+            let before = inspector_view(&app, &mut terminal);
+            let layout = crate::tui::ui::worktree_pane_layout().unwrap();
+            let max_scroll = layout.preview_total_lines - before.0.height as usize;
+            assert_eq!(before.1, usize::from(stored).min(max_scroll));
+            if height == 40 {
+                assert!(
+                    before.1 < usize::from(stored),
+                    "larger body must exercise clamping"
+                );
+            }
+            for key in [KeyCode::Left, KeyCode::Enter] {
+                route_worktree_arrow(&mut app, route, key, &rt);
+                assert_eq!(inspector_view(&app, &mut terminal), before);
+                assert_eq!(app.files_inspector.scroll_offset(), stored);
+                assert_eq!(app.files_inspector.mode(), mode);
+            }
+        }
+        terminal.backend_mut().resize(70, 24);
+        terminal
+            .resize(ratatui::layout::Rect::new(0, 0, 70, 24))
+            .unwrap();
+        render_and_snap(&app, &mut terminal);
+        assert!(crate::tui::ui::worktree_pane_layout().is_none());
+        route_worktree_arrow(&mut app, route, KeyCode::Down, &rt);
+        assert!(!app.files_inspector.is_focused());
+        terminal.backend_mut().resize(140, 30);
+        terminal
+            .resize(ratatui::layout::Rect::new(0, 0, 140, 30))
+            .unwrap();
+        let restored = inspector_view(&app, &mut terminal);
+        assert_eq!(restored.1, usize::from(stored));
+        assert_eq!(app.files_inspector.scroll_offset(), stored);
+        assert_eq!(app.files_inspector.mode(), mode);
+        assert_eq!(
+            app.worktree_pane.tree_selected_path.as_deref(),
+            Some("script.py")
+        );
+        route_worktree_arrow(&mut app, route, KeyCode::Enter, &rt);
+        assert_eq!(inspector_view(&app, &mut terminal), restored);
+    }
+}
+
 #[test]
 fn files_inspector_scroll_is_per_file_and_mode() {
+    use super::files_inspector::FileInspectorMode::{Changes, Read, Source};
     let _lock = scroll_render_test_lock();
-    let (_repo, mut app, mut terminal) = inspector_fixture();
-    select_inspector_file(&mut app, &mut terminal, "script.py");
-    app.handle_diff_pane_focus_key(KeyCode::Enter, KeyModifiers::NONE);
-    for _ in 0..3 {
-        app.handle_diff_pane_focus_key(KeyCode::Down, KeyModifiers::NONE);
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let _guard = rt.enter();
+    for route in 0..3 {
+        let (_repo, mut app, mut terminal) = long_inspector_fixture();
+        select_inspector_file(&mut app, &mut terminal, "script.py");
+        route_worktree_arrow(&mut app, route, KeyCode::Enter, &rt);
+        for _ in 0..3 {
+            route_worktree_arrow(&mut app, route, KeyCode::Down, &rt);
+            render_and_snap(&app, &mut terminal);
+        }
+        let source = inspector_view(&app, &mut terminal);
+        assert_eq!(source.1, 3);
+        assert!(source.2.contains("function_3"));
+        route_worktree_arrow(&mut app, route, KeyCode::Right, &rt);
+        render_and_snap(&app, &mut terminal);
+        for _ in 0..5 {
+            route_worktree_arrow(&mut app, route, KeyCode::Down, &rt);
+            render_and_snap(&app, &mut terminal);
+        }
+        let changes = inspector_view(&app, &mut terminal);
+        assert_eq!(changes.1, 5);
+        assert_ne!(source.2, changes.2);
+        route_worktree_arrow(&mut app, route, KeyCode::Left, &rt);
+        assert_eq!(inspector_view(&app, &mut terminal), changes);
+        select_inspector_file(&mut app, &mut terminal, "README.md");
+        assert_eq!(app.files_inspector.mode(), Some(Read));
+        assert_eq!(app.files_inspector.scroll_offset(), 0);
+        route_worktree_arrow(&mut app, route, KeyCode::Enter, &rt);
+        render_and_snap(&app, &mut terminal);
+        for _ in 0..7 {
+            route_worktree_arrow(&mut app, route, KeyCode::Down, &rt);
+            render_and_snap(&app, &mut terminal);
+        }
+        let markdown = inspector_view(&app, &mut terminal);
+        assert_eq!(markdown.1, 7);
+        assert!(markdown.2.contains("paragraph_"));
+        assert_ne!(markdown.2, changes.2);
+        route_worktree_arrow(&mut app, route, KeyCode::Left, &rt);
+        assert_eq!(inspector_view(&app, &mut terminal), markdown);
+        select_inspector_file(&mut app, &mut terminal, "script.py");
+        assert_eq!(
+            app.files_inspector.mode(),
+            Some(Source),
+            "file switch restores default mode, not last mode"
+        );
+        assert_eq!(app.files_inspector.scroll_offset(), 3);
+        assert_eq!(inspector_view(&app, &mut terminal), source);
+        route_worktree_arrow(&mut app, route, KeyCode::Enter, &rt);
+        assert_eq!(inspector_view(&app, &mut terminal), source);
+        route_worktree_arrow(&mut app, route, KeyCode::Right, &rt);
+        assert_eq!(app.files_inspector.mode(), Some(Changes));
+        assert_eq!(app.files_inspector.scroll_offset(), 5);
+        assert_eq!(inspector_view(&app, &mut terminal), changes);
+        route_worktree_arrow(&mut app, route, KeyCode::Left, &rt);
+        assert_eq!(inspector_view(&app, &mut terminal), changes);
+        select_inspector_file(&mut app, &mut terminal, "README.md");
+        assert_eq!(app.files_inspector.mode(), Some(Read));
+        assert_eq!(app.files_inspector.scroll_offset(), 7);
+        assert_eq!(inspector_view(&app, &mut terminal), markdown);
+        route_worktree_arrow(&mut app, route, KeyCode::Enter, &rt);
+        assert_eq!(inspector_view(&app, &mut terminal), markdown);
     }
-    assert!(app.files_inspector.scroll_offset() > 0);
-    app.handle_diff_pane_focus_key(KeyCode::Left, KeyModifiers::NONE);
-    select_inspector_file(&mut app, &mut terminal, "README.md");
-    assert_eq!(app.files_inspector.scroll_offset(), 0);
+}
+
+#[test]
+fn files_inspector_tree_pointer_and_wheel_preserve_selection_contract() {
+    let _lock = scroll_render_test_lock();
+    let (repo, mut app, mut terminal) = inspector_fixture();
+    for file in 0..30 {
+        let source = (0..100)
+            .map(|line| format!("file_{file:02}_line_{line:03}\n"))
+            .collect::<String>();
+        std::fs::write(repo.path().join(format!("z{file:02}.txt")), source).unwrap();
+    }
+    crate::tui::ui::prime_project_tree_for_tests(repo.path());
+    select_inspector_file(&mut app, &mut terminal, "script.py");
+    // Actual tree keys scroll the list. No seeded selection/scroll state.
+    for _ in 0..12 {
+        app.handle_key(KeyCode::Down, KeyModifiers::NONE).unwrap();
+        render_and_snap(&app, &mut terminal);
+    }
+    let selected = app.worktree_pane.tree_selected_path.clone().unwrap();
+    app.handle_key(KeyCode::Enter, KeyModifiers::NONE).unwrap();
+    render_and_snap(&app, &mut terminal);
+    app.handle_key(KeyCode::PageDown, KeyModifiers::NONE)
+        .unwrap();
+    let before = inspector_view(&app, &mut terminal);
+    assert!(before.1 > 0);
+    let distinctive = format!("file_{}_line_", &selected[1..3]);
+    assert!(before.2.contains(&distinctive));
+    app.handle_key(KeyCode::Left, KeyModifiers::NONE).unwrap();
+    assert_eq!(inspector_view(&app, &mut terminal), before);
+    let layout = crate::tui::ui::worktree_pane_layout().unwrap();
+    assert!(layout.tree_scroll > 0);
+    let index = layout
+        .tree_rows
+        .iter()
+        .position(|row| row.path == selected)
+        .unwrap();
+    let tree = layout.tree_area.unwrap();
+    for row_index in [index, index - 1] {
+        let y = tree.y + (row_index - layout.tree_scroll) as u16;
+        assert!(y < tree.bottom());
+        app.handle_mouse_event(worktree_test_mouse(MouseEventKind::Moved, tree.x + 1, y));
+        assert_eq!(inspector_view(&app, &mut terminal), before);
+        assert_eq!(
+            app.worktree_pane.tree_selected_path.as_deref(),
+            Some(selected.as_str())
+        );
+        assert_eq!(app.worktree_pane.tree_scroll, layout.tree_scroll);
+    }
+    app.handle_mouse_event(worktree_test_mouse(
+        MouseEventKind::ScrollDown,
+        tree.x + 1,
+        tree.y,
+    ));
+    let changed = inspector_view(&app, &mut terminal);
+    let target = &layout.tree_rows[index + 3].path;
+    assert_eq!(
+        app.worktree_pane.tree_selected_path.as_deref(),
+        Some(target.as_str())
+    );
+    assert!(app.worktree_pane.tree_scroll > layout.tree_scroll);
+    assert!(!app.files_inspector.is_focused());
+    assert_eq!(
+        app.files_inspector.mode(),
+        Some(super::files_inspector::FileInspectorMode::Source)
+    );
+    assert_eq!(changed.1, 0);
+    assert!(
+        changed
+            .2
+            .contains(&format!("file_{}_line_000", &target[1..3]))
+    );
+    assert_ne!(changed.2, before.2);
+    let layout = crate::tui::ui::worktree_pane_layout().unwrap();
+    let tree = layout.tree_area.unwrap();
+    app.handle_mouse_event(worktree_test_mouse(
+        MouseEventKind::ScrollUp,
+        tree.x + 1,
+        tree.y,
+    ));
+    assert_eq!(inspector_view(&app, &mut terminal), before);
+    assert_eq!(
+        app.worktree_pane.tree_selected_path.as_deref(),
+        Some(selected.as_str())
+    );
+    assert_eq!(usize::from(app.files_inspector.scroll_offset()), before.1);
+    assert!(!app.files_inspector.is_focused());
 }
 
 #[test]
@@ -697,11 +1029,31 @@ fn files_inspector_unfocused_preview_wheel_isolated_to_selected_offset() {
     let selected = app.worktree_pane.tree_selected_path.clone();
     let tree_scroll = app.worktree_pane.tree_scroll;
     assert!(!app.files_inspector.is_focused());
-    app.handle_worktree_pane_mouse(worktree_test_mouse(
+    let preview = layout.preview_area.unwrap();
+    let before = worktree_rendered_region(&terminal, preview);
+    app.handle_mouse_event(worktree_test_mouse(
         MouseEventKind::ScrollDown,
         layout.preview_area.expect("preview area").x + 1,
         layout.preview_area.expect("preview area").y + 1,
     ));
+    render_and_snap(&app, &mut terminal);
+    let after = crate::tui::ui::worktree_pane_layout().unwrap();
+    let content = worktree_rendered_region(&terminal, preview);
+    assert_eq!(after.preview_area, Some(preview));
+    assert_eq!(after.preview_scroll, 3);
+    assert_ne!(content, before);
+    assert!(content.contains("function_3"), "{content}");
+    for key in [KeyCode::Enter, KeyCode::Left] {
+        app.handle_key(key, KeyModifiers::NONE).unwrap();
+        render_and_snap(&app, &mut terminal);
+        assert_eq!(
+            crate::tui::ui::worktree_pane_layout()
+                .unwrap()
+                .preview_scroll,
+            3
+        );
+        assert_eq!(worktree_rendered_region(&terminal, preview), content);
+    }
     assert!(!app.files_inspector.is_focused());
     assert!(app.files_inspector.scroll_offset() > 0);
     assert_eq!(app.worktree_pane.tree_selected_path, selected);

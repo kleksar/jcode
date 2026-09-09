@@ -1944,12 +1944,7 @@ pub(super) fn draw_project_files(
         );
         preview_total_lines = lines.len();
         let max_scroll = preview_total_lines.saturating_sub(body.height as usize);
-        preview_scroll = if app.files_inspector_focused() {
-            usize::from(app.files_inspector_scroll_offset())
-        } else {
-            app.project_tree_preview_scroll()
-        }
-        .min(max_scroll);
+        preview_scroll = usize::from(app.files_inspector_scroll_offset()).min(max_scroll);
         let visible = lines
             .iter()
             .skip(preview_scroll)
