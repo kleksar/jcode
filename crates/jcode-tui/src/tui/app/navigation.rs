@@ -642,14 +642,6 @@ impl App {
                 }
             }
         }
-        if self.worktree_documents_tab_active() {
-            match code {
-                KeyCode::Char('[') => return self.focus_adjacent_document_page(-1),
-                KeyCode::Char(']') => return self.focus_adjacent_document_page(1),
-                KeyCode::Char('m') => return self.cycle_markdown_document_mode(),
-                _ => {}
-            }
-        }
         if crate::tui::ui::worktree_pane_layout().is_none() && self.files_inspector.is_focused() {
             self.files_inspector.exit_focus();
         }
@@ -663,9 +655,6 @@ impl App {
                         super::worktree_pane::WorktreePaneTab::Files => {
                             super::worktree_pane::WorktreePaneTab::Diff
                         }
-                        super::worktree_pane::WorktreePaneTab::Documents => {
-                            super::worktree_pane::WorktreePaneTab::Diff
-                        }
                     };
                     self.set_worktree_pane_tab(next);
                     return true;
@@ -677,9 +666,6 @@ impl App {
                         }
                         super::worktree_pane::WorktreePaneTab::Files => {
                             super::worktree_pane::WorktreePaneTab::Diff
-                        }
-                        super::worktree_pane::WorktreePaneTab::Documents => {
-                            super::worktree_pane::WorktreePaneTab::Files
                         }
                     };
                     self.set_worktree_pane_tab(next);
@@ -1251,9 +1237,6 @@ impl App {
         }
 
         if self.side_panel.focused_page().is_some() {
-            if self.worktree_documents_tab_active() {
-                self.set_worktree_pane_tab(super::worktree_pane::WorktreePaneTab::Diff);
-            }
             self.last_side_panel_focus_id = self.side_panel.focused_page_id.clone();
             self.side_panel.focused_page_id = None;
             self.side_panel_user_hidden = true;

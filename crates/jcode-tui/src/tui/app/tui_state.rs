@@ -1889,9 +1889,6 @@ impl crate::tui::TuiState for App {
     fn worktree_files_tab_active(&self) -> bool {
         self.worktree_files_tab_active()
     }
-    fn worktree_documents_tab_active(&self) -> bool {
-        self.worktree_documents_tab_active()
-    }
     fn worktree_documents_available(&self) -> bool {
         self.worktree_documents_available()
     }

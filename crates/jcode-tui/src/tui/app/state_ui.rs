@@ -686,12 +686,6 @@ impl App {
         let focused_before = self.side_panel.focused_page_id.clone();
         let focused_after = snapshot.focused_page_id.clone();
         let focused_changed = focused_before != focused_after;
-        let focused_is_new = focused_after
-            .as_deref()
-            .is_some_and(|id| !self.side_panel.pages.iter().any(|page| page.id == id));
-        if focused_changed && self.worktree_documents_tab_active() {
-            self.save_focused_document_ui();
-        }
         let focused_title_after = snapshot.focused_page().map(|page| page.title.clone());
         if let Some(focused_after) = focused_after.as_deref() {
             if focused_after != super::observe::OBSERVE_PAGE_ID {
@@ -711,11 +705,6 @@ impl App {
         }
         if self.side_panel.pages.is_empty() {
             self.worktree_pane.document_ui.clear();
-            if session_changed
-                && self.worktree_pane.tab == super::worktree_pane::WorktreePaneTab::Documents
-            {
-                self.worktree_pane.tab = super::worktree_pane::WorktreePaneTab::Files;
-            }
         }
         if focused_changed {
             match (focused_after.as_deref(), focused_title_after.as_deref()) {

@@ -1213,7 +1213,6 @@ fn canonicalize_existing_ancestor(path: PathBuf) -> Option<PathBuf> {
 
 const DIFF_TAB_LABEL: &str = " Diff ";
 const FILES_TAB_LABEL: &str = " Files ";
-const DOCUMENTS_TAB_LABEL: &str = " Documents ";
 pub(super) const DOCUMENT_PREVIOUS_PAGE_LABEL: &str = " < ";
 pub(super) const DOCUMENT_READ_LABEL: &str = " Read ";
 pub(super) const DOCUMENT_SOURCE_LABEL: &str = " Source ";
@@ -1252,14 +1251,6 @@ pub(super) fn project_pane_title(
                     && active_tab == crate::tui::app::worktree_pane::WorktreePaneTab::Files,
             ),
         ),
-        Span::raw(" "),
-        Span::styled(
-            DOCUMENTS_TAB_LABEL,
-            project_pane_tab_style(
-                keyboard_focused
-                    && active_tab == crate::tui::app::worktree_pane::WorktreePaneTab::Documents,
-            ),
-        ),
         Span::raw("  "),
     ];
     spans.append(&mut suffix);
@@ -1286,14 +1277,9 @@ fn project_pane_tab_areas(area: Rect) -> (Rect, Rect, Rect, Rect, Rect, Rect, Re
         FILES_TAB_LABEL.len() as u16,
         1,
     ));
-    let documents = clip(Rect::new(
-        files.right().saturating_add(1),
-        area.y,
-        DOCUMENTS_TAB_LABEL.len() as u16,
-        1,
-    ));
+    let documents = Rect::default();
     let previous = clip(Rect::new(
-        documents.right().saturating_add(2),
+        files.right().saturating_add(2),
         area.y,
         DOCUMENT_PREVIOUS_PAGE_LABEL.len() as u16,
         1,

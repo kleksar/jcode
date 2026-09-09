@@ -15,7 +15,6 @@ pub(crate) enum WorktreePaneTab {
     Diff,
     #[default]
     Files,
-    Documents,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -101,10 +100,6 @@ impl App {
 
     pub(super) fn worktree_files_tab_active(&self) -> bool {
         self.worktree_pane.tab == WorktreePaneTab::Files
-    }
-
-    pub(super) fn worktree_documents_tab_active(&self) -> bool {
-        self.worktree_pane.tab == WorktreePaneTab::Documents && self.worktree_documents_available()
     }
 
     pub(super) fn worktree_documents_available(&self) -> bool {
@@ -213,9 +208,6 @@ impl App {
     }
 
     pub(super) fn set_worktree_pane_tab(&mut self, tab: WorktreePaneTab) {
-        if self.worktree_documents_tab_active() && tab != WorktreePaneTab::Documents {
-            self.save_focused_document_ui();
-        }
         self.prepare_worktree_pane_state();
         self.worktree_pane.explicit_open = true;
         if self.worktree_pane.tab == tab {
@@ -225,15 +217,11 @@ impl App {
         self.worktree_pane.tree_preview_focused = false;
         self.files_inspector.exit_focus();
         self.reset_worktree_diff_scroll();
-        if tab == WorktreePaneTab::Documents {
-            self.restore_focused_document_ui();
-        }
         self.set_status_notice(match tab {
             WorktreePaneTab::Diff => "Right pane: Diff (Tab switches to Files)",
             WorktreePaneTab::Files => {
                 "Right pane: Files (arrows navigate, Enter opens Markdown or previews, Tab switches)"
             }
-            WorktreePaneTab::Documents => "Right pane: Documents ([/] pages, m mode, Tab switches)",
         });
     }
 
@@ -298,13 +286,13 @@ impl App {
             (true, KeyCode::Right) => {
                 match self.worktree_pane.tab {
                     WorktreePaneTab::Diff => self.set_worktree_pane_tab(WorktreePaneTab::Files),
-                    WorktreePaneTab::Files | WorktreePaneTab::Documents => {}
+                    WorktreePaneTab::Files => {}
                 }
                 true
             }
             (true, KeyCode::Left) => {
                 match self.worktree_pane.tab {
-                    WorktreePaneTab::Documents | WorktreePaneTab::Files => {
+                    WorktreePaneTab::Files => {
                         self.set_worktree_pane_tab(WorktreePaneTab::Diff);
                         self.prepare_worktree_pane_state();
                         self.worktree_pane.diff_focus = DiffFocus::FileList;
@@ -635,15 +623,6 @@ impl App {
             if crate::tui::layout_utils::point_in_rect(
                 mouse.column,
                 mouse.row,
-                layout.documents_tab_area,
-            ) {
-                self.set_worktree_pane_tab(WorktreePaneTab::Documents);
-                self.set_diff_pane_focus(true);
-                return true;
-            }
-            if crate::tui::layout_utils::point_in_rect(
-                mouse.column,
-                mouse.row,
                 layout.files_tab_area,
             ) {
                 self.set_worktree_pane_tab(WorktreePaneTab::Files);
@@ -687,17 +666,6 @@ impl App {
             && mouse.row == layout.area.y
         {
             // Header padding and the left rail chrome are not body controls.
-            return false;
-        }
-        // Documents share the standard right-pane renderer and its smooth wheel
-        // queue. Do not let the old worktree list fallback swallow body wheels.
-        if self.worktree_documents_tab_active()
-            && matches!(
-                mouse.kind,
-                MouseEventKind::ScrollUp | MouseEventKind::ScrollDown
-            )
-            && crate::tui::layout_utils::point_in_rect(mouse.column, mouse.row, layout.body_area)
-        {
             return false;
         }
         if layout.files_tab_active {

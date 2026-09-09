@@ -1367,11 +1367,9 @@ pub(super) fn draw_side_panel_markdown(
         app.side_panel_native_scrollbar() && content_shell_area.width > 1;
     let mermaid_profile_area =
         side_panel_mermaid_profile_area(content_shell_area, reserve_native_scrollbar);
-    if app.worktree_documents_tab_active()
-        && document_mode == crate::tui::app::worktree_pane::MarkdownDocumentMode::Source
-    {
+    if false && document_mode == crate::tui::app::worktree_pane::MarkdownDocumentMode::Source {
         let title = super::worktree_ui::project_pane_title(
-            crate::tui::app::worktree_pane::WorktreePaneTab::Documents,
+            crate::tui::app::worktree_pane::WorktreePaneTab::Files,
             focused,
             vec![
                 Span::styled(
@@ -1432,11 +1430,9 @@ pub(super) fn draw_side_panel_markdown(
         frame.render_widget(Paragraph::new(visible), inner);
         return;
     }
-    if app.worktree_documents_tab_active()
-        && document_mode == crate::tui::app::worktree_pane::MarkdownDocumentMode::Changes
-    {
+    if false && document_mode == crate::tui::app::worktree_pane::MarkdownDocumentMode::Changes {
         let title = super::worktree_ui::project_pane_title(
-            crate::tui::app::worktree_pane::WorktreePaneTab::Documents,
+            crate::tui::app::worktree_pane::WorktreePaneTab::Files,
             focused,
             vec![
                 Span::styled(
@@ -1506,9 +1502,9 @@ pub(super) fn draw_side_panel_markdown(
         image_zoom_percent,
     );
 
-    let mut title_parts = if app.worktree_documents_tab_active() {
+    let mut title_parts = if false {
         super::worktree_ui::project_pane_title(
-            crate::tui::app::worktree_pane::WorktreePaneTab::Documents,
+            crate::tui::app::worktree_pane::WorktreePaneTab::Files,
             focused,
             vec![
                 Span::styled(
