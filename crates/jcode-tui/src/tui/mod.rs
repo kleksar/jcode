@@ -1,6 +1,32 @@
 pub mod account_picker;
 pub(crate) mod app;
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum MarkdownDocumentMode {
+    #[default]
+    Read,
+    Source,
+    Changes,
+}
+
+impl MarkdownDocumentMode {
+    const fn index(self) -> usize {
+        match self {
+            Self::Read => 0,
+            Self::Source => 1,
+            Self::Changes => 2,
+        }
+    }
+
+    fn next(self) -> Self {
+        match self {
+            Self::Read => Self::Source,
+            Self::Source => Self::Changes,
+            Self::Changes => Self::Read,
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct ContextSnapshot {
     pub info: Option<crate::prompt::ContextInfo>,
@@ -685,7 +711,7 @@ pub trait TuiState {
     fn worktree_documents_available(&self) -> bool {
         false
     }
-    fn markdown_document_mode(&self) -> crate::tui::app::worktree_pane::MarkdownDocumentMode {
+    fn markdown_document_mode(&self) -> MarkdownDocumentMode {
         Default::default()
     }
     fn project_tree_selected_path(&self) -> Option<&str> {

@@ -1,4 +1,5 @@
 use super::*;
+pub(crate) use crate::tui::MarkdownDocumentMode;
 
 const FILTER_IDLE_TIMEOUT: Duration = Duration::from_secs(60);
 
@@ -8,32 +9,6 @@ pub(crate) enum WorktreePaneTab {
     #[default]
     Files,
     Documents,
-}
-
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub(crate) enum MarkdownDocumentMode {
-    #[default]
-    Read,
-    Source,
-    Changes,
-}
-
-impl MarkdownDocumentMode {
-    const fn index(self) -> usize {
-        match self {
-            Self::Read => 0,
-            Self::Source => 1,
-            Self::Changes => 2,
-        }
-    }
-
-    fn next(self) -> Self {
-        match self {
-            Self::Read => Self::Source,
-            Self::Source => Self::Changes,
-            Self::Changes => Self::Read,
-        }
-    }
 }
 
 #[derive(Clone, Copy, Debug, Default)]

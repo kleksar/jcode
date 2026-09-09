@@ -1895,7 +1895,7 @@ impl crate::tui::TuiState for App {
     fn worktree_documents_available(&self) -> bool {
         self.worktree_documents_available()
     }
-    fn markdown_document_mode(&self) -> super::worktree_pane::MarkdownDocumentMode {
+    fn markdown_document_mode(&self) -> crate::tui::MarkdownDocumentMode {
         self.focused_markdown_document_mode()
     }
     fn project_tree_selected_path(&self) -> Option<&str> {
