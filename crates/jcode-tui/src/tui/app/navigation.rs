@@ -591,6 +591,9 @@ impl App {
                 _ => {}
             }
         }
+        if crate::tui::ui::worktree_pane_layout().is_none() && self.files_inspector.is_focused() {
+            self.files_inspector.exit_focus();
+        }
         if let Some(layout) = crate::tui::ui::worktree_pane_layout() {
             match code {
                 KeyCode::Tab => {

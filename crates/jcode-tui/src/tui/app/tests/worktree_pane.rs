@@ -48,13 +48,22 @@ fn inspector_fixture() -> (
         );
     };
     std::fs::write(repo.path().join("README.md"), "# Heading\n\n**bold**\n").unwrap();
-    std::fs::write(repo.path().join("script.py"), "def old():\n    return 1\n").unwrap();
+    let script = std::iter::once("def old(): return 1".to_string())
+        .chain((1..=79).map(|line| format!("def function_{line}(): return {line}")))
+        .collect::<Vec<_>>()
+        .join("\n");
+    std::fs::write(repo.path().join("script.py"), script).unwrap();
     git(&["add", "README.md", "script.py"]);
     git(&["commit", "-qm", "inspector fixture"]);
     std::fs::write(repo.path().join("README.md"), "# Heading\n\n**changed**\n").unwrap();
-    std::fs::write(repo.path().join("script.py"), "def new():\n    return 2\n").unwrap();
+    let script = std::iter::once("def new(): return 2".to_string())
+        .chain((1..=79).map(|line| format!("def function_{line}(): return {}", line + 1)))
+        .collect::<Vec<_>>()
+        .join("\n");
+    std::fs::write(repo.path().join("script.py"), script).unwrap();
     crate::tui::ui::prime_worktree_changes_for_tests(repo.path());
     crate::tui::ui::prime_project_tree_for_tests(repo.path());
+    crate::tui::ui::assert_cached_inspector_change_for_tests(repo.path(), "README.md");
     let mut app = create_test_app();
     app.session.working_dir = Some(repo.path().to_string_lossy().into_owned());
     app.open_project_files_pane();
@@ -93,7 +102,7 @@ fn files_inspector_markdown_read_source_and_changes_are_real_views() {
         Some(crate::tui::app::files_inspector::FileInspectorMode::Read)
     );
     assert!(
-        read.contains("Read") && read.contains("**changed**"),
+        read.contains("Read") && read.contains("changed") && !read.contains("**changed**"),
         "read view: {read}"
     );
     assert!(
@@ -205,9 +214,153 @@ fn files_inspector_scroll_is_per_file_and_mode() {
     }
     assert!(app.files_inspector.scroll_offset() > 0);
     app.handle_diff_pane_focus_key(KeyCode::Left, KeyModifiers::NONE);
-    app.worktree_pane.tree_selected_path = Some("README.md".into());
-    render_and_snap(&app, &mut terminal);
+    select_inspector_file(&mut app, &mut terminal, "README.md");
     assert_eq!(app.files_inspector.scroll_offset(), 0);
+}
+
+#[test]
+fn files_inspector_right_cycles_only_supported_modes_and_preserves_offsets() {
+    let _lock = scroll_render_test_lock();
+    let (_repo, mut app, mut terminal) = inspector_fixture();
+    select_inspector_file(&mut app, &mut terminal, "script.py");
+    assert!(app.handle_diff_pane_focus_key(KeyCode::Enter, KeyModifiers::NONE));
+    assert_eq!(
+        app.files_inspector.mode(),
+        Some(crate::tui::app::files_inspector::FileInspectorMode::Source)
+    );
+    app.files_inspector.set_scroll_offset(7);
+    assert!(app.handle_diff_pane_focus_key(KeyCode::Right, KeyModifiers::NONE));
+    assert_eq!(
+        app.files_inspector.mode(),
+        Some(crate::tui::app::files_inspector::FileInspectorMode::Changes)
+    );
+    app.files_inspector.set_scroll_offset(11);
+    assert!(app.handle_diff_pane_focus_key(KeyCode::Left, KeyModifiers::NONE));
+    assert!(!app.files_inspector.is_focused());
+    assert!(app.handle_diff_pane_focus_key(KeyCode::Enter, KeyModifiers::NONE));
+    assert_eq!(
+        app.files_inspector.mode(),
+        Some(crate::tui::app::files_inspector::FileInspectorMode::Changes)
+    );
+    assert_eq!(app.files_inspector.scroll_offset(), 11);
+    assert!(app.handle_diff_pane_focus_key(KeyCode::Left, KeyModifiers::NONE));
+    assert!(app.handle_diff_pane_focus_key(KeyCode::Right, KeyModifiers::NONE));
+    assert_eq!(
+        app.files_inspector.mode(),
+        Some(crate::tui::app::files_inspector::FileInspectorMode::Changes)
+    );
+}
+
+#[test]
+fn files_inspector_home_end_are_per_mode_and_tab_leaves_focus() {
+    let _lock = scroll_render_test_lock();
+    let (_repo, mut app, mut terminal) = inspector_fixture();
+    select_inspector_file(&mut app, &mut terminal, "script.py");
+    assert!(app.handle_diff_pane_focus_key(KeyCode::Enter, KeyModifiers::NONE));
+    app.files_inspector.set_scroll_offset(5);
+    assert!(app.handle_diff_pane_focus_key(KeyCode::Right, KeyModifiers::NONE));
+    app.files_inspector.set_scroll_offset(9);
+    assert!(app.handle_diff_pane_focus_key(KeyCode::Home, KeyModifiers::NONE));
+    assert_eq!(app.files_inspector.scroll_offset(), 0);
+    assert!(app.handle_diff_pane_focus_key(KeyCode::End, KeyModifiers::NONE));
+    assert!(app.files_inspector.scroll_offset() > 0);
+    app.set_worktree_pane_tab(super::worktree_pane::WorktreePaneTab::Diff);
+    assert!(!app.files_inspector.is_focused());
+    app.set_worktree_pane_tab(super::worktree_pane::WorktreePaneTab::Files);
+    assert!(!app.files_inspector.is_focused());
+}
+
+#[test]
+fn files_inspector_unfocused_preview_wheel_isolated_to_selected_offset() {
+    let _lock = scroll_render_test_lock();
+    let (_repo, mut app, mut terminal) = inspector_fixture();
+    select_inspector_file(&mut app, &mut terminal, "script.py");
+    let layout = crate::tui::ui::worktree_pane_layout().expect("files pane layout");
+    let selected = app.worktree_pane.tree_selected_path.clone();
+    let tree_scroll = app.worktree_pane.tree_scroll;
+    assert!(!app.files_inspector.is_focused());
+    app.handle_worktree_pane_mouse(worktree_test_mouse(
+        MouseEventKind::ScrollDown,
+        layout.preview_area.expect("preview area").x + 1,
+        layout.preview_area.expect("preview area").y + 1,
+    ));
+    assert!(!app.files_inspector.is_focused());
+    assert!(app.files_inspector.scroll_offset() > 0);
+    assert_eq!(app.worktree_pane.tree_selected_path, selected);
+    assert_eq!(app.worktree_pane.tree_scroll, tree_scroll);
+    assert!(
+        app.diff_pane_focus,
+        "wheel must not change chat focus state"
+    );
+}
+
+#[test]
+fn files_inspector_directory_selection_clears_identity_and_focus() {
+    let _lock = scroll_render_test_lock();
+    let (repo, mut app, mut terminal) = inspector_fixture();
+    std::fs::create_dir_all(repo.path().join("src")).unwrap();
+    std::fs::write(repo.path().join("src/keep.txt"), "keep\n").unwrap();
+    crate::tui::ui::prime_project_tree_for_tests(repo.path());
+    select_inspector_file(&mut app, &mut terminal, "script.py");
+    assert!(app.files_inspector.enter_focus());
+    render_and_snap(&app, &mut terminal);
+    let layout = crate::tui::ui::worktree_pane_layout().unwrap();
+    let index = layout
+        .tree_rows
+        .iter()
+        .position(|row| row.path == "src")
+        .unwrap();
+    app.handle_worktree_pane_mouse(worktree_test_mouse(
+        MouseEventKind::Down(MouseButton::Left),
+        layout.tree_area.unwrap().x + 1,
+        layout.tree_area.unwrap().y + index as u16,
+    ));
+    assert!(app.files_inspector.selected_file().is_none());
+    assert!(!app.files_inspector.is_focused());
+}
+
+#[test]
+fn files_inspector_session_and_root_changes_clear_identity() {
+    let _lock = scroll_render_test_lock();
+    let (_repo, mut app, mut terminal) = inspector_fixture();
+    select_inspector_file(&mut app, &mut terminal, "script.py");
+    assert!(app.files_inspector.enter_focus());
+    app.session.id = "changed-session".into();
+    app.prepare_worktree_pane_state();
+    assert!(app.files_inspector.selected_file().is_none());
+    select_inspector_file(&mut app, &mut terminal, "script.py");
+    app.session.working_dir = Some("/different-root".into());
+    app.prepare_worktree_pane_state();
+    assert!(app.files_inspector.selected_file().is_none());
+}
+
+#[test]
+fn files_inspector_focus_exits_when_resize_removes_preview() {
+    let _lock = scroll_render_test_lock();
+    let (_repo, mut app, mut terminal) = inspector_fixture();
+    select_inspector_file(&mut app, &mut terminal, "script.py");
+    assert!(app.files_inspector.enter_focus());
+    let mut narrow = ratatui::Terminal::new(ratatui::backend::TestBackend::new(70, 24)).unwrap();
+    render_and_snap(&app, &mut narrow);
+    assert!(crate::tui::ui::worktree_pane_layout().is_none());
+    app.handle_project_files_focus_key(KeyCode::Down);
+    assert!(!app.files_inspector.is_focused());
+}
+
+#[test]
+fn connected_and_disconnected_enter_files_inspector() {
+    let _lock = scroll_render_test_lock();
+    let (_repo, mut app, mut terminal) = inspector_fixture();
+    select_inspector_file(&mut app, &mut terminal, "script.py");
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let _guard = rt.enter();
+    let mut remote = crate::tui::backend::RemoteConnection::dummy();
+    rt.block_on(app.handle_remote_key(KeyCode::Enter, KeyModifiers::NONE, &mut remote))
+        .unwrap();
+    assert!(app.files_inspector.is_focused());
+    app.files_inspector.exit_focus();
+    super::remote::handle_disconnected_key(&mut app, KeyCode::Enter, KeyModifiers::NONE).unwrap();
+    assert!(app.files_inspector.is_focused());
 }
 
 #[test]

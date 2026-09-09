@@ -2528,15 +2528,23 @@ fn footer_context_spans(data: &crate::tui::info_widget::InfoWidgetData) -> Vec<S
     let Some(numbers) = compact_context_usage_text(used, limit) else {
         return Vec::new();
     };
-    let mut spans = vec![Span::styled(numbers, Style::default().fg(rgb(140, 140, 150)))];
+    let mut spans = vec![Span::styled(
+        numbers,
+        Style::default().fg(rgb(140, 140, 150)),
+    )];
     spans.push(Span::raw(" "));
     spans.extend(overscroll_context_bar(used, limit, 10));
     spans
 }
 
 fn compact_context_usage_text(used: usize, limit: usize) -> Option<String> {
-    (used > 0 && limit > 0)
-        .then(|| format!("{}/{}", overscroll_format_tokens(used), overscroll_format_tokens(limit)))
+    (used > 0 && limit > 0).then(|| {
+        format!(
+            "{}/{}",
+            overscroll_format_tokens(used),
+            overscroll_format_tokens(limit)
+        )
+    })
 }
 
 fn footer_fact_spans(app: &dyn TuiState) -> Vec<Span<'static>> {
@@ -2655,9 +2663,10 @@ fn footer_compositor_spans(
 /// footer facts, do not replace a fully fitting number pair with an ellipsis
 /// merely because the optional meter does not fit after it.
 fn footer_truncate_fact_spans(facts: Vec<Span<'static>>, width: usize) -> Vec<Span<'static>> {
-    let Some(numbers) = facts.first().filter(|span| {
-        span.style.fg == Some(rgb(140, 140, 150)) && span.content.contains('/')
-    }) else {
+    let Some(numbers) = facts
+        .first()
+        .filter(|span| span.style.fg == Some(rgb(140, 140, 150)) && span.content.contains('/'))
+    else {
         return overscroll_truncate_spans(facts, width);
     };
     if numbers.width() > width {

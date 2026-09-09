@@ -660,6 +660,9 @@ async fn handle_remote_key_internal(
 
     // A non-empty composer reserves Ctrl+J for a terminal-independent newline
     // before transcript navigation has a chance to claim that chord.
+    if app.diff_pane_focus && app.handle_diff_pane_focus_key(code, modifiers) {
+        return Ok(());
+    }
     if crate::tui::app::input::newline::enter_inserts_newline(app, code, modifiers) {
         return Ok(());
     }

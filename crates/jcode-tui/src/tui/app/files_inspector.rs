@@ -133,6 +133,18 @@ impl FileInspectorUiState {
         self.capabilities.modes()
     }
 
+    pub(crate) fn select_next_mode(&mut self, delta: isize) -> bool {
+        let modes: Vec<_> = self.available_modes().collect();
+        let Some(current) = self
+            .mode
+            .and_then(|mode| modes.iter().position(|item| *item == mode))
+        else {
+            return false;
+        };
+        let next = (current as isize + delta).rem_euclid(modes.len() as isize) as usize;
+        self.select_mode(modes[next])
+    }
+
     pub(crate) fn enter_focus(&mut self) -> bool {
         if self.selected.is_some() && self.mode.is_some() {
             self.focused = true;

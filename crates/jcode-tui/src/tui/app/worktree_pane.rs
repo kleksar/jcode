@@ -86,6 +86,7 @@ impl App {
                 working_dir: self.session.working_dir.clone(),
                 ..Default::default()
             };
+            self.files_inspector.clear_selection();
         }
     }
 
@@ -213,6 +214,7 @@ impl App {
         }
         self.worktree_pane.tab = tab;
         self.worktree_pane.tree_preview_focused = false;
+        self.files_inspector.exit_focus();
         self.reset_worktree_diff_scroll();
         if tab == WorktreePaneTab::Documents {
             self.restore_focused_document_ui();
@@ -240,6 +242,10 @@ impl App {
         modifiers: KeyModifiers,
     ) -> bool {
         if !self.input.is_empty() || !modifiers.is_empty() {
+            return false;
+        }
+
+        if self.files_inspector.is_focused() {
             return false;
         }
 
@@ -305,7 +311,9 @@ impl App {
             self.worktree_pane.tree_preview_focused = false;
         }
         self.worktree_pane.tree_selected_path = Some(row.path.clone());
-        if !row.is_dir {
+        if row.is_dir {
+            self.files_inspector.clear_selection();
+        } else {
             let capabilities = if std::path::Path::new(&row.path)
                 .extension()
                 .is_some_and(|extension| extension.eq_ignore_ascii_case("md"))
@@ -363,33 +371,35 @@ impl App {
             .map(|area| area.height as usize)
             .unwrap_or(0);
         let max_scroll = layout.preview_total_lines.saturating_sub(height);
-        let current = if self.files_inspector.is_focused() {
-            self.files_inspector.scroll_offset() as usize
-        } else {
-            layout.preview_scroll
-        }
-        .min(max_scroll);
+        let current = (self.files_inspector.scroll_offset() as usize).min(max_scroll);
         let next = if delta < 0 {
             current.saturating_sub(delta.unsigned_abs())
         } else {
             current.saturating_add(delta as usize).min(max_scroll)
         };
-        if self.files_inspector.is_focused() {
-            self.files_inspector.set_scroll_offset(next as u16);
-        } else {
-            self.worktree_pane.tree_preview_scroll = next;
-        }
+        self.files_inspector.set_scroll_offset(next as u16);
     }
 
     pub(super) fn handle_project_files_focus_key(&mut self, code: KeyCode) -> bool {
         let Some(layout) = crate::tui::ui::worktree_pane_layout() else {
+            if self.files_inspector.is_focused() {
+                self.files_inspector.exit_focus();
+            }
             return false;
         };
         if !layout.files_tab_active {
             return false;
         }
         self.prepare_worktree_pane_state();
+        if self.files_inspector.is_focused() && layout.preview_area.is_none() {
+            self.files_inspector.exit_focus();
+        }
         if self.files_inspector.is_focused() {
+            let preview_height = layout
+                .preview_area
+                .map(|area| area.height as usize)
+                .unwrap_or(0);
+            let max_scroll = layout.preview_total_lines.saturating_sub(preview_height);
             let page = layout
                 .preview_area
                 .map(|area| area.height.saturating_sub(1) as isize)
@@ -402,9 +412,12 @@ impl App {
                     self.scroll_project_preview(&layout, page)
                 }
                 KeyCode::Char('u') | KeyCode::PageUp => self.scroll_project_preview(&layout, -page),
-                KeyCode::Char('g') | KeyCode::Home => self.worktree_pane.tree_preview_scroll = 0,
+                KeyCode::Char('g') | KeyCode::Home => self.files_inspector.set_scroll_offset(0),
                 KeyCode::Char('G') | KeyCode::End => {
-                    self.worktree_pane.tree_preview_scroll = usize::MAX
+                    self.files_inspector.set_scroll_offset(max_scroll as u16)
+                }
+                KeyCode::Right => {
+                    let _ = self.files_inspector.select_next_mode(1);
                 }
                 KeyCode::Char('h') | KeyCode::Left | KeyCode::Esc => {
                     self.files_inspector.exit_focus();
