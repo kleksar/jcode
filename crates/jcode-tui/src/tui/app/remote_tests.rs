@@ -1700,6 +1700,117 @@ fn q2_client_reload_transports_existing_authority_without_minting_it() {
 }
 
 #[test]
+fn q2_client_maintenance_reloads_remain_passive_without_authority() {
+    let _lock = crate::storage::lock_test_env();
+    let _env = ResumeAuthorityEnv::new();
+    tokio::runtime::Runtime::new().unwrap().block_on(async {
+        // Self-reload after an in-process server reload is maintenance only.
+        // Force the same newer-binary predicate used by the local /reload test;
+        // this exercises the successful request path without executing a client.
+        let (mut self_reload, _) = resume_authority_app("maintenance-self");
+        self_reload.remote_is_canary = Some(true);
+        self_reload.client_binary_mtime = Some(std::time::SystemTime::UNIX_EPOCH);
+        assert!(self_reload.maybe_self_reload_after_server_reload());
+        assert_eq!(
+            self_reload.reload_requested.as_deref(),
+            Some("maintenance-self")
+        );
+        assert!(!self_reload.reload_recovery_is_authorized("maintenance-self"));
+
+        // The post-connect re-exec path has the same no-mint contract.
+        let (mut post_connect, _) = resume_authority_app("maintenance-connect");
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 24)).unwrap();
+        let mut remote = crate::tui::backend::RemoteConnection::dummy();
+        let mut state = RemoteRunState {
+            reconnect_attempts: 1,
+            server_reload_in_progress: true,
+            ..Default::default()
+        };
+        assert!(matches!(
+            handle_post_connect(
+                &mut post_connect,
+                &mut terminal,
+                &mut remote,
+                &mut state,
+                Some("maintenance-connect"),
+            )
+            .await
+            .unwrap(),
+            super::PostConnectOutcome::Quit
+        ));
+        assert_eq!(
+            post_connect.reload_requested.as_deref(),
+            Some("maintenance-connect")
+        );
+        assert!(!post_connect.reload_recovery_is_authorized("maintenance-connect"));
+
+        // A completed background rebuild also requests a reload but cannot
+        // convert maintenance into recovery consent.
+        let (mut background, _) = resume_authority_app("maintenance-background");
+        background.pending_background_client_reload = Some((
+            "maintenance-background".into(),
+            crate::bus::ClientMaintenanceAction::Rebuild,
+        ));
+        assert!(background.maybe_finish_background_client_reload());
+        assert_eq!(
+            background.reload_requested.as_deref(),
+            Some("maintenance-background")
+        );
+        assert!(!background.reload_recovery_is_authorized("maintenance-background"));
+
+        // Even a server-owned directive on later History stays display-only.
+        let mut remote = crate::tui::backend::RemoteConnection::dummy();
+        let mut peer = remote.take_dummy_peer().unwrap();
+        handle_server_event(
+            &mut background,
+            resume_authority_history("maintenance-background", true, None),
+            &mut remote,
+        );
+        resume_authority_dispatch(&mut background, &mut remote).await;
+        assert_eq!(
+            resume_authority_turns(&resume_authority_drain(&mut peer).await),
+            0,
+            "maintenance reload must not send an unsolicited model Message"
+        );
+    });
+}
+
+#[test]
+fn q2_pending_and_stale_automatic_server_reloads_remain_passive() {
+    let _lock = crate::storage::lock_test_env();
+    let _env = ResumeAuthorityEnv::new();
+    tokio::runtime::Runtime::new().unwrap().block_on(async {
+        for session in ["automatic-pending", "automatic-stale"] {
+            let (mut app, _) = resume_authority_app(session);
+            let mut remote = crate::tui::backend::RemoteConnection::dummy();
+            let mut peer = remote.take_dummy_peer().unwrap();
+            app.pending_server_reload = true;
+            app.auto_server_reload = true;
+
+            // This is the production pending/stale dispatch before History is
+            // loaded. It may request a server reload, but it cannot mint client
+            // recovery authority.
+            process_remote_followups(&mut app, &mut remote).await;
+            assert!(!app.pending_server_reload);
+            assert!(!app.reload_recovery_is_authorized(session));
+
+            handle_server_event(
+                &mut app,
+                resume_authority_history(session, true, Some(true)),
+                &mut remote,
+            );
+            resume_authority_dispatch(&mut app, &mut remote).await;
+            assert_eq!(
+                resume_authority_turns(&resume_authority_drain(&mut peer).await),
+                0,
+                "automatic reload for {session} must not send an unsolicited model Message"
+            );
+        }
+    });
+}
+
+#[test]
 fn q2_actual_local_reload_producer_arms_the_active_session() {
     let _lock = crate::storage::lock_test_env();
     let _env = ResumeAuthorityEnv::new();
