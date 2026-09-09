@@ -82,7 +82,9 @@ pub(crate) fn has_explicit_side_pane_content(app: &dyn TuiState) -> bool {
 /// Read only the cached snapshot. Input and ticks must never run git synchronously.
 pub(crate) fn worktree_file_is_present(working_dir: Option<&str>, path: &str) -> Option<bool> {
     let cache = worktree_cache().lock().ok()?;
-    let entry = cache.get(Path::new(working_dir?))?;
+    let root = Path::new(working_dir?);
+    let root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
+    let entry = cache.get(&root)?;
     let snapshot = entry.snapshot.as_ref()?;
     Some(snapshot.files.iter().any(|file| file.path == path))
 }
@@ -237,6 +239,11 @@ pub(super) fn snapshot_for_worktree(
     }
     let path = PathBuf::from(working_dir);
     let path = path.canonicalize().unwrap_or(path);
+    let path = command_output(&path, &["rev-parse", "--show-toplevel"])
+        .map(|output| PathBuf::from(String::from_utf8_lossy(&output).trim()))
+        .map(|root| root.canonicalize().unwrap_or(root))
+        .unwrap_or(path);
+    let mut cache = worktree_cache().lock().ok()?;
     let entry = cache.entry(path.clone()).or_default();
     let fresh = entry
         .fetched_at
@@ -344,22 +351,55 @@ pub(crate) fn invalidate_worktree_changes_cache() {
             entry.generation = entry.generation.wrapping_add(1);
         }
     }
+    if let Ok(mut cache) = project_preview_cache().lock() {
+        cache.clear();
+    }
 }
 
 #[cfg(test)]
 pub(crate) fn prime_worktree_changes_for_tests(working_dir: &Path) {
     let snapshot = collect_worktree_changes(working_dir);
-    if let Ok(mut cache) = worktree_cache().lock() {
-        cache.insert(
+    let key = command_output(working_dir, &["rev-parse", "--show-toplevel"])
+        .map(|output| PathBuf::from(String::from_utf8_lossy(&output).trim()))
+        .map(|root| root.canonicalize().unwrap_or(root))
+        .unwrap_or_else(|| {
             working_dir
                 .canonicalize()
-                .unwrap_or_else(|_| working_dir.to_path_buf()),
+                .unwrap_or_else(|_| working_dir.to_path_buf())
+        });
+    if let Ok(mut cache) = worktree_cache().lock() {
+        cache.insert(
+            key,
             WorktreeCacheEntry {
                 fetched_at: Some(Instant::now()),
                 snapshot: snapshot.map(Arc::new),
             },
         );
     }
+}
+
+#[cfg(test)]
+pub(crate) fn assert_cached_inspector_change_for_tests(working_dir: &Path, relative: &str) {
+    let project = snapshot_for_project_tree(Some(working_dir.to_string_lossy().as_ref()))
+        .expect("primed project tree snapshot");
+    let root = project.root.canonicalize().unwrap_or(project.root.clone());
+    let cache = worktree_cache().lock().expect("worktree cache lock");
+    let entry = cache.get(&root).unwrap_or_else(|| {
+        panic!(
+            "missing worktree cache root={root:?} keys={:?}",
+            cache.keys().collect::<Vec<_>>()
+        )
+    });
+    let snapshot = entry.snapshot.as_ref().expect("primed worktree snapshot");
+    assert!(
+        snapshot.files.iter().any(|file| file.path == relative),
+        "missing {relative} root={root:?} files={:?}",
+        snapshot
+            .files
+            .iter()
+            .map(|file| &file.path)
+            .collect::<Vec<_>>()
+    );
 }
 
 #[cfg(test)]
@@ -661,6 +701,7 @@ fn collect_project_tree(working_dir: &Path) -> Option<ProjectTreeSnapshot> {
 fn collect_worktree_changes(working_dir: &Path) -> Option<WorktreeChangesSnapshot> {
     let root_output = command_output(working_dir, &["rev-parse", "--show-toplevel"])?;
     let root = PathBuf::from(String::from_utf8_lossy(&root_output).trim());
+    let root = root.canonicalize().unwrap_or(root);
     if root.as_os_str().is_empty() {
         return None;
     }
@@ -1333,8 +1374,44 @@ struct ProjectPreviewCacheEntry {
     modified: Option<std::time::SystemTime>,
     len: u64,
     lines: Option<Arc<Vec<Line<'static>>>>,
+    source_lines: Option<Arc<Vec<Line<'static>>>>,
     #[cfg(not(test))]
     refreshing: bool,
+}
+
+fn read_project_source_lines(root: &Path, relative: &str) -> Arc<Vec<Line<'static>>> {
+    let Some((_path, mut file)) = open_project_preview(root, relative) else {
+        return preview_message("File is no longer available");
+    };
+    let Ok(metadata) = file.metadata() else {
+        return preview_message("Unable to read file metadata");
+    };
+    if metadata.len() > MAX_PROJECT_PREVIEW_BYTES {
+        return preview_message(format!(
+            "Source preview limited to files under {} KiB",
+            MAX_PROJECT_PREVIEW_BYTES / 1024
+        ));
+    }
+    let mut bytes = Vec::with_capacity(metadata.len() as usize);
+    if file.read_to_end(&mut bytes).is_err() {
+        return preview_message("Unable to read file");
+    }
+    if bytes.iter().take(8192).any(|byte| *byte == 0) {
+        return preview_message("Binary file source preview is not available");
+    }
+    let text = String::from_utf8_lossy(&bytes);
+    let mut lines: Vec<_> = text
+        .split('\n')
+        .take(MAX_PROJECT_PREVIEW_LINES)
+        .map(|line| Line::from(Span::raw(line.to_owned())))
+        .collect();
+    if text.lines().count() > MAX_PROJECT_PREVIEW_LINES {
+        lines.push(Line::from(Span::styled(
+            format!("… source preview truncated after {MAX_PROJECT_PREVIEW_LINES} lines"),
+            Style::default().fg(dim_color()),
+        )));
+    }
+    Arc::new(lines)
 }
 
 type ProjectPreviewCache = HashMap<(PathBuf, String), ProjectPreviewCacheEntry>;
@@ -1478,6 +1555,7 @@ fn build_project_preview(root: &Path, relative: &str) -> Arc<Vec<Line<'static>>>
                     modified: signature.0,
                     len: signature.1,
                     lines: Some(lines.clone()),
+                    source_lines: Some(read_project_source_lines(root, relative)),
                 },
             );
         }
@@ -1500,6 +1578,7 @@ fn build_project_preview(root: &Path, relative: &str) -> Arc<Vec<Line<'static>>>
                         modified: signature.0,
                         len: signature.1,
                         lines: None,
+                        source_lines: None,
                         refreshing: true,
                     },
                 );
@@ -1507,11 +1586,13 @@ fn build_project_preview(root: &Path, relative: &str) -> Arc<Vec<Line<'static>>>
                 let relative = relative.to_string();
                 std::thread::spawn(move || {
                     let lines = read_project_preview(&root, &relative);
+                    let source_lines = read_project_source_lines(&root, &relative);
                     if let Ok(mut cache) = project_preview_cache().lock()
                         && let Some(entry) = cache.get_mut(&key)
                         && (entry.modified, entry.len) == signature
                     {
                         entry.lines = Some(lines);
+                        entry.source_lines = Some(source_lines);
                         entry.refreshing = false;
                     }
                     worktree_redraw_pending().store(true, Ordering::Release);
@@ -1569,7 +1650,7 @@ fn inspector_lines(
         return build_project_preview(root, path);
     }
     if mode == crate::tui::app::files_inspector::FileInspectorMode::Source {
-        return read_project_source(root, path);
+        return cached_project_source(root, path);
     }
     let Some(snapshot) = snapshot_for_worktree(Some(root.to_string_lossy().as_ref())) else {
         return preview_message("Loading changes…");
@@ -1603,20 +1684,26 @@ fn inspector_lines(
     Arc::new(lines)
 }
 
-fn read_project_source(root: &Path, relative: &str) -> Arc<Vec<Line<'static>>> {
-    let Some((_path, mut file)) = open_project_preview(root, relative) else {
+fn cached_project_source(root: &Path, relative: &str) -> Arc<Vec<Line<'static>>> {
+    let Ok(path) = root.join(relative).canonicalize() else {
         return preview_message("File is no longer available");
     };
-    let mut bytes = Vec::new();
-    if file.read_to_end(&mut bytes).is_err() {
-        return preview_message("Unable to read file");
+    let Ok(metadata) = path.metadata() else {
+        return preview_message("Unable to read file metadata");
+    };
+    let signature = (metadata.modified().ok(), metadata.len());
+    let key = (root.to_path_buf(), relative.to_string());
+    #[cfg(test)]
+    let _ = build_project_preview(root, relative);
+    if let Ok(cache) = project_preview_cache().lock()
+        && let Some(entry) = cache.get(&key)
+        && (entry.modified, entry.len) == signature
+        && let Some(lines) = entry.source_lines.as_ref()
+    {
+        return lines.clone();
     }
-    Arc::new(
-        String::from_utf8_lossy(&bytes)
-            .split('\n')
-            .map(|line| Line::from(Span::raw(line.to_owned())))
-            .collect(),
-    )
+    let _ = build_project_preview(root, relative);
+    preview_message("Loading source…")
 }
 pub(super) fn draw_project_files(
     frame: &mut Frame,
@@ -2348,7 +2435,7 @@ mod tests {
         .unwrap();
         let root = root.path().canonicalize().unwrap();
         let read = build_project_preview(&root, "README.md");
-        let source = read_project_source(&root, "README.md");
+        let source = cached_project_source(&root, "README.md");
         let read_text = read
             .iter()
             .flat_map(|line| line.spans.iter())
@@ -2377,7 +2464,7 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         std::fs::write(root.path().join("main.py"), "def main():\n    return 1\n").unwrap();
         let root = root.path().canonicalize().unwrap();
-        let source = read_project_source(&root, "main.py");
+        let source = cached_project_source(&root, "main.py");
         let text = source
             .iter()
             .flat_map(|line| line.spans.iter())
