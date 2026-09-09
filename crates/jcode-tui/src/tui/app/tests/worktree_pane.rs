@@ -15,8 +15,13 @@ fn worktree_filter_fixture() -> (
     let repo = init_worktree_pane_test_repo();
     crate::tui::ui::prime_worktree_changes_for_tests(repo.path());
     let mut app = create_test_app();
+    let git_root = std::process::Command::new("git")
+        .current_dir(repo.path())
+        .args(["rev-parse", "--show-toplevel"])
+        .output()
+        .unwrap();
     app.session.working_dir = Some(
-        repo.path()
+        std::path::PathBuf::from(String::from_utf8_lossy(&git_root.stdout).trim())
             .canonicalize()
             .unwrap()
             .to_string_lossy()
@@ -2045,7 +2050,7 @@ fn diff_routed_list_content_and_reentry_transitions_preserve_selection() {
     );
     assert_eq!(app.current_worktree_selected_file(), Some("demo.rs"));
     app.handle_key(KeyCode::Down, KeyModifiers::NONE);
-    assert_eq!(app.current_worktree_selected_file(), Some("notes.md"));
+    assert_eq!(app.current_worktree_selected_file(), Some("notes.txt"));
     app.handle_key(KeyCode::Up, KeyModifiers::NONE);
     assert_eq!(app.current_worktree_selected_file(), Some("demo.rs"));
     app.handle_key(KeyCode::Enter, KeyModifiers::NONE);
