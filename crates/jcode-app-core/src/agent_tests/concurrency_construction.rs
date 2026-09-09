@@ -255,3 +255,27 @@ async fn worker_origin_ordinary_wrappers_and_resumed_sessions_remain_unknown() {
         crate::session::SessionOrigin::Unknown
     );
 }
+
+#[tokio::test]
+async fn worker_origin_same_id_resume_preserves_worker_origin() {
+    let _lock = crate::storage::lock_test_env();
+    let _env = IsolatedTelemetryEnv::new();
+    let provider: Arc<dyn Provider> = Arc::new(NativeAutoCompactionProvider);
+    let mut worker = crate::session::Session::create_with_origin(
+        None,
+        None,
+        crate::session::SessionOrigin::SwarmWorker,
+    );
+    worker.save().unwrap();
+    let worker_id = worker.id.clone();
+
+    let resumed = Agent::new_with_session(
+        provider.clone(),
+        Registry::new(provider).await,
+        crate::session::Session::load(&worker_id).unwrap(),
+        None,
+    );
+
+    assert_eq!(resumed.session_id(), worker_id);
+    assert_eq!(resumed.session.origin(), crate::session::SessionOrigin::SwarmWorker);
+}

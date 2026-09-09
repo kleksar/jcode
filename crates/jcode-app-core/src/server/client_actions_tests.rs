@@ -329,6 +329,55 @@ async fn split_busy_session_uses_persisted_state_without_waiting_for_agent() {
 }
 
 #[tokio::test]
+async fn user_split_of_worker_creates_unknown_child_without_retagging_worker() {
+    let _guard = crate::storage::lock_test_env();
+    let _home = SplitTestHome::new();
+    let provider: Arc<dyn Provider> = Arc::new(MockProvider);
+    let registry = Registry::new(provider.clone()).await;
+    let mut worker = crate::session::Session::create_with_origin(
+        None,
+        Some("swarm worker".to_string()),
+        crate::session::SessionOrigin::SwarmWorker,
+    );
+    worker.add_message(
+        Role::User,
+        vec![ContentBlock::Text {
+            text: "worker's persisted task".to_string(),
+            cache_control: None,
+        }],
+    );
+    worker.save().expect("persist worker before user split");
+    let worker_id = worker.id.clone();
+    let agent = Arc::new(Mutex::new(Agent::new_with_session(
+        provider,
+        registry,
+        worker,
+        None,
+    )));
+    let (tx, mut rx) = mpsc::unbounded_channel();
+
+    // Exercise the user-facing server action, not Session::create directly.
+    handle_split(20, &worker_id, &agent, &tx).await;
+    let child = split_response(&mut rx, 20);
+
+    assert_ne!(child.id, worker_id);
+    assert_eq!(child.parent_id.as_deref(), Some(worker_id.as_str()));
+    assert_eq!(child.origin(), crate::session::SessionOrigin::Unknown);
+    assert_eq!(
+        crate::session::Session::load(&worker_id)
+            .expect("original worker remains durable")
+            .origin(),
+        crate::session::SessionOrigin::SwarmWorker,
+        "a user fork must not retag its worker parent"
+    );
+    assert_eq!(
+        agent.lock().await.session_for_split().origin(),
+        crate::session::SessionOrigin::SwarmWorker,
+        "the live worker remains tagged after its user fork"
+    );
+}
+
+#[tokio::test]
 async fn split_busy_unsaved_session_returns_error_without_waiting() {
     let _guard = crate::storage::lock_test_env();
     let _home = SplitTestHome::new();

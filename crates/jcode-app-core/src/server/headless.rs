@@ -476,6 +476,61 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn worker_origin_headless_factory_same_id_resume_preserves_origin() {
+        let _lock = crate::storage::lock_test_env();
+        let _env = OriginTestHome::new();
+        let sessions: SessionAgents = Arc::new(RwLock::new(HashMap::new()));
+        let global = Arc::new(RwLock::new(String::new()));
+        let members = Arc::new(RwLock::new(HashMap::new()));
+        let swarms = Arc::new(RwLock::new(HashMap::new()));
+        let coordinators = Arc::new(RwLock::new(HashMap::new()));
+        let plans = Arc::new(RwLock::new(HashMap::new()));
+        let queues: SessionInterruptQueues = Arc::new(RwLock::new(HashMap::new()));
+        let provider: Arc<dyn Provider> = Arc::new(OriginTestProvider);
+
+        let response = create_headless_session(
+            &sessions,
+            &global,
+            &provider,
+            "create_session:/headless-resume-cwd",
+            &members,
+            &swarms,
+            &coordinators,
+            &plans,
+            &queues,
+            false,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some("origin-parent".to_string()),
+            HeadlessMemoryScope::RealProject,
+            SessionOrigin::SwarmWorker,
+        )
+        .await
+        .expect("headless fallback factory should create a worker");
+        let id = serde_json::from_str::<serde_json::Value>(&response).unwrap()["session_id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        let persisted = Session::load(&id).expect("fallback worker must be durable");
+        assert_eq!(persisted.origin(), SessionOrigin::SwarmWorker);
+        let resumed = Agent::new_with_session(
+            provider.clone(),
+            Registry::new(provider).await,
+            persisted,
+            None,
+        );
+        assert_eq!(resumed.session_id(), id);
+        assert_eq!(
+            resumed.session_for_split().origin(),
+            SessionOrigin::SwarmWorker
+        );
+    }
+
+    #[tokio::test]
     async fn worker_origin_headless_failure_publishes_nothing() {
         check_origin_factory(
             SessionOrigin::SwarmWorker,

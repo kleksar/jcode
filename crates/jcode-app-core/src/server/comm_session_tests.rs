@@ -847,7 +847,13 @@ async fn coordinator_identity_falls_back_to_persisted_session_when_agent_busy() 
     // Persist a coordinator session that records a concrete model + auth route.
     // Persist after the agent is built so it reflects the authoritative on-disk
     // snapshot the spawn path will read when the agent lock is unavailable.
-    let mut session = crate::session::Session::create_with_id("coord_busy".to_string(), None, None);
+    // A title is explicit persisted identity, so this otherwise-empty Unknown
+    // coordinator reaches disk before we deliberately hold its live Agent lock.
+    let mut session = crate::session::Session::create_with_id(
+        "coord_busy".to_string(),
+        None,
+        Some("busy coordinator".to_string()),
+    );
     session.model = Some("claude-opus-4-6".to_string());
     session.provider_key = Some("claude-api".to_string());
     session.route_api_method = Some("claude-api".to_string());
