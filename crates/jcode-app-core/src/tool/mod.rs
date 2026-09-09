@@ -152,6 +152,15 @@ pub(crate) fn set_session_tool_policy(
     );
 }
 
+#[cfg(test)]
+pub(crate) fn session_delegated_swarm_read_boundary_for_test(session_id: &str) -> Option<bool> {
+    SESSION_TOOL_POLICIES
+        .read()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .get(session_id)
+        .map(|policy| policy.delegated_swarm_root_read_boundary)
+}
+
 /// Enables the technical repository-read boundary for a delegated swarm root.
 /// Workers never receive this session-scoped flag. Clearing it is the explicit,
 /// auditable single-agent override and is logged at the enforcement chokepoint.

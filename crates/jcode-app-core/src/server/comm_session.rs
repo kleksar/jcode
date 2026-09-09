@@ -764,10 +764,10 @@ pub(super) async fn spawn_swarm_agent(
     // the mode on the root session and install the registry-level boundary.
     if let Some(root) = sessions.read().await.get(req_session_id).cloned() {
         let mut root = root.lock().await;
-        root.session.delegated_swarm_root_read_boundary = true;
-        crate::tool::set_session_delegated_swarm_read_boundary(req_session_id, true);
-        if let Err(error) = root.session.save() {
-            crate::logging::warn(&format!("Failed to persist delegated swarm read boundary: {error}"));
+        if let Err(error) = root.set_delegated_swarm_root_read_boundary(true) {
+            crate::logging::warn(&format!(
+                "Failed to persist delegated swarm read boundary: {error}"
+            ));
         }
     }
 
@@ -980,26 +980,52 @@ pub(super) async fn handle_comm_spawn(
 
 pub(super) async fn handle_comm_single_agent(
     id: u64,
-    session_id: String,
+    requesting_session_id: String,
+    target_root_session_id: String,
     client_event_tx: &mpsc::UnboundedSender<ServerEvent>,
     sessions: &SessionAgents,
     swarm_members: &Arc<RwLock<HashMap<String, SwarmMember>>>,
 ) {
-    let is_root = swarm_members.read().await.get(&session_id)
+    if requesting_session_id != target_root_session_id {
+        let _ = client_event_tx.send(ServerEvent::Error {
+            id,
+            message:
+                "Single-agent override requires the requesting session to be the target swarm root."
+                    .to_string(),
+            retry_after_secs: None,
+        });
+        return;
+    }
+    let is_root = swarm_members
+        .read()
+        .await
+        .get(&requesting_session_id)
         .is_some_and(|member| member.report_back_to_session_id.is_none());
-    let Some(agent) = sessions.read().await.get(&session_id).cloned() else {
-        let _ = client_event_tx.send(ServerEvent::Error { id, message: "Single-agent override requires the current root session to be live.".to_string(), retry_after_secs: None });
+    let Some(agent) = sessions.read().await.get(&requesting_session_id).cloned() else {
+        let _ = client_event_tx.send(ServerEvent::Error {
+            id,
+            message: "Single-agent override requires the current root session to be live."
+                .to_string(),
+            retry_after_secs: None,
+        });
         return;
     };
     if !is_root {
-        let _ = client_event_tx.send(ServerEvent::Error { id, message: "Single-agent override is available only to the current swarm root.".to_string(), retry_after_secs: None });
+        let _ = client_event_tx.send(ServerEvent::Error {
+            id,
+            message: "Single-agent override is available only to the current swarm root."
+                .to_string(),
+            retry_after_secs: None,
+        });
         return;
     }
     let mut agent = agent.lock().await;
-    agent.session.delegated_swarm_root_read_boundary = false;
-    crate::tool::set_session_delegated_swarm_read_boundary(&session_id, false);
-    if let Err(error) = agent.session.save() {
-        let _ = client_event_tx.send(ServerEvent::Error { id, message: format!("Failed to persist single-agent override: {error}"), retry_after_secs: None });
+    if let Err(error) = agent.set_delegated_swarm_root_read_boundary(false) {
+        let _ = client_event_tx.send(ServerEvent::Error {
+            id,
+            message: format!("Failed to persist single-agent override: {error}"),
+            retry_after_secs: None,
+        });
         return;
     }
     let _ = client_event_tx.send(ServerEvent::CommSingleAgentResponse { id, enabled: true });

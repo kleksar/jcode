@@ -462,8 +462,20 @@ pub(super) async fn handle_lightweight_control_request(
             )
             .await;
         }
-        Request::CommSingleAgent { id, session_id } => {
-            handle_comm_single_agent(id, session_id, &client_event_tx, sessions, swarm_members).await;
+        Request::CommSingleAgent {
+            id,
+            requesting_session_id,
+            target_root_session_id,
+        } => {
+            handle_comm_single_agent(
+                id,
+                requesting_session_id,
+                target_root_session_id,
+                &client_event_tx,
+                sessions,
+                swarm_members,
+            )
+            .await;
         }
         Request::CommListModels {
             id,

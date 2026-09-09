@@ -8,6 +8,34 @@ use async_trait::async_trait;
 use tokio::sync::mpsc as tokio_mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 
+/// Isolates Session::load because its storage root comes from process-wide JCODE_HOME.
+struct IsolatedSessionHome {
+    previous_home: Option<std::ffi::OsString>,
+    _home: tempfile::TempDir,
+}
+
+impl IsolatedSessionHome {
+    fn new() -> Self {
+        let home = tempfile::TempDir::new().expect("test JCODE_HOME");
+        let previous_home = std::env::var_os("JCODE_HOME");
+        crate::env::set_var("JCODE_HOME", home.path());
+        Self {
+            previous_home,
+            _home: home,
+        }
+    }
+}
+
+impl Drop for IsolatedSessionHome {
+    fn drop(&mut self) {
+        if let Some(previous_home) = self.previous_home.take() {
+            crate::env::set_var("JCODE_HOME", previous_home);
+        } else {
+            crate::env::remove_var("JCODE_HOME");
+        }
+    }
+}
+
 #[path = "agent_tests/concurrency.rs"]
 mod concurrency;
 
@@ -1060,6 +1088,35 @@ async fn restore_session_resets_runtime_interrupt_and_queue_state() {
     assert_eq!(agent.last_usage.input_tokens, 0);
     assert_eq!(agent.last_usage.output_tokens, 0);
     assert!(agent.locked_tools.is_none());
+}
+
+#[tokio::test]
+async fn restore_session_reapplies_persisted_delegated_root_read_boundary() {
+    let _guard = crate::storage::lock_test_env();
+    let _home = IsolatedSessionHome::new();
+    let provider: Arc<dyn Provider> = Arc::new(NativeAutoCompactionProvider);
+    let registry = Registry::new(provider.clone()).await;
+    let mut agent = Agent::new(provider, registry);
+
+    let mut restored_session = crate::session::Session::create_with_id(
+        "session_restore_delegated_root_boundary".to_string(),
+        None,
+        None,
+    );
+    restored_session.delegated_swarm_root_read_boundary = true;
+    restored_session
+        .save()
+        .expect("save delegated root session");
+
+    agent
+        .restore_session_with_working_dir(&restored_session.id, None)
+        .expect("restore delegated root session");
+
+    assert_eq!(
+        crate::tool::session_delegated_swarm_read_boundary_for_test(&restored_session.id),
+        Some(true),
+        "restoring a delegated root must reapply its repository-read boundary"
+    );
 }
 
 #[tokio::test]

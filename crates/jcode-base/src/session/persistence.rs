@@ -396,6 +396,7 @@ impl Session {
             && self.custom_title.is_none()
             && self.title.is_none()
             && self.parent_id.is_none()
+            && !self.delegated_swarm_root_read_boundary
         {
             return Ok(());
         }

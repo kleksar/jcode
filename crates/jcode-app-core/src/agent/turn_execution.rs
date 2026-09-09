@@ -691,6 +691,10 @@ impl Agent {
             self.allowed_tools.clone(),
             self.disabled_tools.clone(),
         );
+        crate::tool::set_session_delegated_swarm_read_boundary(
+            &self.session.id,
+            self.session.delegated_swarm_root_read_boundary,
+        );
         let assign_ms = assign_start.elapsed().as_millis();
 
         let reset_start = Instant::now();

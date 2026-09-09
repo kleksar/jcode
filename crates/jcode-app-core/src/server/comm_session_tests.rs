@@ -1,10 +1,10 @@
 #![cfg_attr(test, allow(clippy::await_holding_lock))]
 
 use super::{
-    CoordinatorSpawnIdentity, ensure_spawn_coordinator_swarm, prepare_visible_spawn_session,
-    register_visible_spawned_member, resolve_coordinator_spawn_identity, resolve_spawn_working_dir,
-    resolve_stop_target_session, resolve_swarm_spawn_selection, spawn_admission_lock,
-    swarm_stop_allowed_by_owner,
+    CoordinatorSpawnIdentity, ensure_spawn_coordinator_swarm, handle_comm_single_agent,
+    prepare_visible_spawn_session, register_visible_spawned_member,
+    resolve_coordinator_spawn_identity, resolve_spawn_working_dir, resolve_stop_target_session,
+    resolve_swarm_spawn_selection, spawn_admission_lock, swarm_stop_allowed_by_owner,
 };
 use crate::agent::Agent;
 use crate::message::{Message, ToolDefinition};
@@ -87,6 +87,18 @@ async fn test_agent_with_working_dir(session_id: &str, working_dir: &str) -> Arc
     Arc::new(Mutex::new(agent))
 }
 
+async fn test_delegated_root_agent(session_id: &str, working_dir: &str) -> Arc<Mutex<Agent>> {
+    let provider: Arc<dyn Provider> = Arc::new(MockProvider);
+    let registry = Registry::new(provider.clone()).await;
+    let mut session = crate::session::Session::create_with_id(session_id.to_string(), None, None);
+    session.model = Some("mock".to_string());
+    session.working_dir = Some(working_dir.to_string());
+    session.delegated_swarm_root_read_boundary = true;
+    let mut agent = Agent::new_with_session(provider, registry, session, None);
+    agent.set_working_dir(working_dir);
+    Arc::new(Mutex::new(agent))
+}
+
 #[tokio::test]
 async fn resolve_spawn_working_dir_prefers_explicit_then_spawner_agent_dir() {
     let sessions = Arc::new(RwLock::new(HashMap::new()));
@@ -131,6 +143,50 @@ async fn resolve_spawn_working_dir_falls_back_to_member_dir() {
             .await
             .as_deref(),
         Some("/tmp/member-dir")
+    );
+}
+
+#[tokio::test]
+async fn single_agent_override_rejects_requester_that_is_not_the_target_root() {
+    let sessions = Arc::new(RwLock::new(HashMap::new()));
+    sessions.write().await.insert(
+        "root".to_string(),
+        test_delegated_root_agent("root", "/tmp/root").await,
+    );
+    let swarm_members = Arc::new(RwLock::new(HashMap::new()));
+    let (root, _root_events) = member("root", Some("swarm-1"), "coordinator");
+    let (mut worker, _worker_events) = member("worker", Some("swarm-1"), "agent");
+    worker.report_back_to_session_id = Some("root".to_string());
+    let mut members = swarm_members.write().await;
+    members.insert("root".to_string(), root);
+    members.insert("worker".to_string(), worker);
+    drop(members);
+    let (event_tx, mut event_rx) = mpsc::unbounded_channel();
+
+    handle_comm_single_agent(
+        7,
+        "worker".to_string(),
+        "root".to_string(),
+        &event_tx,
+        &sessions,
+        &swarm_members,
+    )
+    .await;
+
+    assert!(matches!(
+        event_rx.recv().await,
+        Some(ServerEvent::Error { message, .. }) if message.contains("requesting session")
+    ));
+    assert!(
+        sessions
+            .read()
+            .await
+            .get("root")
+            .expect("root remains live")
+            .lock()
+            .await
+            .delegated_swarm_root_read_boundary(),
+        "a worker must not clear the root's boundary by naming that root"
     );
 }
 

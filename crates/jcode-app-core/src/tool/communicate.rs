@@ -2765,13 +2765,23 @@ impl Tool for CommunicateTool {
 
             "single_agent" => match send_request(Request::CommSingleAgent {
                 id: REQUEST_ID,
-                session_id: ctx.session_id.clone(),
-            }).await {
-                Ok(ServerEvent::CommSingleAgentResponse { enabled: true, .. }) => Ok(ToolOutput::new(
-                    "Single-agent mode enabled for this root session. Repository reads are restored and the override was persisted."
+                requesting_session_id: ctx.session_id.clone(),
+                target_root_session_id: ctx.session_id.clone(),
+            })
+            .await
+            {
+                Ok(ServerEvent::CommSingleAgentResponse { enabled: true, .. }) => {
+                    Ok(ToolOutput::new(
+                        "Single-agent mode enabled for this root session. Repository reads are restored and the override was persisted.",
+                    ))
+                }
+                Ok(response) => {
+                    ensure_success(&response)?;
+                    Err(anyhow::anyhow!("Single-agent override was not enabled."))
+                }
+                Err(error) => Err(anyhow::anyhow!(
+                    "Failed to enable single-agent mode: {error}"
                 )),
-                Ok(response) => { ensure_success(&response)?; Err(anyhow::anyhow!("Single-agent override was not enabled.")) }
-                Err(error) => Err(anyhow::anyhow!("Failed to enable single-agent mode: {error}")),
             },
 
             "list_models" => {

@@ -267,6 +267,24 @@ pub struct Agent {
 }
 
 impl Agent {
+    #[cfg(test)]
+    pub(crate) fn delegated_swarm_root_read_boundary(&self) -> bool {
+        self.session.delegated_swarm_root_read_boundary
+    }
+
+    /// Persist and apply the delegated-root repository-read boundary together.
+    pub(crate) fn set_delegated_swarm_root_read_boundary(&mut self, enabled: bool) -> Result<()> {
+        let previous = self.session.delegated_swarm_root_read_boundary;
+        self.session.delegated_swarm_root_read_boundary = enabled;
+        crate::tool::set_session_delegated_swarm_read_boundary(&self.session.id, enabled);
+        if let Err(error) = self.session.save() {
+            self.session.delegated_swarm_root_read_boundary = previous;
+            crate::tool::set_session_delegated_swarm_read_boundary(&self.session.id, previous);
+            return Err(error);
+        }
+        Ok(())
+    }
+
     fn refresh_agents_md_snapshot(&mut self) {
         let working_dir = self
             .session
