@@ -44,12 +44,7 @@ pub fn hot_restart(session_id: &str) -> Result<()> {
 
     crate::env::set_var("JCODE_RESUMING", "1");
 
-    let mut cmd = ProcessCommand::new(&exe);
-    cmd.env_remove("JCODE_RELOAD_RECOVERY_SESSION");
-    if is_selfdev {
-        cmd.arg("self-dev");
-    }
-    cmd.arg("--resume").arg(session_id).current_dir(&cwd);
+    let mut cmd = restart_command(&exe, &cwd, session_id, is_selfdev);
     let err = crate::platform::replace_process(&mut cmd);
 
     Err(anyhow::anyhow!("Failed to exec {:?}: {}", exe, err))
@@ -64,13 +59,8 @@ pub fn hot_reload(session_id: &str, recovery_session: Option<&str>) -> Result<()
         let binary_path = std::path::PathBuf::from(&migrate_binary);
         if binary_path.exists() {
             crate::logging::info("Migrating to stable binary...");
-            let mut cmd = ProcessCommand::new(&binary_path);
-            cmd.arg("--resume")
-                .arg(session_id)
-                .arg("--no-update")
-                .env_remove("JCODE_MIGRATE_BINARY")
-                .current_dir(cwd);
-            configure_reload_recovery_env(&mut cmd, session_id, recovery_session);
+            let mut cmd =
+                migration_reload_command(&binary_path, &cwd, session_id, recovery_session);
             let err = crate::platform::replace_process(&mut cmd);
             return Err(anyhow::anyhow!("Failed to exec {:?}: {}", binary_path, err));
         } else {
@@ -111,19 +101,7 @@ pub fn hot_reload(session_id: &str, recovery_session: Option<&str>) -> Result<()
                 continue;
             }
         }
-        let mut cmd = ProcessCommand::new(&exe);
-        if is_selfdev {
-            cmd.arg("self-dev");
-        }
-        cmd.arg("--resume")
-            .arg(session_id)
-            // The server has already completed its handoff before the client
-            // re-execs. Let the replacement client paint and accept input from
-            // its startup stub immediately; the authoritative History payload
-            // will repopulate the transcript after reconnect.
-            .env("JCODE_RELOAD_FAST_START", "1")
-            .current_dir(&cwd);
-        configure_reload_recovery_env(&mut cmd, session_id, recovery_session);
+        let mut cmd = reload_command(&exe, &cwd, session_id, recovery_session, is_selfdev);
         let err = crate::platform::replace_process(&mut cmd);
 
         if err.kind() == std::io::ErrorKind::NotFound && attempt < 2 {
@@ -176,15 +154,7 @@ pub fn hot_update(session_id: &str) -> Result<()> {
 
                     crate::env::set_var("JCODE_RESUMING", "1");
 
-                    let mut cmd = ProcessCommand::new(&exe);
-                    cmd.env_remove("JCODE_RELOAD_RECOVERY_SESSION");
-                    if is_selfdev {
-                        cmd.arg("self-dev");
-                    }
-                    cmd.arg("--resume")
-                        .arg(session_id)
-                        .arg("--no-update")
-                        .current_dir(&cwd);
+                    let mut cmd = update_command(&exe, &cwd, session_id, is_selfdev);
                     let err = crate::platform::replace_process(&mut cmd);
                     return Err(anyhow::anyhow!("Failed to exec {:?}: {}", exe, err));
                 }
@@ -216,15 +186,7 @@ pub fn hot_update(session_id: &str) -> Result<()> {
     crate::env::set_var("JCODE_RESUMING", "1");
     let exe = std::env::current_exe()?;
     let is_selfdev = crate::cli::selfdev::client_selfdev_requested();
-    let mut cmd = ProcessCommand::new(&exe);
-    cmd.env_remove("JCODE_RELOAD_RECOVERY_SESSION");
-    if is_selfdev {
-        cmd.arg("self-dev");
-    }
-    cmd.arg("--resume")
-        .arg(session_id)
-        .arg("--no-update")
-        .current_dir(&cwd);
+    let mut cmd = update_command(&exe, &cwd, session_id, is_selfdev);
     let err = crate::platform::replace_process(&mut cmd);
     Err(anyhow::anyhow!("Failed to exec {:?}: {}", exe, err))
 }
@@ -246,6 +208,73 @@ fn configure_reload_recovery_env(
     }
 }
 
+fn restart_command(
+    exe: &std::path::Path,
+    cwd: &std::path::Path,
+    session_id: &str,
+    is_selfdev: bool,
+) -> ProcessCommand {
+    let mut command = ProcessCommand::new(exe);
+    command.env_remove("JCODE_RELOAD_RECOVERY_SESSION");
+    if is_selfdev {
+        command.arg("self-dev");
+    }
+    command.arg("--resume").arg(session_id).current_dir(cwd);
+    command
+}
+
+fn reload_command(
+    exe: &std::path::Path,
+    cwd: &std::path::Path,
+    session_id: &str,
+    recovery_session: Option<&str>,
+    is_selfdev: bool,
+) -> ProcessCommand {
+    let mut command = ProcessCommand::new(exe);
+    if is_selfdev {
+        command.arg("self-dev");
+    }
+    command
+        .arg("--resume")
+        .arg(session_id)
+        // The server has already completed its handoff before the client
+        // re-execs. Let the replacement client paint and accept input from
+        // its startup stub immediately; the authoritative History payload
+        // will repopulate the transcript after reconnect.
+        .env("JCODE_RELOAD_FAST_START", "1")
+        .current_dir(cwd);
+    configure_reload_recovery_env(&mut command, session_id, recovery_session);
+    command
+}
+
+fn migration_reload_command(
+    exe: &std::path::Path,
+    cwd: &std::path::Path,
+    session_id: &str,
+    recovery_session: Option<&str>,
+) -> ProcessCommand {
+    let mut command = ProcessCommand::new(exe);
+    command
+        .arg("--resume")
+        .arg(session_id)
+        .arg("--no-update")
+        .env_remove("JCODE_MIGRATE_BINARY")
+        .current_dir(cwd);
+    configure_reload_recovery_env(&mut command, session_id, recovery_session);
+    command
+}
+
+fn update_command(
+    exe: &std::path::Path,
+    cwd: &std::path::Path,
+    session_id: &str,
+    is_selfdev: bool,
+) -> ProcessCommand {
+    let mut command = restart_command(exe, cwd, session_id, is_selfdev);
+    command.arg("--no-update");
+    command
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -265,6 +294,81 @@ mod tests {
                 envs.get(std::ffi::OsStr::new("JCODE_RELOAD_RECOVERY_SESSION")),
                 Some(&expected.map(std::ffi::OsStr::new)),
                 "recovery={recovery:?}"
+            );
+        }
+    }
+
+    fn recovery_env(command: &ProcessCommand) -> Option<Option<&std::ffi::OsStr>> {
+        command
+            .get_envs()
+            .find(|(key, _)| *key == std::ffi::OsStr::new("JCODE_RELOAD_RECOVERY_SESSION"))
+            .map(|(_, value)| value)
+    }
+
+    #[test]
+    fn q2_reload_command_builders_scope_recovery_for_normal_retry_and_migration() {
+        let cwd = std::path::Path::new("/workspace");
+        for recovery in [Some("session-a"), Some("session-b"), Some(""), None] {
+            for command in [
+                reload_command(
+                    std::path::Path::new("jcode"),
+                    cwd,
+                    "session-a",
+                    recovery,
+                    false,
+                ),
+                reload_command(
+                    std::path::Path::new("jcode"),
+                    cwd,
+                    "session-a",
+                    recovery,
+                    false,
+                ),
+                migration_reload_command(
+                    std::path::Path::new("stable-jcode"),
+                    cwd,
+                    "session-a",
+                    recovery,
+                ),
+            ] {
+                assert_eq!(
+                    recovery_env(&command),
+                    Some(
+                        recovery
+                            .filter(|value| !value.is_empty() && *value == "session-a")
+                            .map(std::ffi::OsStr::new)
+                    ),
+                    "recovery={recovery:?}, args={:?}",
+                    command.get_args().collect::<Vec<_>>()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn q2_restart_and_update_command_builders_remove_inherited_recovery() {
+        let cwd = std::path::Path::new("/workspace");
+        let restart = restart_command(std::path::Path::new("jcode"), cwd, "session-a", false);
+        assert_eq!(recovery_env(&restart), Some(None));
+        for command in [
+            update_command(
+                std::path::Path::new("installed-jcode"),
+                cwd,
+                "session-a",
+                false,
+            ),
+            update_command(
+                std::path::Path::new("current-jcode"),
+                cwd,
+                "session-a",
+                false,
+            ),
+        ] {
+            assert_eq!(recovery_env(&command), Some(None));
+            assert!(
+                command
+                    .get_args()
+                    .any(|arg| arg == std::ffi::OsStr::new("--no-update"))
             );
         }
     }

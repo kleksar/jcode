@@ -752,17 +752,7 @@ impl App {
 
         self.extract_session_memories().await;
 
-        let reload_target = self.reload_requested.clone();
-        let reload_recovery_session = self.take_reload_recovery_handoff(reload_target.as_deref());
-        Ok(RunResult {
-            reload_recovery_session,
-            reload_session: self.reload_requested.take(),
-            rebuild_session: self.rebuild_requested.take(),
-            update_session: self.update_requested.take(),
-            restart_session: self.restart_requested.take(),
-            exit_code: self.requested_exit_code,
-            session_id: Some(self.session.id.clone()),
-        })
+        Ok(self.take_run_result())
     }
 
     /// Run the TUI in remote mode, connecting to a server
@@ -989,9 +979,14 @@ impl App {
             }
         }
 
+        Ok(self.take_run_result())
+    }
+
+    /// Assemble the one-shot action result shared by local and remote run loops.
+    pub(super) fn take_run_result(&mut self) -> RunResult {
         let reload_target = self.reload_requested.clone();
         let reload_recovery_session = self.take_reload_recovery_handoff(reload_target.as_deref());
-        Ok(RunResult {
+        RunResult {
             reload_recovery_session,
             reload_session: self.reload_requested.take(),
             rebuild_session: self.rebuild_requested.take(),
@@ -1003,7 +998,7 @@ impl App {
             } else {
                 Some(self.session.id.clone())
             },
-        })
+        }
     }
 
     /// Run the TUI in replay mode, playing back a timeline of events.

@@ -1673,6 +1673,56 @@ fn explicit_remote_server_reload_arms_exact_session_and_write_failure_restores_p
 }
 
 #[test]
+fn q2_client_reload_transports_existing_authority_without_minting_it() {
+    use crossterm::event::{KeyCode, KeyModifiers};
+
+    let _lock = crate::storage::lock_test_env();
+    let _env = ResumeAuthorityEnv::new();
+    tokio::runtime::Runtime::new().unwrap().block_on(async {
+        let (mut app, _) = resume_authority_app("A");
+        let mut remote = crate::tui::backend::RemoteConnection::dummy();
+        app.input = "/client-reload".into();
+        app.handle_remote_key(KeyCode::Enter, KeyModifiers::NONE, &mut remote)
+            .await
+            .unwrap();
+        assert_eq!(app.reload_requested.as_deref(), Some("A"));
+        assert!(!app.reload_recovery_is_authorized("A"));
+
+        let (mut app, _) = resume_authority_app("A");
+        app.authorize_reload_recovery("B");
+        app.input = "/client-reload".into();
+        app.handle_remote_key(KeyCode::Enter, KeyModifiers::NONE, &mut remote)
+            .await
+            .unwrap();
+        assert!(app.reload_recovery_is_authorized("B"));
+        assert!(!app.reload_recovery_is_authorized("A"));
+    });
+}
+
+#[test]
+fn q2_actual_local_reload_producer_arms_the_active_session() {
+    let _lock = crate::storage::lock_test_env();
+    let _env = ResumeAuthorityEnv::new();
+    let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let provider: Arc<dyn Provider> = Arc::new(ResumeAuthorityProvider(calls));
+    let session = crate::session::Session::create_with_id("local-reload".into(), None, None);
+    let mut app = crate::tui::app::App::new_minimal_with_session(
+        provider,
+        crate::tool::Registry::empty(),
+        session,
+    );
+    // The actual local `/reload` producer gates on a newer candidate. Its sole
+    // dependency is a candidate mtime newer than startup, so force the startup
+    // baseline to the epoch while using the configured current/stable candidate.
+    app.client_binary_mtime = Some(std::time::SystemTime::UNIX_EPOCH);
+    assert!(super::super::tui_lifecycle_runtime::handle_dev_command(
+        &mut app, "/reload"
+    ));
+    assert_eq!(app.reload_requested.as_deref(), Some("local-reload"));
+    assert!(app.reload_recovery_is_authorized("local-reload"));
+}
+
+#[test]
 fn live_reloading_arms_only_active_turn_once() {
     let _lock = crate::storage::lock_test_env();
     let _env = ResumeAuthorityEnv::new();
@@ -1985,12 +2035,22 @@ fn resume_authority_reexec_handoff_is_one_shot_and_session_scoped() {
     let _env = ResumeAuthorityEnv::new();
     tokio::runtime::Runtime::new().unwrap().block_on(async {
         let (mut producer, _) = resume_authority_app("A");
-        producer.authorize_reload_recovery("A");
-        assert!(producer.take_reload_recovery_handoff(Some("B")).is_none());
-        assert!(!producer.reload_recovery_is_authorized("A"));
-        producer.authorize_reload_recovery("A");
-        let handoff = producer.take_reload_recovery_handoff(Some("A")).unwrap();
-        assert!(producer.take_reload_recovery_handoff(Some("A")).is_none());
+        let mut producer_remote = crate::tui::backend::RemoteConnection::dummy();
+        producer.input = "/server-reload".into();
+        producer
+            .handle_remote_key(
+                crossterm::event::KeyCode::Enter,
+                crossterm::event::KeyModifiers::NONE,
+                &mut producer_remote,
+            )
+            .await
+            .unwrap();
+        // The server-reload producer owns consent. The matching client target is
+        // supplied by the transport seam before the shared action-result return.
+        producer.reload_requested = Some("A".into());
+        let result = producer.take_run_result();
+        let handoff = result.reload_recovery_session.unwrap();
+        assert_eq!(result.reload_session.as_deref(), Some("A"));
         crate::env::set_var("JCODE_RELOAD_RECOVERY_SESSION", &handoff);
         crate::env::set_var("JCODE_RELOAD_FAST_START", "1");
         let (mut app, _) = resume_authority_app("A");
