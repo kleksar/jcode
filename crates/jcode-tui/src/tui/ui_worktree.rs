@@ -383,12 +383,9 @@ pub(super) fn snapshot_for_project_tree(
 pub(super) fn snapshot_for_worktree(
     working_dir: Option<&str>,
 ) -> Option<Arc<WorktreeChangesSnapshot>> {
-    let path = PathBuf::from(working_dir?);
-    let path = path.canonicalize().unwrap_or(path);
-    worktree_cache()
-        .lock()
-        .ok()?
-        .get(&path)
+    let working_dir = working_dir?.trim();
+    let cache = worktree_cache().lock().ok()?;
+    cached_worktree_entry(&cache, working_dir)
         .and_then(|entry| entry.snapshot.clone())
         .filter(|snapshot| !snapshot.is_empty())
 }
