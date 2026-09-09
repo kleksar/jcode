@@ -204,6 +204,7 @@ fn test_initial_history_bootstrap_skips_resubmit_when_prompt_already_in_history(
         app.save_input_for_reload(session_id);
 
         let mut restored = App::new_for_remote(Some(session_id.to_string()));
+        restored.authorize_reload_recovery(session_id);
         assert!(restored.submit_input_on_startup);
         assert_eq!(restored.input, "continue implementing the fix");
 

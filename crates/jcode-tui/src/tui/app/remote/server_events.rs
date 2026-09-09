@@ -1608,6 +1608,14 @@ pub(in crate::tui::app) fn handle_server_event(
             false
         }
         ServerEvent::SessionId { session_id } => {
+            if app
+                .remote_session_id
+                .as_deref()
+                .is_some_and(|previous| previous != session_id)
+                && !app.reload_recovery_is_authorized(&session_id)
+            {
+                app.reload_recovery_authorized_session = None;
+            }
             remote.set_session_id(session_id.clone());
             app.remote_session_id = Some(session_id.clone());
             crate::set_current_session(&session_id);
@@ -1822,6 +1830,11 @@ pub(in crate::tui::app) fn handle_server_event(
             let session_changed = prev_session_id.as_deref() != Some(session_id.as_str());
 
             if session_changed {
+                // Bootstrap History may be unrelated to the expected resume. Only
+                // an established session switch invalidates an old scope.
+                if prev_session_id.is_some() && !app.reload_recovery_is_authorized(&session_id) {
+                    app.reload_recovery_authorized_session = None;
+                }
                 app.rate_limit_pending_message = None;
                 app.rate_limit_reset = None;
                 app.connection_type = None;
@@ -2230,37 +2243,7 @@ pub(in crate::tui::app) fn handle_server_event(
             if let Some(reload_recovery) = reload_recovery
                 && !app.display_messages.is_empty()
             {
-                let continuation_message = reload_recovery.continuation_message;
-                crate::logging::info(&format!(
-                    "History payload requested reload recovery continuation: session={} was_interrupted={:?}",
-                    session_id, was_interrupted
-                ));
-                if let Some(notice) = reload_recovery.reconnect_notice
-                    && !app.reload_info.iter().any(|existing| existing == &notice)
-                {
-                    app.reload_info.push(notice);
-                }
-                let already_queued = app
-                    .hidden_queued_system_messages
-                    .iter()
-                    .any(|queued| queued == &continuation_message)
-                    || app
-                        .rate_limit_pending_message
-                        .as_ref()
-                        .and_then(|pending| pending.system_reminder.as_ref())
-                        .is_some_and(|queued| queued == &continuation_message);
-                if already_queued {
-                    crate::logging::info(&format!(
-                        "History payload reload recovery continuation already queued/in-flight: session={}",
-                        session_id
-                    ));
-                } else {
-                    app.push_display_message(DisplayMessage::system(
-                        "Reload complete - continuing because a recovery directive was pending."
-                            .to_string(),
-                    ));
-                    app.hidden_queued_system_messages.push(continuation_message);
-                }
+                app.admit_reload_recovery(&session_id, reload_recovery);
             } else if pending_reload_reconnect_status.is_some() {
                 let message = match was_interrupted {
                     Some(false) => {

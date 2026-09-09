@@ -125,6 +125,7 @@ fn test_reload_handoff_active_when_socket_ready_marker_present() {
 #[test]
 fn test_handle_server_event_history_with_interruption_queues_continuation() {
     let mut app = create_test_app();
+    app.authorize_reload_recovery("ses_test_123");
     let rt = tokio::runtime::Runtime::new().unwrap();
     let _guard = rt.enter();
     let mut remote = crate::tui::backend::RemoteConnection::dummy();
@@ -199,6 +200,7 @@ fn test_handle_server_event_history_with_interruption_queues_continuation() {
 #[test]
 fn test_handle_server_event_history_uses_server_owned_reload_recovery_directive() {
     let mut app = create_test_app();
+    app.authorize_reload_recovery("ses_server_owned_reload");
     let rt = tokio::runtime::Runtime::new().unwrap();
     let _guard = rt.enter();
     let mut remote = crate::tui::backend::RemoteConnection::dummy();
@@ -503,6 +505,7 @@ fn test_finalize_reload_reconnect_mentions_persisted_background_task() {
         false,
     ));
 
+    app.authorize_reload_recovery(&session_id);
     remote::finalize_reload_reconnect(
         &mut app,
         Some(session_id.as_str()),
@@ -549,6 +552,7 @@ fn test_finalize_reload_reconnect_is_session_scoped_across_reconnect_order() {
     ctx_a.save().expect("save reload context a");
     ctx_b.save().expect("save reload context b");
 
+    app_b.authorize_reload_recovery(&session_b);
     remote::finalize_reload_reconnect(
         &mut app_b,
         Some(session_b.as_str()),
@@ -574,6 +578,7 @@ fn test_finalize_reload_reconnect_is_session_scoped_across_reconnect_order() {
         "session B context should be consumed by its own reconnect"
     );
 
+    app_a.authorize_reload_recovery(&session_a);
     remote::finalize_reload_reconnect(
         &mut app_a,
         Some(session_a.as_str()),
@@ -611,6 +616,7 @@ fn test_finalize_reload_reconnect_supports_repeated_reload_cycles_for_same_sessi
         };
         reload_ctx.save().expect("save loop reload context");
 
+        app.authorize_reload_recovery(&session_id);
         remote::finalize_reload_reconnect(
             &mut app,
             Some(session_id.as_str()),

@@ -752,7 +752,10 @@ impl App {
 
         self.extract_session_memories().await;
 
+        let reload_target = self.reload_requested.clone();
+        let reload_recovery_session = self.take_reload_recovery_handoff(reload_target.as_deref());
         Ok(RunResult {
+            reload_recovery_session,
             reload_session: self.reload_requested.take(),
             rebuild_session: self.rebuild_requested.take(),
             update_session: self.update_requested.take(),
@@ -986,7 +989,10 @@ impl App {
             }
         }
 
+        let reload_target = self.reload_requested.clone();
+        let reload_recovery_session = self.take_reload_recovery_handoff(reload_target.as_deref());
         Ok(RunResult {
+            reload_recovery_session,
             reload_session: self.reload_requested.take(),
             rebuild_session: self.rebuild_requested.take(),
             update_session: self.update_requested.take(),

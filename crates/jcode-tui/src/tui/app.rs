@@ -87,6 +87,7 @@ mod onboarding_repair;
 mod onboarding_sim;
 mod productivity;
 mod prompt_history;
+mod reload_recovery_authority;
 mod remote;
 mod remote_notifications;
 mod replay;
@@ -568,6 +569,8 @@ impl CopyBadgeUiState {
 pub struct RunResult {
     /// Session ID to reload (hot-reload, no rebuild)
     pub reload_session: Option<String>,
+    /// One-shot recovery authorization for the exact hot-reload target.
+    pub reload_recovery_session: Option<String>,
     /// Session ID to rebuild (full git pull + cargo build + tests)
     pub rebuild_session: Option<String>,
     /// Session ID to update (download from GitHub releases and reload)
@@ -1075,6 +1078,7 @@ pub struct App {
     turn_reasoning_traces: Vec<TurnReasoningTrace>,
     // Hot-reload: if set, exec into new binary with this session ID (no rebuild)
     reload_requested: Option<String>,
+    reload_recovery_authorized_session: Option<String>,
     // Hot-rebuild: if set, do full git pull + cargo build + tests then exec
     rebuild_requested: Option<String>,
     // Update: if set, check for and download update from GitHub releases then exec

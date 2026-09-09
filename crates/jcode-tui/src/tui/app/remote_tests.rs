@@ -1117,6 +1117,7 @@ fn handle_post_connect_dispatches_reload_followup_even_if_history_snapshot_looks
     let mut app = crate::tui::app::App::new_for_remote(Some(session_id.to_string()));
     app.queue_mode = false;
     app.diff_mode = crate::config::DiffDisplayMode::Inline;
+    app.authorize_reload_recovery(session_id);
     app.is_processing = true;
     app.status = crate::tui::app::ProcessingStatus::RunningTool("batch".to_string());
     app.processing_started = Some(std::time::Instant::now());
@@ -1513,4 +1514,725 @@ fn remote_submit_input_never_strands_a_local_pending_turn() {
         vec!["plain prompt".to_string()],
         "the prompt should be queued for the remote tick loop"
     );
+}
+
+// Public-wire admission regression fixtures. Dummy uses an isolated socket pair.
+fn resume_authority_history(
+    session_id: &str,
+    directive: bool,
+    interrupted: Option<bool>,
+) -> ServerEvent {
+    crate::protocol::ServerEvent::History {
+        id: 1,
+        session_id: session_id.to_string(),
+        messages: vec![crate::protocol::HistoryMessage {
+            role: "assistant".to_string(),
+            content: "Reconnect me from server history".to_string(),
+            tool_calls: None,
+            tool_data: None,
+        }],
+        images: vec![],
+        provider_name: Some("claude".to_string()),
+        provider_model: Some("claude-sonnet-4-20250514".to_string()),
+        subagent_model: None,
+        autoreview_enabled: None,
+        autojudge_enabled: None,
+        available_models: vec![],
+        available_model_routes: vec![],
+        mcp_servers: vec![],
+        skills: vec![],
+        total_tokens: None,
+        token_usage_totals: None,
+        all_sessions: vec![],
+        client_count: None,
+        is_canary: None,
+        server_version: None,
+        server_name: None,
+        server_icon: None,
+        server_has_update: None,
+        was_interrupted: interrupted,
+        reload_recovery: directive.then(|| crate::protocol::ReloadRecoverySnapshot {
+            reconnect_notice: Some("Reloaded with build srv1234".to_string()),
+            continuation_message: "Server-owned reload continuation".to_string(),
+        }),
+        connection_type: Some("websocket".to_string()),
+        status_detail: None,
+        upstream_provider: None,
+        resolved_credential: None,
+        reasoning_effort: None,
+        service_tier: None,
+        compaction_mode: crate::config::CompactionMode::Reactive,
+        activity: None,
+        side_panel: crate::side_panel::SidePanelSnapshot::default(),
+    }
+}
+
+async fn resume_authority_drain(
+    peer: &mut tokio::net::UnixStream,
+) -> Vec<crate::protocol::Request> {
+    use tokio::io::AsyncReadExt;
+    let mut bytes = Vec::new();
+    let mut buf = [0; 16384];
+    while let Ok(Ok(n)) =
+        tokio::time::timeout(std::time::Duration::from_millis(20), peer.read(&mut buf)).await
+    {
+        if n == 0 {
+            break;
+        }
+        bytes.extend_from_slice(&buf[..n]);
+    }
+    String::from_utf8(bytes)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect()
+}
+
+fn resume_authority_turns(requests: &[crate::protocol::Request]) -> usize {
+    requests
+        .iter()
+        .filter(|r| {
+            matches!(
+                r,
+                crate::protocol::Request::Message { .. }
+                    | crate::protocol::Request::SoftInterrupt { .. }
+                    | crate::protocol::Request::ResumeAllSessions { .. }
+            )
+        })
+        .count()
+}
+
+#[test]
+fn resume_authority_passive_history_directive_is_display_only() {
+    resume_authority_passive_history(true, None);
+}
+
+#[test]
+fn resume_authority_passive_legacy_interruption_is_display_only() {
+    for interrupted in [Some(true), Some(false), None] {
+        resume_authority_passive_history(false, interrupted);
+    }
+}
+
+fn resume_authority_passive_history(directive: bool, interrupted: Option<bool>) {
+    let _env = crate::storage::lock_test_env();
+    let _env = ResumeAuthorityEnv::new();
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let requests = rt.block_on(async {
+        let (mut app, calls) = resume_authority_app("passive");
+        let mut remote = crate::tui::backend::RemoteConnection::dummy();
+        let mut peer = remote.take_dummy_peer().unwrap();
+        handle_server_event(
+            &mut app,
+            resume_authority_history("passive", directive, interrupted),
+            &mut remote,
+        );
+        assert!(
+            app.display_messages()
+                .iter()
+                .any(|m| m.content == "Reconnect me from server history")
+        );
+        handle_tick(&mut app, &mut remote).await;
+        process_remote_followups(&mut app, &mut remote).await;
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+        resume_authority_drain(&mut peer).await
+    });
+    assert_eq!(
+        resume_authority_turns(&requests),
+        0,
+        "passive History originated a turn: {requests:?}"
+    );
+}
+
+/// Restore every process input even if an assertion panics.
+struct ResumeAuthorityEnv {
+    _home: tempfile::TempDir,
+    previous: Vec<(&'static str, Option<std::ffi::OsString>)>,
+}
+impl ResumeAuthorityEnv {
+    fn new() -> Self {
+        let home = tempfile::TempDir::new().unwrap();
+        let previous = [
+            "JCODE_HOME",
+            "JCODE_RUNTIME_DIR",
+            "JCODE_RELOAD_RECOVERY_SESSION",
+            "JCODE_RELOAD_FAST_START",
+            "JCODE_SSH_REMOTE",
+        ]
+        .into_iter()
+        .map(|key| (key, std::env::var_os(key)))
+        .collect();
+        crate::env::set_var("JCODE_HOME", home.path());
+        crate::env::set_var("JCODE_RUNTIME_DIR", home.path());
+        crate::env::remove_var("JCODE_RELOAD_RECOVERY_SESSION");
+        crate::env::remove_var("JCODE_RELOAD_FAST_START");
+        crate::env::remove_var("JCODE_SSH_REMOTE");
+        Self {
+            _home: home,
+            previous,
+        }
+    }
+}
+impl Drop for ResumeAuthorityEnv {
+    fn drop(&mut self) {
+        for (key, value) in &self.previous {
+            if let Some(value) = value {
+                crate::env::set_var(key, value);
+            } else {
+                crate::env::remove_var(key);
+            }
+        }
+    }
+}
+
+struct ResumeAuthorityProvider(Arc<std::sync::atomic::AtomicUsize>);
+#[async_trait::async_trait]
+impl Provider for ResumeAuthorityProvider {
+    async fn complete(
+        &self,
+        _: &[crate::message::Message],
+        _: &[crate::message::ToolDefinition],
+        _: &str,
+        _: Option<&str>,
+    ) -> Result<crate::provider::EventStream> {
+        self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Err(anyhow::anyhow!(
+            "isolated counting provider: unexpected completion"
+        ))
+    }
+    fn name(&self) -> &str {
+        "mock"
+    }
+    fn fork(&self) -> Arc<dyn Provider> {
+        Arc::new(Self(self.0.clone()))
+    }
+}
+
+fn resume_authority_app(
+    session: &str,
+) -> (crate::tui::app::App, Arc<std::sync::atomic::AtomicUsize>) {
+    let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let mut app = crate::tui::app::App::new_for_remote(Some(session.into()));
+    app.provider = Arc::new(ResumeAuthorityProvider(calls.clone()));
+    app.auto_server_reload = false;
+    (app, calls)
+}
+
+async fn resume_authority_dispatch(
+    app: &mut crate::tui::app::App,
+    remote: &mut crate::tui::backend::RemoteConnection,
+) {
+    handle_tick(app, remote).await;
+    process_remote_followups(app, remote).await;
+    let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 24)).unwrap();
+    terminal
+        .draw(|frame| crate::tui::ui::draw(frame, app))
+        .unwrap();
+}
+
+fn resume_authority_context(session: &str) -> crate::tool::selfdev::ReloadContext {
+    let ctx = crate::tool::selfdev::ReloadContext {
+        task_context: Some("intentional reload work".into()),
+        version_before: "old".into(),
+        version_after: "new".into(),
+        session_id: session.into(),
+        timestamp: chrono::Utc::now().to_rfc3339(),
+    };
+    ctx.save().unwrap();
+    ctx
+}
+
+#[test]
+fn resume_authority_duplicate_history_after_done_does_not_rearm() {
+    let _lock = crate::storage::lock_test_env();
+    let _env = ResumeAuthorityEnv::new();
+    tokio::runtime::Runtime::new().unwrap().block_on(async {
+        for directive in [true, false] {
+            let (mut app, calls) = resume_authority_app("A");
+            app.authorize_reload_recovery("A");
+            let mut remote = crate::tui::backend::RemoteConnection::dummy();
+            let mut peer = remote.take_dummy_peer().unwrap();
+            let history = resume_authority_history("A", directive, Some(true));
+            handle_server_event(&mut app, history.clone(), &mut remote);
+            resume_authority_dispatch(&mut app, &mut remote).await;
+            let first = resume_authority_drain(&mut peer).await;
+            assert_eq!(resume_authority_turns(&first), 1, "{first:?}");
+            assert_eq!(remote.session_id(), Some("A"));
+            let id = app.current_message_id.unwrap();
+            handle_server_event(&mut app, ServerEvent::Done { id }, &mut remote);
+            handle_server_event(&mut app, history, &mut remote);
+            resume_authority_dispatch(&mut app, &mut remote).await;
+            assert_eq!(
+                resume_authority_turns(&resume_authority_drain(&mut peer).await),
+                0
+            );
+            assert!(!app.reload_recovery_is_authorized("A"));
+            assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+        }
+    });
+}
+
+#[test]
+fn resume_authority_wrong_session_history_cannot_spend_token() {
+    let _lock = crate::storage::lock_test_env();
+    let _env = ResumeAuthorityEnv::new();
+    tokio::runtime::Runtime::new().unwrap().block_on(async {
+        let (mut app, _) = resume_authority_app("A");
+        app.authorize_reload_recovery("A");
+        let mut remote = crate::tui::backend::RemoteConnection::dummy();
+        let mut peer = remote.take_dummy_peer().unwrap();
+        handle_server_event(
+            &mut app,
+            resume_authority_history("B", true, None),
+            &mut remote,
+        );
+        resume_authority_dispatch(&mut app, &mut remote).await;
+        assert_eq!(
+            resume_authority_turns(&resume_authority_drain(&mut peer).await),
+            0
+        );
+        assert!(app.reload_recovery_is_authorized("A"));
+        handle_server_event(
+            &mut app,
+            resume_authority_history("A", true, None),
+            &mut remote,
+        );
+        resume_authority_dispatch(&mut app, &mut remote).await;
+        assert_eq!(
+            resume_authority_turns(&resume_authority_drain(&mut peer).await),
+            1
+        );
+        app.authorize_reload_recovery("A");
+        handle_server_event(
+            &mut app,
+            ServerEvent::SessionId {
+                session_id: "B".into(),
+            },
+            &mut remote,
+        );
+        assert!(!app.reload_recovery_is_authorized("A"));
+    });
+}
+
+#[test]
+fn resume_authority_passive_stale_local_context_is_display_only() {
+    let _lock = crate::storage::lock_test_env();
+    let _env = ResumeAuthorityEnv::new();
+    tokio::runtime::Runtime::new().unwrap().block_on(async {
+        for loaded in [false, true] {
+            for marker in [false, true] {
+                for reconnect in [false, true] {
+                    let ctx = resume_authority_context("passive-context");
+                    let (mut app, calls) = resume_authority_app("passive-context");
+                    let mut remote = crate::tui::backend::RemoteConnection::dummy();
+                    let mut peer = remote.take_dummy_peer().unwrap();
+                    if loaded {
+                        handle_server_event(
+                            &mut app,
+                            resume_authority_history("passive-context", true, Some(true)),
+                            &mut remote,
+                        );
+                    }
+                    app.is_processing = true;
+                    app.status = crate::tui::app::ProcessingStatus::RunningTool("existing".into());
+                    app.remote_resume_activity = Some(crate::tui::app::RemoteResumeActivity {
+                        session_id: "passive-context".into(),
+                        observed_at: std::time::Instant::now(),
+                        current_tool_name: Some("existing".into()),
+                    });
+                    reconnect::finalize_reload_reconnect(
+                        &mut app,
+                        Some("passive-context"),
+                        reconnect::ReloadReconnectHints {
+                            reload_ctx_for_session: Some(ctx),
+                            has_client_reload_marker: marker,
+                        },
+                        reconnect,
+                    );
+                    if marker {
+                        std::fs::write(
+                            crate::storage::jcode_dir()
+                                .unwrap()
+                                .join("client-reload-pending-passive-context"),
+                            "stale visual marker",
+                        )
+                        .unwrap();
+                    }
+                    let mut terminal =
+                        ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 24)).unwrap();
+                    let mut state = RemoteRunState {
+                        reconnect_attempts: usize::from(reconnect) as u32,
+                        ..Default::default()
+                    };
+                    let outcome = handle_post_connect(
+                        &mut app,
+                        &mut terminal,
+                        &mut remote,
+                        &mut state,
+                        Some("passive-context"),
+                    )
+                    .await
+                    .unwrap();
+                    assert!(matches!(outcome, super::PostConnectOutcome::Ready));
+                    assert!(app.is_processing);
+                    assert!(app.remote_resume_activity.is_some());
+                    assert!(
+                        crate::tool::selfdev::ReloadContext::peek_for_session("passive-context")
+                            .unwrap()
+                            .is_some()
+                    );
+                    resume_authority_dispatch(&mut app, &mut remote).await;
+                    assert_eq!(
+                        resume_authority_turns(&resume_authority_drain(&mut peer).await),
+                        0
+                    );
+                    // Existing work finishes. A hidden continuation must not spring to life.
+                    app.is_processing = false;
+                    app.remote_resume_activity = None;
+                    remote.mark_history_loaded();
+                    resume_authority_dispatch(&mut app, &mut remote).await;
+                    assert_eq!(
+                        resume_authority_turns(&resume_authority_drain(&mut peer).await),
+                        0
+                    );
+                    assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+                }
+            }
+        }
+    });
+}
+
+#[test]
+fn resume_authority_reexec_handoff_is_one_shot_and_session_scoped() {
+    let _lock = crate::storage::lock_test_env();
+    let _env = ResumeAuthorityEnv::new();
+    tokio::runtime::Runtime::new().unwrap().block_on(async {
+        let (mut producer, _) = resume_authority_app("A");
+        producer.authorize_reload_recovery("A");
+        assert!(producer.take_reload_recovery_handoff(Some("B")).is_none());
+        assert!(!producer.reload_recovery_is_authorized("A"));
+        producer.authorize_reload_recovery("A");
+        let handoff = producer.take_reload_recovery_handoff(Some("A")).unwrap();
+        assert!(producer.take_reload_recovery_handoff(Some("A")).is_none());
+        crate::env::set_var("JCODE_RELOAD_RECOVERY_SESSION", &handoff);
+        crate::env::set_var("JCODE_RELOAD_FAST_START", "1");
+        let (mut app, _) = resume_authority_app("A");
+        assert!(app.reload_recovery_is_authorized("A"));
+        assert!(std::env::var_os("JCODE_RELOAD_RECOVERY_SESSION").is_none());
+        let (second, _) = resume_authority_app("A");
+        assert!(!second.reload_recovery_is_authorized("A"));
+        let mut remote = crate::tui::backend::RemoteConnection::dummy();
+        let mut peer = remote.take_dummy_peer().unwrap();
+        handle_server_event(
+            &mut app,
+            resume_authority_history("A", true, None),
+            &mut remote,
+        );
+        resume_authority_dispatch(&mut app, &mut remote).await;
+        assert_eq!(
+            resume_authority_turns(&resume_authority_drain(&mut peer).await),
+            1
+        );
+        crate::env::set_var("JCODE_RELOAD_RECOVERY_SESSION", &handoff);
+        let (other, _) = resume_authority_app("B");
+        assert!(!other.reload_recovery_is_authorized("A"));
+        assert!(!other.reload_recovery_is_authorized("B"));
+        assert!(std::env::var_os("JCODE_RELOAD_RECOVERY_SESSION").is_none());
+    });
+}
+
+#[test]
+fn resume_authority_ssh_discards_laptop_handoff_before_history() {
+    let _lock = crate::storage::lock_test_env();
+    let _env = ResumeAuthorityEnv::new();
+    tokio::runtime::Runtime::new().unwrap().block_on(async {
+        crate::env::set_var("JCODE_SSH_REMOTE", "isolated-host");
+        crate::env::set_var("JCODE_RELOAD_RECOVERY_SESSION", "A");
+        let (mut app, calls) = resume_authority_app("A");
+        assert!(!app.reload_recovery_is_authorized("A"));
+        assert!(std::env::var_os("JCODE_RELOAD_RECOVERY_SESSION").is_none());
+        let mut remote = crate::tui::backend::RemoteConnection::dummy();
+        let mut peer = remote.take_dummy_peer().unwrap();
+        handle_server_event(
+            &mut app,
+            resume_authority_history("A", true, Some(true)),
+            &mut remote,
+        );
+        resume_authority_dispatch(&mut app, &mut remote).await;
+        assert_eq!(
+            resume_authority_turns(&resume_authority_drain(&mut peer).await),
+            0
+        );
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+    });
+}
+
+#[test]
+fn resume_authority_local_restore_is_passive_unless_authorized() {
+    let _lock = crate::storage::lock_test_env();
+    let _env = ResumeAuthorityEnv::new();
+    tokio::runtime::Runtime::new().unwrap().block_on(async {
+        for authorized in [false, true] {
+            let mut session = crate::session::Session::create_with_id("local-A".into(), None, None);
+            session.add_message(
+                crate::message::Role::Assistant,
+                vec![crate::message::ContentBlock::Text {
+                    text: "persisted local transcript [generation interrupted - server reloading]"
+                        .into(),
+                    cache_control: None,
+                }],
+            );
+            session.save().unwrap();
+            resume_authority_context("local-A");
+            let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let provider: Arc<dyn Provider> = Arc::new(ResumeAuthorityProvider(calls.clone()));
+            let mut app = crate::tui::app::App::new_minimal_with_session(
+                provider,
+                crate::tool::Registry::empty(),
+                crate::session::Session::create(None, None),
+            );
+            if authorized {
+                app.authorize_reload_recovery("local-A");
+            }
+            app.restore_session("local-A");
+            assert!(
+                app.display_messages()
+                    .iter()
+                    .any(|m| m.content.contains("persisted local transcript"))
+            );
+            crate::tui::app::local::handle_tick(&mut app);
+            assert_eq!(app.pending_turn, authorized);
+            assert_eq!(
+                crate::tool::selfdev::ReloadContext::peek_for_session("local-A")
+                    .unwrap()
+                    .is_some(),
+                !authorized
+            );
+            assert!(!app.reload_recovery_is_authorized("local-A"));
+            assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+            // Exercise the same hidden followup payload through the real wire
+            // dispatcher without entering a user's terminal or real provider.
+            let mut remote = crate::tui::backend::RemoteConnection::dummy();
+            remote.mark_history_loaded();
+            let mut peer = remote.take_dummy_peer().unwrap();
+            resume_authority_dispatch(&mut app, &mut remote).await;
+            assert_eq!(
+                resume_authority_turns(&resume_authority_drain(&mut peer).await),
+                usize::from(authorized)
+            );
+        }
+    });
+}
+
+#[test]
+fn resume_authority_intentional_queued_prompts_survive_passive_attach() {
+    let _lock = crate::storage::lock_test_env();
+    let _env = ResumeAuthorityEnv::new();
+    tokio::runtime::Runtime::new().unwrap().block_on(async {
+        for kind in [
+            "queue",
+            "hidden",
+            "submit",
+            "draft",
+            "soft-interrupt",
+            "retry",
+        ] {
+            let (mut app, calls) = resume_authority_app("A");
+            match kind {
+                "queue" => app.queued_messages.push("intentional user prompt".into()),
+                "hidden" => app
+                    .hidden_queued_system_messages
+                    .push("intentional startup reminder".into()),
+                "soft-interrupt" => {
+                    app.pending_soft_interrupts
+                        .push("intentional user prompt".into());
+                    app.pending_soft_interrupt_requests
+                        .push((55, "intentional user prompt".into()));
+                }
+                "retry" => {
+                    app.rate_limit_pending_message = Some(crate::tui::app::PendingRemoteMessage {
+                        content: "intentional user prompt".into(),
+                        images: vec![],
+                        is_system: false,
+                        system_reminder: None,
+                        auto_retry: true,
+                        retry_attempts: 1,
+                        retry_at: None,
+                    });
+                    app.rate_limit_reset = Some(std::time::Instant::now());
+                }
+                _ => {
+                    app.input = "intentional composer text".into();
+                    app.submit_input_on_startup = kind == "submit";
+                }
+            }
+            if kind == "submit" {
+                crate::tui::app::App::save_startup_submission_for_session(
+                    "A",
+                    "intentional composer text".into(),
+                    vec![("image/png".into(), "aW1hZ2U=".into())],
+                );
+            } else {
+                app.save_input_for_reload("A");
+            }
+            let (mut app, restored_calls) = resume_authority_app("A");
+            // A scheduled retry belongs to the already attached session.
+            // Bootstrap retry migration is independent of recovery admission.
+            if kind == "retry" {
+                app.remote_session_id = Some("A".into());
+            }
+            let mut remote = crate::tui::backend::RemoteConnection::dummy();
+            let mut peer = remote.take_dummy_peer().unwrap();
+            handle_server_event(
+                &mut app,
+                resume_authority_history("A", true, Some(true)),
+                &mut remote,
+            );
+            resume_authority_dispatch(&mut app, &mut remote).await;
+            let requests = resume_authority_drain(&mut peer).await;
+            assert_eq!(
+                resume_authority_turns(&requests),
+                usize::from(kind != "draft"),
+                "{kind}: {requests:?}"
+            );
+            for request in requests {
+                if let crate::protocol::Request::Message {
+                    content,
+                    images,
+                    system_reminder,
+                    ..
+                } = request
+                {
+                    let expected = match kind {
+                        "queue" | "soft-interrupt" | "retry" => "intentional user prompt",
+                        "hidden" => "",
+                        _ => "intentional composer text",
+                    };
+                    assert_eq!(content, expected);
+                    assert_eq!(images.len(), usize::from(kind == "submit"));
+                    assert_eq!(
+                        system_reminder.as_deref(),
+                        (kind == "hidden").then_some("intentional startup reminder")
+                    );
+                }
+            }
+            assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+            assert_eq!(restored_calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+        }
+    });
+}
+
+#[test]
+fn resume_authority_send_failure_preserves_authorized_work() {
+    let _lock = crate::storage::lock_test_env();
+    let _env = ResumeAuthorityEnv::new();
+    tokio::runtime::Runtime::new().unwrap().block_on(async {
+        let (mut app, _) = resume_authority_app("A");
+        app.authorize_reload_recovery("A");
+        let mut broken = crate::tui::backend::RemoteConnection::dummy();
+        drop(broken.take_dummy_peer().unwrap());
+        handle_server_event(
+            &mut app,
+            resume_authority_history("A", true, None),
+            &mut broken,
+        );
+        resume_authority_dispatch(&mut app, &mut broken).await;
+        assert!(!app.reload_recovery_is_authorized("A"));
+        assert_eq!(
+            app.hidden_queued_system_messages,
+            ["Server-owned reload continuation"]
+        );
+        handle_server_event(
+            &mut app,
+            resume_authority_history("A", true, None),
+            &mut broken,
+        );
+        assert_eq!(
+            app.hidden_queued_system_messages,
+            ["Server-owned reload continuation"]
+        );
+        let mut retry = crate::tui::backend::RemoteConnection::dummy();
+        retry.mark_history_loaded();
+        let mut peer = retry.take_dummy_peer().unwrap();
+        resume_authority_dispatch(&mut app, &mut retry).await;
+        let frames = resume_authority_drain(&mut peer).await;
+        assert_eq!(resume_authority_turns(&frames), 1, "{frames:?}");
+    });
+}
+
+#[test]
+fn resume_authority_intentional_reload_consumer_order_recovers_once() {
+    let _lock = crate::storage::lock_test_env();
+    let _env = ResumeAuthorityEnv::new();
+    tokio::runtime::Runtime::new().unwrap().block_on(async {
+        for history_first in [false, true] {
+            let ctx = resume_authority_context("A");
+            let (mut app, _) = resume_authority_app("A");
+            app.authorize_reload_recovery("A");
+            let mut remote = crate::tui::backend::RemoteConnection::dummy();
+            let mut peer = remote.take_dummy_peer().unwrap();
+            let history = resume_authority_history("A", true, Some(true));
+            if history_first {
+                handle_server_event(&mut app, history.clone(), &mut remote);
+            }
+            reconnect::finalize_reload_reconnect(
+                &mut app,
+                Some("A"),
+                reconnect::ReloadReconnectHints {
+                    reload_ctx_for_session: Some(ctx.clone()),
+                    has_client_reload_marker: true,
+                },
+                true,
+            );
+            handle_server_event(&mut app, history.clone(), &mut remote);
+            resume_authority_dispatch(&mut app, &mut remote).await;
+            assert_eq!(
+                resume_authority_turns(&resume_authority_drain(&mut peer).await),
+                1
+            );
+            let id = app.current_message_id.unwrap();
+            handle_server_event(&mut app, ServerEvent::Done { id }, &mut remote);
+            reconnect::finalize_reload_reconnect(
+                &mut app,
+                Some("A"),
+                reconnect::ReloadReconnectHints {
+                    reload_ctx_for_session: Some(ctx),
+                    has_client_reload_marker: true,
+                },
+                true,
+            );
+            handle_server_event(&mut app, history, &mut remote);
+            resume_authority_dispatch(&mut app, &mut remote).await;
+            assert_eq!(
+                resume_authority_turns(&resume_authority_drain(&mut peer).await),
+                0
+            );
+        }
+    });
+}
+
+#[test]
+fn resume_authority_admission_rejects_without_mutation_and_deduplicates_pending() {
+    let _lock = crate::storage::lock_test_env();
+    let _env = ResumeAuthorityEnv::new();
+    let (mut app, _) = resume_authority_app("A");
+    let directive = crate::protocol::ReloadRecoverySnapshot {
+        reconnect_notice: Some("intentional notice".into()),
+        continuation_message: "pending reminder".into(),
+    };
+    app.authorize_reload_recovery("A");
+    app.hidden_queued_system_messages
+        .push("pending reminder".into());
+    app.is_processing = true;
+    assert!(!app.admit_reload_recovery("B", directive.clone()));
+    assert!(app.reload_recovery_is_authorized("A"));
+    assert!(app.reload_info.is_empty());
+    assert!(app.is_processing);
+    assert!(app.admit_reload_recovery("A", directive.clone()));
+    assert_eq!(app.hidden_queued_system_messages, ["pending reminder"]);
+    assert!(!app.admit_reload_recovery("A", directive));
+    assert!(app.is_processing);
+    app.authorize_reload_recovery("A");
+    assert!(app.take_reload_recovery_handoff(None).is_none());
+    assert!(!app.reload_recovery_is_authorized("A"));
 }

@@ -306,8 +306,18 @@ impl App {
         }
     }
 
-    /// Restore a previous session (for hot-reload)
+    /// Restore a previous session. Recovery requires explicit session authority.
     pub fn restore_session(&mut self, session_id: &str) {
+        let handoff =
+            super::reload_recovery_authority::take_reload_recovery_session_from_env(Some(session_id));
+        if !self.reload_recovery_is_authorized(session_id) {
+            self.reload_recovery_authorized_session = None;
+        }
+        if !crate::tui::is_ssh_remote()
+            && let Some(handoff) = handoff
+        {
+            self.authorize_reload_recovery(&handoff);
+        }
         if let Some(restored) = Self::restore_input_for_reload(session_id) {
             self.apply_restored_reload_input(restored);
         }
@@ -398,7 +408,7 @@ impl App {
                 .ok()
                 .flatten()
                 .is_some();
-            let message = format!("Reload complete - continuing.{}", stats);
+            let message = format!("Session restored.{}", stats);
 
             // Add success message with stats (only if there's actual content or a reload happened)
             if total_turns > 0 || has_reload_ctx {
@@ -410,6 +420,10 @@ impl App {
                     title: None,
                     tool_data: None,
                 });
+            }
+
+            if !self.reload_recovery_is_authorized(session_id) {
+                return;
             }
 
             // Queue an automatic message to notify the AI that reload completed
@@ -433,8 +447,7 @@ impl App {
                     directive.continuation_message.len()
                 ));
                 ReloadContext::log_recovery_outcome("local_restore", session_id, "resumed", detail);
-                self.hidden_queued_system_messages
-                    .push(directive.continuation_message);
+                self.admit_reload_recovery(session_id, directive);
                 // Trigger processing so the queued message gets sent to the LLM.
                 // Without this, the local event loop waits for user input since
                 // process_queued_messages only runs inside process_turn_with_input.
@@ -454,7 +467,9 @@ impl App {
             crate::logging::error(&format!("Failed to restore session: {}", session_id));
 
             // Check if this was a reload that failed - inject failure message if so
-            if let Ok(Some(ctx)) = ReloadContext::load_for_session(session_id) {
+            if self.reload_recovery_is_authorized(session_id)
+                && let Ok(Some(ctx)) = ReloadContext::load_for_session(session_id)
+            {
                 ReloadContext::log_recovery_outcome(
                     "local_restore",
                     session_id,

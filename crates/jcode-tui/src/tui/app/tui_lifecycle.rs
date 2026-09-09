@@ -490,6 +490,7 @@ impl App {
             reasoning_block_start: None,
             turn_reasoning_traces: Vec::new(),
             reload_requested: None,
+            reload_recovery_authorized_session: None,
             rebuild_requested: None,
             update_requested: None,
             background_client_action: None,
@@ -949,6 +950,7 @@ impl App {
             reasoning_block_start: None,
             turn_reasoning_traces: Vec::new(),
             reload_requested: None,
+            reload_recovery_authorized_session: None,
             rebuild_requested: None,
             update_requested: None,
             background_client_action: None,
@@ -1343,6 +1345,10 @@ impl App {
     }
 
     pub fn new_for_remote_with_options(resume_session: Option<String>, fresh_spawn: bool) -> Self {
+        let recovery_session =
+            super::reload_recovery_authority::take_reload_recovery_session_from_env(
+                resume_session.as_deref(),
+            );
         let provider: Arc<dyn Provider> =
             Arc::new(InertRuntimeProvider::new(AppRuntimeMode::RemoteClient));
         let registry = Registry::empty();
@@ -1352,6 +1358,11 @@ impl App {
             .and_then(|session_id| Session::load_startup_stub(session_id).ok())
             .unwrap_or_else(|| Session::create(None, None));
         let mut app = Self::new_minimal_with_session(provider, registry, session);
+        if !crate::tui::is_ssh_remote()
+            && let Some(session_id) = recovery_session.as_deref()
+        {
+            app.authorize_reload_recovery(session_id);
+        }
         app.is_remote = true;
         app.runtime_mode = AppRuntimeMode::RemoteClient;
         app.remote_startup_phase = Some(super::RemoteStartupPhase::Connecting);

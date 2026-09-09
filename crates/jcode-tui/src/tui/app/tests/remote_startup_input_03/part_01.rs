@@ -481,7 +481,7 @@ fn test_multiple_pastes() {
 }
 
 #[test]
-fn test_restore_session_adds_reload_message() {
+fn test_restore_session_adds_passive_restore_message() {
     use crate::session::Session;
 
     let mut app = create_test_app();
@@ -510,7 +510,7 @@ fn test_restore_session_adds_reload_message() {
     assert!(
         app.display_messages()[1]
             .content
-            .contains("Reload complete - continuing.")
+            .contains("Session restored.")
     );
 
     // Local restore keeps provider messages lazy until the next active turn.
@@ -545,6 +545,7 @@ fn test_restore_session_with_selfdev_reload_tool_result_queues_continuation() {
     let session_id = session.id.clone();
     session.save().unwrap();
 
+    app.authorize_reload_recovery(&session_id);
     app.restore_session(&session_id);
 
     assert!(

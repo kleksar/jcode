@@ -93,6 +93,7 @@ fn test_metadata_only_history_preserves_fast_restored_startup_state() {
 #[test]
 fn test_duplicate_history_for_same_session_is_ignored_after_fast_path_restore() {
     let mut app = create_test_app();
+    app.authorize_reload_recovery("ses_fast_path");
     let rt = tokio::runtime::Runtime::new().unwrap();
     let _guard = rt.enter();
     let mut remote = crate::tui::backend::RemoteConnection::dummy();

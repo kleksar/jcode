@@ -826,6 +826,13 @@ pub(in crate::tui::app) fn finalize_reload_reconnect(
     hints: ReloadReconnectHints,
     reconnected_after_disconnect: bool,
 ) {
+    // Context and markers describe state, never execution authority. In
+    // particular, do not consume context or reset resumed activity on attach.
+    if hints.reload_ctx_for_session.is_some()
+        && !session_to_resume.is_some_and(|sid| app.reload_recovery_is_authorized(sid))
+    {
+        return;
+    }
     let should_queue_reload_continuation = hints.reload_ctx_for_session.is_some();
     crate::logging::info(&format!(
         "Reload continuation check: should_queue={}, reload_info_empty={}, has_ctx={}, has_marker={}",
@@ -884,11 +891,7 @@ pub(in crate::tui::app) fn finalize_reload_reconnect(
                 "resumed",
                 "queued initiator continuation after reconnect",
             );
-            app.push_display_message(DisplayMessage::system(
-                "Reload complete - continuing because reload recovery was pending.",
-            ));
-            app.hidden_queued_system_messages
-                .push(directive.continuation_message);
+            app.admit_reload_recovery(session_id, directive);
         } else {
             ReloadContext::log_recovery_outcome(
                 "tui_reconnect",

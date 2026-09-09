@@ -82,6 +82,7 @@ pub(super) async fn run_replay(
 
     Ok(RunResult {
         reload_session: None,
+        reload_recovery_session: None,
         rebuild_session: None,
         update_session: None,
         restart_session: None,
