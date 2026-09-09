@@ -1205,6 +1205,43 @@ mod tests {
     }
 
     #[test]
+    fn footer_context_shows_compact_observed_usage_and_hides_zero_or_unavailable() {
+        let data = crate::tui::info_widget::InfoWidgetData {
+            context_limit: Some(114_000),
+            observed_context_tokens: Some(82_000),
+            ..Default::default()
+        };
+        let text = footer_context_spans(&data)
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect::<String>();
+        assert_eq!(text, "82k/114k");
+
+        let estimated = crate::tui::info_widget::InfoWidgetData {
+            context_info: Some(crate::prompt::ContextInfo {
+                total_chars: 328_000,
+                ..Default::default()
+            }),
+            context_limit: Some(114_000),
+            ..Default::default()
+        };
+        let estimated_text = footer_context_spans(&estimated)
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect::<String>();
+        assert_eq!(estimated_text, "82k/114k");
+
+        let zero = crate::tui::info_widget::InfoWidgetData {
+            context_limit: Some(114_000),
+            observed_context_tokens: Some(0),
+            ..Default::default()
+        };
+        assert!(footer_context_spans(&zero).is_empty());
+        assert!(
+            footer_context_spans(&crate::tui::info_widget::InfoWidgetData::default()).is_empty()
+        );
+    }
+    #[test]
     fn footer_quota_shows_only_remaining_seven_day_quota_and_reset() {
         let spans = footer_quota_spans(Some(crate::tui::FooterQuota {
             remaining_percent: 77,
@@ -2423,6 +2460,23 @@ fn footer_quota_spans(quota: Option<crate::tui::FooterQuota>) -> Vec<Span<'stati
     ]
 }
 
+fn footer_context_spans(data: &crate::tui::info_widget::InfoWidgetData) -> Vec<Span<'static>> {
+    let Some((used, limit)) = overscroll_context_usage(data) else {
+        return Vec::new();
+    };
+    if used == 0 || limit == 0 {
+        return Vec::new();
+    }
+    vec![Span::styled(
+        format!(
+            "{}/{}",
+            overscroll_format_tokens(used),
+            overscroll_format_tokens(limit)
+        ),
+        Style::default().fg(rgb(140, 140, 150)),
+    )]
+}
+
 fn footer_fact_spans(app: &dyn TuiState) -> Vec<Span<'static>> {
     let data = app.info_widget_data();
     let separator = || Span::styled("  │  ", Style::default().fg(rgb(72, 72, 82)));
@@ -2473,6 +2527,11 @@ fn footer_fact_spans(app: &dyn TuiState) -> Vec<Span<'static>> {
             ));
         }
         groups.push(model_spans);
+    }
+
+    let context = footer_context_spans(&data);
+    if !context.is_empty() {
+        groups.push(context);
     }
 
     let mut spans = Vec::new();
