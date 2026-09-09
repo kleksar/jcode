@@ -716,19 +716,6 @@ impl App {
             {
                 self.worktree_pane.tab = super::worktree_pane::WorktreePaneTab::Files;
             }
-        } else if focused_changed || focused_page_fell_back || session_changed {
-            self.prepare_worktree_pane_state();
-            let reset_focused_document_ui =
-                focused_is_new || focused_page_fell_back || session_changed;
-            if reset_focused_document_ui && let Some(id) = focused_after.as_deref() {
-                self.worktree_pane
-                    .document_ui
-                    .insert(id.to_string(), Default::default());
-            }
-            self.set_worktree_pane_tab(super::worktree_pane::WorktreePaneTab::Documents);
-            if !reset_focused_document_ui {
-                self.restore_focused_document_ui();
-            }
         }
         if focused_changed {
             match (focused_after.as_deref(), focused_title_after.as_deref()) {
