@@ -82,9 +82,7 @@ pub(crate) fn has_explicit_side_pane_content(app: &dyn TuiState) -> bool {
 /// Read only the cached snapshot. Input and ticks must never run git synchronously.
 pub(crate) fn worktree_file_is_present(working_dir: Option<&str>, path: &str) -> Option<bool> {
     let cache = worktree_cache().lock().ok()?;
-    let root = Path::new(working_dir?);
-    let root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
-    let entry = cache.get(&root)?;
+    let entry = cached_worktree_entry(&cache, working_dir?)?;
     let snapshot = entry.snapshot.as_ref()?;
     Some(snapshot.files.iter().any(|file| file.path == path))
 }
@@ -93,24 +91,10 @@ pub(crate) fn cached_worktree_paths(working_dir: Option<&str>) -> Vec<String> {
     let Some(working_dir) = working_dir else {
         return Vec::new();
     };
-    let Ok(mut root) = Path::new(working_dir).canonicalize() else {
-        return Vec::new();
-    };
     let Ok(cache) = worktree_cache().lock() else {
         return Vec::new();
     };
-    if let Some(entry) = cache.get(&root)
-        && let Some(snapshot) = entry.snapshot.as_ref()
-    {
-        return snapshot
-            .files
-            .iter()
-            .map(|file| file.path.clone())
-            .collect();
-    }
-    root = Path::new(working_dir).to_path_buf();
-    cache
-        .get(&root)
+    cached_worktree_entry(&cache, working_dir)
         .and_then(|entry| entry.snapshot.as_ref())
         .map(|snapshot| {
             snapshot
@@ -120,6 +104,43 @@ pub(crate) fn cached_worktree_paths(working_dir: Option<&str>) -> Vec<String> {
                 .collect()
         })
         .unwrap_or_default()
+}
+
+fn cached_worktree_entry<'a>(
+    cache: &'a HashMap<PathBuf, WorktreeCacheEntry>,
+    working_dir: &str,
+) -> Option<&'a WorktreeCacheEntry> {
+    let cwd = Path::new(working_dir)
+        .canonicalize()
+        .unwrap_or_else(|_| PathBuf::from(working_dir));
+    cache
+        .iter()
+        .filter(|(root, _)| cwd.starts_with(root) || equivalent_directory_identity(&cwd, root))
+        .max_by_key(|(root, _)| root.components().count())
+        .map(|(_, entry)| entry)
+}
+
+fn equivalent_directory_identity(cwd: &Path, cached_root: &Path) -> bool {
+    let Ok(cached_metadata) = std::fs::metadata(cached_root) else {
+        return false;
+    };
+    cwd.ancestors().any(|ancestor| {
+        std::fs::metadata(ancestor)
+            .map(|metadata| {
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::MetadataExt;
+                    metadata.dev() == cached_metadata.dev()
+                        && metadata.ino() == cached_metadata.ino()
+                }
+                #[cfg(not(unix))]
+                {
+                    metadata.len() == cached_metadata.len()
+                        && metadata.modified().ok() == cached_metadata.modified().ok()
+                }
+            })
+            .unwrap_or(false)
+    })
 }
 
 #[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]

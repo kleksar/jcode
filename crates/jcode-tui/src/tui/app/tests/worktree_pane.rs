@@ -15,30 +15,21 @@ fn worktree_filter_fixture() -> (
     let repo = init_worktree_pane_test_repo();
     crate::tui::ui::prime_worktree_changes_for_tests(repo.path());
     let mut app = create_test_app();
-    let git_root = std::process::Command::new("git")
-        .current_dir(repo.path())
-        .args(["rev-parse", "--show-toplevel"])
-        .output()
-        .unwrap();
-    app.session.working_dir = Some(
-        std::path::PathBuf::from(String::from_utf8_lossy(&git_root.stdout).trim())
-            .canonicalize()
-            .unwrap()
-            .to_string_lossy()
-            .into_owned(),
-    );
+    app.session.working_dir = Some(repo.path().to_string_lossy().into_owned());
     app.diff_mode = crate::config::DiffDisplayMode::Inline;
     app.set_worktree_pane_tab(super::worktree_pane::WorktreePaneTab::Diff);
     let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(140, 30)).unwrap();
     render_and_snap(&app, &mut terminal);
-    let list = crate::tui::ui::worktree_pane_layout().unwrap().list_area;
-    app.handle_mouse_event(worktree_test_mouse(
-        MouseEventKind::Down(MouseButton::Left),
-        list.x + 1,
-        list.y,
-    ));
+    app.handle_key(KeyCode::Right, KeyModifiers::NONE).unwrap();
     render_and_snap(&app, &mut terminal);
-    assert_eq!(app.current_worktree_selected_file(), Some("demo.rs"));
+    assert_eq!(
+        app.current_worktree_selected_file(),
+        Some("demo.rs"),
+        "selected={:?} cwd={:?} cached={:?}",
+        app.current_worktree_selected_file(),
+        app.session.working_dir,
+        crate::tui::ui::cached_worktree_paths(app.session.working_dir.as_deref())
+    );
     (repo, app, terminal)
 }
 
@@ -2042,6 +2033,13 @@ fn test_worktree_file_click_filters_and_second_click_shows_all() {
 fn diff_routed_list_content_and_reentry_transitions_preserve_selection() {
     let _lock = scroll_render_test_lock();
     let (_repo, mut app, mut terminal) = worktree_filter_fixture();
+    let list = crate::tui::ui::worktree_pane_layout().unwrap().list_area;
+    app.handle_mouse_event(worktree_test_mouse(
+        MouseEventKind::Down(MouseButton::Left),
+        list.x + 1,
+        list.y,
+    ));
+    let _ = render_and_snap(&app, &mut terminal);
     app.set_diff_pane_focus(false);
     app.handle_key(KeyCode::Right, KeyModifiers::NONE);
     assert_eq!(
@@ -2082,4 +2080,29 @@ fn disconnected_diff_content_arrows_do_not_escape() {
     super::remote::handle_disconnected_key(&mut app, KeyCode::Left, KeyModifiers::NONE).unwrap();
     assert_eq!(app.worktree_pane.tab, tab);
     let _ = render_and_snap(&app, &mut terminal);
+}
+
+#[test]
+fn cached_diff_lookup_uses_git_root_cache_for_subdirectory_and_empty_miss() {
+    let _lock = scroll_render_test_lock();
+    let (repo, _app, _terminal) = worktree_filter_fixture();
+    let subdir = repo.path().join("nested");
+    std::fs::create_dir_all(&subdir).unwrap();
+    let subdir_text = subdir.to_string_lossy();
+    let paths = crate::tui::ui::cached_worktree_paths(Some(&subdir_text));
+    assert!(
+        paths.iter().any(|path| path == "demo.rs"),
+        "paths={paths:?}"
+    );
+    assert_eq!(
+        crate::tui::ui::worktree_file_is_present(Some(&subdir_text), "demo.rs"),
+        Some(true)
+    );
+    let missing = tempfile::tempdir().unwrap();
+    let missing_text = missing.path().to_string_lossy();
+    assert!(crate::tui::ui::cached_worktree_paths(Some(&missing_text)).is_empty());
+    assert_eq!(
+        crate::tui::ui::worktree_file_is_present(Some(&missing_text), "demo.rs"),
+        None
+    );
 }
