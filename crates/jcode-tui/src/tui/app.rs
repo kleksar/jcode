@@ -78,6 +78,7 @@ mod local;
 mod misc_ui;
 mod model_context;
 mod navigation;
+pub(crate) mod files_inspector;
 mod observe;
 pub(crate) mod onboarding_flow;
 mod onboarding_flow_control;
@@ -1352,6 +1353,7 @@ pub struct App {
     diff_pane_focus: bool,
     diff_pane_auto_scroll: bool,
     worktree_pane: worktree_pane::WorktreePaneState,
+    files_inspector: files_inspector::FileInspectorUiState,
     side_panel: crate::side_panel::SidePanelSnapshot,
     observe_mode_enabled: bool,
     observe_page_markdown: String,

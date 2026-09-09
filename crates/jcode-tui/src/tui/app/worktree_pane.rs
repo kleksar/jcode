@@ -305,6 +305,23 @@ impl App {
             self.worktree_pane.tree_preview_focused = false;
         }
         self.worktree_pane.tree_selected_path = Some(row.path.clone());
+        if !row.is_dir {
+            let capabilities = if std::path::Path::new(&row.path)
+                .extension()
+                .is_some_and(|extension| extension.eq_ignore_ascii_case("md"))
+            {
+                super::files_inspector::FileInspectorCapabilities {
+                    read: true,
+                    source: true,
+                    changes: true,
+                }
+            } else {
+                super::files_inspector::FileInspectorCapabilities::source_and_changes()
+            };
+            if let Some(root) = self.session.working_dir.clone() {
+                self.files_inspector.select_file(root, row.path.clone(), capabilities);
+            }
+        }
         let height = layout
             .tree_area
             .map(|area| area.height as usize)
@@ -361,6 +378,27 @@ impl App {
             return false;
         }
         self.prepare_worktree_pane_state();
+        if self.files_inspector.is_focused() {
+            let page = layout
+                .preview_area
+                .map(|area| area.height.saturating_sub(1) as isize)
+                .unwrap_or(1)
+                .max(1);
+            match code {
+                KeyCode::Char('j') | KeyCode::Down => self.scroll_project_preview(&layout, 1),
+                KeyCode::Char('k') | KeyCode::Up => self.scroll_project_preview(&layout, -1),
+                KeyCode::Char('d') | KeyCode::PageDown => self.scroll_project_preview(&layout, page),
+                KeyCode::Char('u') | KeyCode::PageUp => self.scroll_project_preview(&layout, -page),
+                KeyCode::Char('g') | KeyCode::Home => self.worktree_pane.tree_preview_scroll = 0,
+                KeyCode::Char('G') | KeyCode::End => self.worktree_pane.tree_preview_scroll = usize::MAX,
+                KeyCode::Char('h') | KeyCode::Left | KeyCode::Esc => {
+                    self.files_inspector.exit_focus();
+                    self.set_status_notice("Files: tree focus");
+                }
+                _ => {}
+            }
+            return true;
+        }
         if self.worktree_pane.tree_preview_focused {
             let page = layout
                 .preview_area
@@ -427,14 +465,10 @@ impl App {
             KeyCode::Enter | KeyCode::Char(' ') | KeyCode::Char('l') | KeyCode::Right => {
                 if row.is_dir {
                     self.toggle_project_tree_dir(&row.path, row.expanded);
-                } else if std::path::Path::new(&row.path)
-                    .extension()
-                    .is_some_and(|extension| extension.eq_ignore_ascii_case("md"))
-                {
-                    self.try_open_repository_markdown_link(&row.path);
                 } else if layout.preview_area.is_some() {
-                    self.worktree_pane.tree_preview_focused = true;
-                    self.set_status_notice("Files: preview focus (j/k scroll, Left returns)");
+                    if self.files_inspector.enter_focus() {
+                        self.set_status_notice("Files: inspector focus (j/k scroll, Left returns)");
+                    }
                 }
             }
             KeyCode::Char('h') | KeyCode::Left => {

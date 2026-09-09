@@ -1939,6 +1939,15 @@ impl crate::tui::TuiState for App {
     fn project_tree_preview_focused(&self) -> bool {
         self.worktree_pane_matches_session() && self.worktree_pane.tree_preview_focused
     }
+    fn files_inspector_focused(&self) -> bool {
+        self.worktree_pane_matches_session() && self.files_inspector.is_focused()
+    }
+    fn files_inspector_mode(&self) -> Option<crate::tui::app::files_inspector::FileInspectorMode> {
+        self.files_inspector.mode()
+    }
+    fn files_inspector_scroll_offset(&self) -> u16 {
+        self.files_inspector.scroll_offset()
+    }
     fn side_panel_image_zoom_percent(&self) -> u8 {
         self.side_panel_image_zoom_percent
     }

@@ -1637,15 +1637,10 @@ pub(super) fn draw_project_files(
         .get(selected_index)
         .filter(|row| !row.is_dir)
         .map(|row| row.path.clone());
-    let selected_file_is_markdown = selected_file.as_deref().is_some_and(|path| {
-        Path::new(path)
-            .extension()
-            .is_some_and(|extension| extension.eq_ignore_ascii_case("md"))
-    });
     let preview_lines = selected_file
         .as_deref()
         .map(|path| build_project_preview(&snapshot.root, path));
-    let show_preview = !selected_file_is_markdown && preview_lines.is_some() && inner.height >= 10;
+    let show_preview = preview_lines.is_some() && inner.height >= 10;
     let tree_height = if show_preview {
         (inner.height / 2).clamp(4, inner.height.saturating_sub(5))
     } else {
@@ -1671,7 +1666,7 @@ pub(super) fn draw_project_files(
             project_tree_line(
                 row,
                 index == selected_index,
-                focused && !app.project_tree_preview_focused(),
+                focused && !app.files_inspector_focused(),
             )
         })
         .collect::<Vec<_>>();
@@ -1701,7 +1696,7 @@ pub(super) fn draw_project_files(
                         .add_modifier(ratatui::style::Modifier::BOLD),
                 ),
                 Span::styled(
-                    if app.project_tree_preview_focused() {
+                    if app.files_inspector_focused() {
                         "  preview focus"
                     } else {
                         "  Enter to scroll"
@@ -1727,7 +1722,7 @@ pub(super) fn draw_project_files(
             .cloned()
             .collect::<Vec<_>>();
         frame.render_widget(Paragraph::new(visible.clone()), body);
-        if app.project_tree_preview_focused() {
+        if app.files_inspector_focused() {
             super::set_pinned_pane_total_lines(preview_total_lines);
             super::set_last_diff_pane_max_scroll(max_scroll);
             super::set_last_diff_pane_effective_scroll(preview_scroll);
@@ -1740,7 +1735,7 @@ pub(super) fn draw_project_files(
         }
         preview_area = Some(body);
     }
-    if !app.project_tree_preview_focused() {
+    if !app.files_inspector_focused() {
         super::set_pinned_pane_total_lines(rows.len());
         super::set_last_diff_pane_max_scroll(tree_max_scroll);
         super::set_last_diff_pane_effective_scroll(tree_scroll);

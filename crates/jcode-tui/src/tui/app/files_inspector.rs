@@ -3,7 +3,7 @@ use std::path::PathBuf;
 
 /// The lower inspector's available presentation modes.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-pub(super) enum FileInspectorMode {
+pub enum FileInspectorMode {
     Read,
     Source,
     Changes,
@@ -26,7 +26,7 @@ impl FileInspectorCapabilities {
         }
     }
 
-    pub(super) const fn source_and_changes() -> Self {
+    pub(crate) const fn source_and_changes() -> Self {
         Self {
             read: false,
             source: true,
@@ -76,7 +76,7 @@ pub(super) struct FileInspectorUiState {
 }
 
 impl FileInspectorUiState {
-    pub(super) fn select_file(
+    pub(crate) fn select_file(
         &mut self,
         root: impl Into<PathBuf>,
         path: impl Into<PathBuf>,
@@ -86,7 +86,11 @@ impl FileInspectorUiState {
         let changed = self.selected.as_ref() != Some(&identity);
         self.selected = Some(identity.clone());
         self.capabilities = capabilities;
-        self.mode = self.mode.filter(|mode| capabilities.supports(*mode));
+        if changed {
+            self.mode = None;
+        } else {
+            self.mode = self.mode.filter(|mode| capabilities.supports(*mode));
+        }
         if self.mode.is_none() {
             self.mode = capabilities.modes().next();
         }
@@ -95,7 +99,7 @@ impl FileInspectorUiState {
         }
     }
 
-    pub(super) fn clear_selection(&mut self) {
+    pub(crate) fn clear_selection(&mut self) {
         self.selected = None;
         self.capabilities = FileInspectorCapabilities::default();
         self.mode = None;
@@ -129,7 +133,7 @@ impl FileInspectorUiState {
         self.capabilities.modes()
     }
 
-    pub(super) fn enter_focus(&mut self) -> bool {
+    pub(crate) fn enter_focus(&mut self) -> bool {
         if self.selected.is_some() && self.mode.is_some() {
             self.focused = true;
             true
@@ -138,7 +142,7 @@ impl FileInspectorUiState {
         }
     }
 
-    pub(super) fn exit_focus(&mut self) {
+    pub(crate) fn exit_focus(&mut self) {
         self.store_current_offset();
         self.focused = false;
     }
