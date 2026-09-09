@@ -111,6 +111,7 @@ struct WorktreeFileChange {
     deletions: usize,
     lines: Vec<WorktreeDiffLine>,
     truncated: bool,
+    error: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, Hash, PartialEq, Eq)]
@@ -715,16 +716,17 @@ fn collect_tracked_file(root: &Path, path: &str, has_head: bool) -> WorktreeFile
         args.push("HEAD");
     }
     args.extend(["--", path]);
-    let output = command_output(root, &args).unwrap_or_default();
+    let Some(output) = command_output(root, &args) else {
+        return WorktreeFileChange {
+            path: path.to_string(),
+            additions: 0,
+            deletions: 0,
+            lines: Vec::new(),
+            truncated: false,
+            error: Some("Unable to load diff for this file".to_string()),
+        };
+    };
     let mut lines = parse_unified_diff(&String::from_utf8_lossy(&output));
-    if lines.is_empty() {
-        lines.push(WorktreeDiffLine {
-            kind: WorktreeLineKind::Meta,
-            old_line: None,
-            new_line: None,
-            content: "file metadata changed".to_string(),
-        });
-    }
     let additions = lines
         .iter()
         .filter(|line| line.kind == WorktreeLineKind::Add)
@@ -741,6 +743,7 @@ fn collect_tracked_file(root: &Path, path: &str, has_head: bool) -> WorktreeFile
         deletions,
         lines,
         truncated,
+        error: None,
     }
 }
 
@@ -803,6 +806,7 @@ fn collect_untracked_file(root: &Path, path: &str) -> WorktreeFileChange {
         deletions: 0,
         lines,
         truncated,
+        error: None,
     }
 }
 
@@ -1404,24 +1408,8 @@ fn read_project_preview(root: &Path, relative: &str) -> Arc<Vec<Line<'static>>> 
         return preview_message("Binary file preview is not available");
     }
     let text = String::from_utf8_lossy(&bytes);
-    let extension = path
-        .extension()
-        .and_then(|value| value.to_str())
-        .unwrap_or("");
-    let line_count = text.lines().count().clamp(1, MAX_PROJECT_PREVIEW_LINES);
-    let gutter_width = line_count.to_string().len();
-    let mut lines = Vec::with_capacity(line_count.saturating_add(1));
-    for (index, content) in text.lines().take(MAX_PROJECT_PREVIEW_LINES).enumerate() {
-        let mut spans = vec![Span::styled(
-            format!("{:>width$}  ", index + 1, width = gutter_width),
-            Style::default().fg(dim_color()),
-        )];
-        spans.extend(markdown::highlight_line(
-            content,
-            (!extension.is_empty()).then_some(extension),
-        ));
-        lines.push(Line::from(spans));
-    }
+    let mut lines = markdown::render_markdown_with_width(&text, None);
+    lines.truncate(MAX_PROJECT_PREVIEW_LINES);
     if lines.is_empty() {
         lines.push(Line::from(Span::styled(
             "(empty file)",
@@ -1564,8 +1552,11 @@ fn inspector_lines(
     path: &str,
     mode: crate::tui::app::files_inspector::FileInspectorMode,
 ) -> Arc<Vec<Line<'static>>> {
-    if mode != crate::tui::app::files_inspector::FileInspectorMode::Changes {
+    if mode == crate::tui::app::files_inspector::FileInspectorMode::Read {
         return build_project_preview(root, path);
+    }
+    if mode == crate::tui::app::files_inspector::FileInspectorMode::Source {
+        return read_project_source(root, path);
     }
     let Some(snapshot) = snapshot_for_worktree(Some(root.to_string_lossy().as_ref())) else {
         return preview_message("Loading changes…");
@@ -1573,6 +1564,9 @@ fn inspector_lines(
     let Some(file) = snapshot.files.iter().find(|file| file.path == path) else {
         return preview_message("No changes for this file");
     };
+    if let Some(error) = &file.error {
+        return preview_message(error.clone());
+    }
     let mut lines = Vec::with_capacity(file.lines.len().saturating_add(1));
     for diff in &file.lines {
         let (prefix, color) = match diff.kind {
@@ -1596,6 +1590,21 @@ fn inspector_lines(
     Arc::new(lines)
 }
 
+fn read_project_source(root: &Path, relative: &str) -> Arc<Vec<Line<'static>>> {
+    let Some((_path, mut file)) = open_project_preview(root, relative) else {
+        return preview_message("File is no longer available");
+    };
+    let mut bytes = Vec::new();
+    if file.read_to_end(&mut bytes).is_err() {
+        return preview_message("Unable to read file");
+    }
+    Arc::new(
+        String::from_utf8_lossy(&bytes)
+            .split('\n')
+            .map(|line| Line::from(Span::raw(line.to_owned())))
+            .collect(),
+    )
+}
 pub(super) fn draw_project_files(
     frame: &mut Frame,
     area: Rect,
@@ -1767,7 +1776,10 @@ pub(super) fn draw_project_files(
             .into_iter()
             .flat_map(|mode| {
                 let width = (inspector_mode_label(mode).len() + 4) as u16;
-                mode_areas.push((Rect::new(mode_x, mode_area.y, width, 1), mode));
+                let mode_rect = Rect::new(mode_x, mode_area.y, width, 1).intersection(mode_area);
+                if mode_rect.width > 0 {
+                    mode_areas.push((mode_rect, mode));
+                }
                 mode_x = mode_x.saturating_add(width);
                 let selected = mode == selected_mode;
                 [
