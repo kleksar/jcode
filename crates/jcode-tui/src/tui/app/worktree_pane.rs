@@ -257,6 +257,12 @@ impl App {
         if self.files_inspector.is_focused() {
             return false;
         }
+        if self.diff_pane_focus
+            && self.worktree_pane.tab == WorktreePaneTab::Diff
+            && self.worktree_pane.diff_focus == DiffFocus::Content
+        {
+            return false;
+        }
 
         // The render snapshot is authoritative: stale focus must never enter a
         // hidden worktree pane after a resize or while another side panel owns
@@ -276,6 +282,13 @@ impl App {
                 if self.worktree_pane.selected_file.is_none()
                     && let Some(path) = crate::tui::ui::worktree_pane_layout()
                         .and_then(|layout| layout.paths.first().cloned())
+                        .or_else(|| {
+                            crate::tui::ui::cached_worktree_paths(
+                                self.session.working_dir.as_deref(),
+                            )
+                            .into_iter()
+                            .next()
+                        })
                 {
                     self.worktree_pane.selected_file = Some(path);
                 }
@@ -292,7 +305,14 @@ impl App {
             (true, KeyCode::Left) => {
                 match self.worktree_pane.tab {
                     WorktreePaneTab::Documents | WorktreePaneTab::Files => {
-                        self.set_worktree_pane_tab(WorktreePaneTab::Diff)
+                        self.set_worktree_pane_tab(WorktreePaneTab::Diff);
+                        self.prepare_worktree_pane_state();
+                        self.worktree_pane.diff_focus = DiffFocus::FileList;
+                        if let Some(path) = crate::tui::ui::worktree_pane_layout()
+                            .and_then(|layout| layout.paths.first().cloned())
+                        {
+                            self.worktree_pane.selected_file = Some(path);
+                        }
                     }
                     WorktreePaneTab::Diff => self.set_diff_pane_focus(false),
                 }
@@ -567,7 +587,20 @@ impl App {
         if !expired && !stale {
             return false;
         }
-        self.worktree_pane.selected_file = None;
+        let replacement = crate::tui::ui::worktree_pane_layout()
+            .map(|layout| layout.paths.as_ref().clone())
+            .unwrap_or_else(|| {
+                crate::tui::ui::cached_worktree_paths(self.session.working_dir.as_deref())
+            })
+            .into_iter()
+            .find(|candidate| {
+                crate::tui::ui::worktree_file_is_present(
+                    self.session.working_dir.as_deref(),
+                    candidate,
+                ) != Some(false)
+            });
+        self.worktree_pane.selected_file = replacement;
+        self.worktree_pane.list_scroll = 0;
         self.worktree_pane.last_activity = None;
         // Do not move an explicit markdown/image pane that replaced the diff.
         if crate::tui::ui::worktree_pane_layout().is_some()

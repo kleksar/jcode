@@ -196,7 +196,9 @@ pub(crate) use viewport::{
 pub(crate) use worktree_ui::has_explicit_side_pane_content;
 pub(crate) use worktree_ui::invalidate_worktree_changes_cache;
 pub(crate) use worktree_ui::poll_worktree_changes;
-pub(crate) use worktree_ui::{WorktreePaneLayout, worktree_file_is_present, worktree_pane_layout};
+pub(crate) use worktree_ui::{
+    WorktreePaneLayout, cached_worktree_paths, worktree_file_is_present, worktree_pane_layout,
+};
 #[cfg(test)]
 pub(crate) use worktree_ui::{
     assert_cached_inspector_change_for_tests, prime_project_tree_for_tests,

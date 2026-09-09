@@ -15,7 +15,13 @@ fn worktree_filter_fixture() -> (
     let repo = init_worktree_pane_test_repo();
     crate::tui::ui::prime_worktree_changes_for_tests(repo.path());
     let mut app = create_test_app();
-    app.session.working_dir = Some(repo.path().to_string_lossy().into_owned());
+    app.session.working_dir = Some(
+        repo.path()
+            .canonicalize()
+            .unwrap()
+            .to_string_lossy()
+            .into_owned(),
+    );
     app.diff_mode = crate::config::DiffDisplayMode::Inline;
     app.set_worktree_pane_tab(super::worktree_pane::WorktreePaneTab::Diff);
     let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(140, 30)).unwrap();
@@ -2025,4 +2031,50 @@ fn test_worktree_file_click_filters_and_second_click_shows_all() {
         all_again.contains("fn new() {}") && all_again.contains("second"),
         "{all_again}"
     );
+}
+
+#[test]
+fn diff_routed_list_content_and_reentry_transitions_preserve_selection() {
+    let _lock = scroll_render_test_lock();
+    let (_repo, mut app, mut terminal) = worktree_filter_fixture();
+    app.set_diff_pane_focus(false);
+    app.handle_key(KeyCode::Right, KeyModifiers::NONE);
+    assert_eq!(
+        app.worktree_pane.tab,
+        super::worktree_pane::WorktreePaneTab::Diff
+    );
+    assert_eq!(app.current_worktree_selected_file(), Some("demo.rs"));
+    app.handle_key(KeyCode::Down, KeyModifiers::NONE);
+    assert_eq!(app.current_worktree_selected_file(), Some("notes.md"));
+    app.handle_key(KeyCode::Up, KeyModifiers::NONE);
+    assert_eq!(app.current_worktree_selected_file(), Some("demo.rs"));
+    app.handle_key(KeyCode::Enter, KeyModifiers::NONE);
+    let before = app.diff_pane_scroll;
+    app.handle_key(KeyCode::Down, KeyModifiers::NONE);
+    assert!(app.diff_pane_scroll >= before);
+    app.handle_key(KeyCode::Right, KeyModifiers::NONE);
+    assert_eq!(
+        app.worktree_pane.tab,
+        super::worktree_pane::WorktreePaneTab::Diff
+    );
+    assert_eq!(app.current_worktree_selected_file(), Some("demo.rs"));
+    app.handle_key(KeyCode::Esc, KeyModifiers::NONE);
+    app.handle_key(KeyCode::Left, KeyModifiers::NONE);
+    assert!(!app.diff_pane_focus);
+    let _ = render_and_snap(&app, &mut terminal);
+}
+
+#[test]
+fn disconnected_diff_content_arrows_do_not_escape() {
+    let _lock = scroll_render_test_lock();
+    let (_repo, mut app, mut terminal) = worktree_filter_fixture();
+    app.set_diff_pane_focus(false);
+    super::remote::handle_disconnected_key(&mut app, KeyCode::Right, KeyModifiers::NONE).unwrap();
+    super::remote::handle_disconnected_key(&mut app, KeyCode::Enter, KeyModifiers::NONE).unwrap();
+    let tab = app.worktree_pane.tab;
+    super::remote::handle_disconnected_key(&mut app, KeyCode::Right, KeyModifiers::NONE).unwrap();
+    assert_eq!(app.worktree_pane.tab, tab);
+    super::remote::handle_disconnected_key(&mut app, KeyCode::Left, KeyModifiers::NONE).unwrap();
+    assert_eq!(app.worktree_pane.tab, tab);
+    let _ = render_and_snap(&app, &mut terminal);
 }

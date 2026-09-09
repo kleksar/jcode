@@ -89,6 +89,39 @@ pub(crate) fn worktree_file_is_present(working_dir: Option<&str>, path: &str) ->
     Some(snapshot.files.iter().any(|file| file.path == path))
 }
 
+pub(crate) fn cached_worktree_paths(working_dir: Option<&str>) -> Vec<String> {
+    let Some(working_dir) = working_dir else {
+        return Vec::new();
+    };
+    let Ok(mut root) = Path::new(working_dir).canonicalize() else {
+        return Vec::new();
+    };
+    let Ok(cache) = worktree_cache().lock() else {
+        return Vec::new();
+    };
+    if let Some(entry) = cache.get(&root)
+        && let Some(snapshot) = entry.snapshot.as_ref()
+    {
+        return snapshot
+            .files
+            .iter()
+            .map(|file| file.path.clone())
+            .collect();
+    }
+    root = Path::new(working_dir).to_path_buf();
+    cache
+        .get(&root)
+        .and_then(|entry| entry.snapshot.as_ref())
+        .map(|snapshot| {
+            snapshot
+                .files
+                .iter()
+                .map(|file| file.path.clone())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 #[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
 enum WorktreeLineKind {
     Context,
