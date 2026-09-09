@@ -2649,6 +2649,10 @@ pub(super) async fn handle_client(
                 .await;
             }
 
+            Request::CommSingleAgent { id, session_id } => {
+                super::comm_session::handle_comm_single_agent(id, session_id, &client_event_tx, &sessions, &swarm_members).await;
+            }
+
             Request::CommListModels {
                 id,
                 session_id: req_session_id,

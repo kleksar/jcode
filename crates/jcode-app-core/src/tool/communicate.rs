@@ -1971,7 +1971,7 @@ impl Tool for CommunicateTool {
                              "status", "report", "plan_status", "summary", "read_context", "resync_plan", "assign_task", "assign_next", "fill_slots", "run_plan", "cleanup",
                              "task_graph", "expand_node", "complete_node", "inject_gap",
                              "start", "start_task", "wake", "resume", "retry", "reassign", "replace", "salvage",
-                             "subscribe_channel", "unsubscribe_channel", "await_members", "list_models"],
+                             "subscribe_channel", "unsubscribe_channel", "await_members", "list_models", "single_agent"],
                     "description": "Action. spawn requires label and should include prompt. list_models shows available models/routes."
                 },
                 "key": {
@@ -2762,6 +2762,17 @@ impl Tool for CommunicateTool {
                     Err(e) => Err(anyhow::anyhow!("Failed to spawn agent: {}", e)),
                 }
             }
+
+            "single_agent" => match send_request(Request::CommSingleAgent {
+                id: REQUEST_ID,
+                session_id: ctx.session_id.clone(),
+            }).await {
+                Ok(ServerEvent::CommSingleAgentResponse { enabled: true, .. }) => Ok(ToolOutput::new(
+                    "Single-agent mode enabled for this root session. Repository reads are restored and the override was persisted."
+                )),
+                Ok(response) => { ensure_success(&response)?; Err(anyhow::anyhow!("Single-agent override was not enabled.")) }
+                Err(error) => Err(anyhow::anyhow!("Failed to enable single-agent mode: {error}")),
+            },
 
             "list_models" => {
                 let request = Request::CommListModels {

@@ -12,7 +12,9 @@ use super::comm_control::{
 use super::comm_plan::{
     handle_comm_approve_plan, handle_comm_propose_plan, handle_comm_reject_plan,
 };
-use super::comm_session::{handle_comm_list_models, handle_comm_spawn, handle_comm_stop};
+use super::comm_session::{
+    handle_comm_list_models, handle_comm_single_agent, handle_comm_spawn, handle_comm_stop,
+};
 use super::comm_sync::{
     CommResyncPlanContext, handle_comm_plan_status, handle_comm_read_context,
     handle_comm_resync_plan, handle_comm_status, handle_comm_summary,
@@ -459,6 +461,9 @@ pub(super) async fn handle_lightweight_control_request(
                 client_connections,
             )
             .await;
+        }
+        Request::CommSingleAgent { id, session_id } => {
+            handle_comm_single_agent(id, session_id, &client_event_tx, sessions, swarm_members).await;
         }
         Request::CommListModels {
             id,

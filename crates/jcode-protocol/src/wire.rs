@@ -597,6 +597,10 @@ pub enum Request {
         label: Option<String>,
     },
 
+    /// Explicitly return the current swarm root to single-agent repository reads.
+    #[serde(rename = "comm_single_agent")]
+    CommSingleAgent { id: u64, session_id: String },
+
     /// List models/routes available for spawning swarm agents
     #[serde(rename = "comm_list_models")]
     CommListModels { id: u64, session_id: String },
@@ -1501,6 +1505,8 @@ pub enum ServerEvent {
         session_id: String,
         new_session_id: String,
     },
+    #[serde(rename = "comm_single_agent_response")]
+    CommSingleAgentResponse { id: u64, enabled: bool },
 
     /// Response to comm_list_models request
     #[serde(rename = "comm_list_models_response")]
