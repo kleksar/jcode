@@ -312,9 +312,10 @@ fn pinned_session_footer_keeps_only_facts_and_context_in_one_stable_row() {
         "composer should use the stronger prompt glyph:\n{}",
         rows.join("\n")
     );
+    assert!(facts.contains("74k/256k"), "facts row: {facts}");
     assert!(
-        rows.iter().all(|row| !row.contains("74k/256k")),
-        "wide layouts should use the pinned footer instead of the floating fact stack"
+        rows[..29].iter().all(|row| !row.contains("74k/256k")),
+        "the context meter should remain in the pinned footer"
     );
 }
 

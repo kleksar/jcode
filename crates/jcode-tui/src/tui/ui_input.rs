@@ -1205,7 +1205,7 @@ mod tests {
     }
 
     #[test]
-    fn footer_context_shows_compact_observed_usage_and_hides_zero_or_unavailable() {
+    fn footer_context_renders_compact_meter_from_observed_usage_and_hides_zero_or_unavailable() {
         let data = crate::tui::info_widget::InfoWidgetData {
             context_limit: Some(114_000),
             observed_context_tokens: Some(82_000),
@@ -1215,7 +1215,13 @@ mod tests {
             .iter()
             .map(|span| span.content.as_ref())
             .collect::<String>();
-        assert_eq!(text, "82/114k");
+        assert_eq!(text, "82k/114k ▰▰▰▰▰▰▰▱▱▱ 72%");
+        let spans = footer_context_spans(&data);
+        assert_eq!(spans[0].style.fg, Some(rgb(140, 140, 150)));
+        assert_eq!(spans[2].style.fg, Some(rgb(255, 200, 100)));
+        assert_eq!(spans[3].style.fg, Some(rgb(50, 50, 60)));
+        assert_eq!(spans[4].style.fg, Some(rgb(255, 200, 100)));
+        assert!(spans[4].style.add_modifier.contains(Modifier::BOLD));
 
         let estimated = crate::tui::info_widget::InfoWidgetData {
             context_info: Some(crate::prompt::ContextInfo {
@@ -1229,7 +1235,7 @@ mod tests {
             .iter()
             .map(|span| span.content.as_ref())
             .collect::<String>();
-        assert_eq!(estimated_text, "82/114k");
+        assert_eq!(estimated_text, "82k/114k ▰▰▰▰▰▰▰▱▱▱ 72%");
 
         let zero = crate::tui::info_widget::InfoWidgetData {
             context_limit: Some(114_000),
@@ -1244,7 +1250,13 @@ mod tests {
 
     #[test]
     fn footer_compositor_keeps_model_context_and_quota_on_normal_width() {
-        let facts = vec![Span::raw("model"), Span::raw("  │  "), Span::raw("82/114k")];
+        let data = crate::tui::info_widget::InfoWidgetData {
+            context_limit: Some(114_000),
+            observed_context_tokens: Some(82_000),
+            ..Default::default()
+        };
+        let mut facts = vec![Span::raw("model"), Span::raw("  │  ")];
+        facts.extend(footer_context_spans(&data));
         let quota = footer_quota_spans(Some(crate::tui::FooterQuota {
             remaining_percent: 77,
             reset_in: "6d 20h".to_string(),
@@ -1255,7 +1267,26 @@ mod tests {
             .map(|span| span.content.as_ref())
             .collect::<String>();
 
-        assert_eq!(text, "model  │  82/114k  7-day 77% · 6d 20h");
+        assert_eq!(
+            text,
+            "model  │  82k/114k ▰▰▰▰▰▰▰▱▱▱ 72%  7-day 77% · 6d 20h"
+        );
+    }
+
+    #[test]
+    fn footer_compositor_keeps_context_numbers_before_meter_details_when_narrow() {
+        let data = crate::tui::info_widget::InfoWidgetData {
+            context_limit: Some(272_000),
+            observed_context_tokens: Some(115_000),
+            ..Default::default()
+        };
+
+        let text = footer_compositor_spans(footer_context_spans(&data), Vec::new(), 9)
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect::<String>();
+
+        assert_eq!(text, "115k/272k");
     }
 
     #[test]
@@ -2494,14 +2525,18 @@ fn footer_context_spans(data: &crate::tui::info_widget::InfoWidgetData) -> Vec<S
     let Some((used, limit)) = overscroll_context_usage(data) else {
         return Vec::new();
     };
-    let Some(text) = compact_context_usage_text(used, limit) else {
+    let Some(numbers) = compact_context_usage_text(used, limit) else {
         return Vec::new();
     };
-    vec![Span::styled(text, Style::default().fg(rgb(140, 140, 150)))]
+    let mut spans = vec![Span::styled(numbers, Style::default().fg(rgb(140, 140, 150)))];
+    spans.push(Span::raw(" "));
+    spans.extend(overscroll_context_bar(used, limit, 10));
+    spans
 }
 
 fn compact_context_usage_text(used: usize, limit: usize) -> Option<String> {
-    (used > 0 && limit > 0).then(|| format!("{}/{}", used / 1_000, overscroll_format_tokens(limit)))
+    (used > 0 && limit > 0)
+        .then(|| format!("{}/{}", overscroll_format_tokens(used), overscroll_format_tokens(limit)))
 }
 
 fn footer_fact_spans(app: &dyn TuiState) -> Vec<Span<'static>> {
@@ -2608,12 +2643,38 @@ fn footer_compositor_spans(
 
     // Keep the quota adjacent to the model rather than anchoring it to the
     // right edge. Reserve its width before truncating the session facts.
-    let mut spans = overscroll_truncate_spans(facts, facts_width);
+    let mut spans = footer_truncate_fact_spans(facts, facts_width);
     if !spans.is_empty() && !quota.is_empty() {
         spans.push(Span::raw("  "));
     }
     spans.extend(quota);
     spans
+}
+
+/// Context usage is ordered as numbers, bar, then percent. Unlike the general
+/// footer facts, do not replace a fully fitting number pair with an ellipsis
+/// merely because the optional meter does not fit after it.
+fn footer_truncate_fact_spans(facts: Vec<Span<'static>>, width: usize) -> Vec<Span<'static>> {
+    let Some(numbers) = facts.first().filter(|span| {
+        span.style.fg == Some(rgb(140, 140, 150)) && span.content.contains('/')
+    }) else {
+        return overscroll_truncate_spans(facts, width);
+    };
+    if numbers.width() > width {
+        return overscroll_truncate_spans(facts, width);
+    }
+
+    let mut retained = vec![numbers.clone()];
+    let mut used = numbers.width();
+    for span in facts.into_iter().skip(1) {
+        let span_width = span.width();
+        if used + span_width > width {
+            break;
+        }
+        used += span_width;
+        retained.push(span);
+    }
+    retained
 }
 
 const RIGHT_FACT_CONTEXT_CELLS: usize = 6;
