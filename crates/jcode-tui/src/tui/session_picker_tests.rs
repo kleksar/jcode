@@ -3363,7 +3363,10 @@ fn live_identity_unknown_internal_compatibility_and_retry_on_refresh() {
     .unwrap();
     hydrate_live_identity_fixture(&mut picker, dir.path(), vec![presence.clone()]);
     assert!(
-        picker.live_identities.get("unknown").is_some_and(Option::is_some),
+        picker
+            .live_identities
+            .get("unknown")
+            .is_some_and(Option::is_some),
         "bounded live refresh must retry unavailable metadata"
     );
     assert_eq!(picker.all_sessions[0].parent_id.as_deref(), Some("root"));

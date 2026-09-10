@@ -349,10 +349,7 @@ async fn user_split_of_worker_creates_unknown_child_without_retagging_worker() {
     worker.save().expect("persist worker before user split");
     let worker_id = worker.id.clone();
     let agent = Arc::new(Mutex::new(Agent::new_with_session(
-        provider,
-        registry,
-        worker,
-        None,
+        provider, registry, worker, None,
     )));
     let (tx, mut rx) = mpsc::unbounded_channel();
 

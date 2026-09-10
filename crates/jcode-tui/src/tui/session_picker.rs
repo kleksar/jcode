@@ -33,9 +33,9 @@ mod memory;
 mod navigation;
 mod render;
 
+use live_identity::{LiveSessionIdentity, load_live_session_identity};
 #[cfg(test)]
 use loading::collect_recent_session_stems;
-use live_identity::{LiveSessionIdentity, load_live_session_identity};
 use loading::{build_messages_preview, build_search_index, crashed_sessions_from_all_sessions};
 pub use loading::{
     invalidate_session_list_cache, load_cached_sessions_grouped, load_servers, load_sessions,
@@ -804,7 +804,9 @@ impl SessionPicker {
 
     fn add_missing_live_session_rows(&mut self) {
         #[cfg(not(test))]
-        let sessions_dir = crate::storage::jcode_dir().ok().map(|dir| dir.join("sessions"));
+        let sessions_dir = crate::storage::jcode_dir()
+            .ok()
+            .map(|dir| dir.join("sessions"));
         #[cfg(test)]
         let sessions_dir: Option<std::path::PathBuf> = None;
         self.refresh_live_session_rows_from(sessions_dir.as_deref());
@@ -1041,7 +1043,8 @@ impl SessionPicker {
         // A normal row now owns each replacement ID. Never remove it as an
         // old synthetic row, or let stale grouped-cache defaults erase identity.
         self.synthetic_live_session_ids.clear();
-        self.live_identities.retain(|_, identity| identity.is_some());
+        self.live_identities
+            .retain(|_, identity| identity.is_some());
         for session in server_groups
             .iter_mut()
             .flat_map(|group| group.sessions.iter_mut())

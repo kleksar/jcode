@@ -277,5 +277,8 @@ async fn worker_origin_same_id_resume_preserves_worker_origin() {
     );
 
     assert_eq!(resumed.session_id(), worker_id);
-    assert_eq!(resumed.session.origin(), crate::session::SessionOrigin::SwarmWorker);
+    assert_eq!(
+        resumed.session.origin(),
+        crate::session::SessionOrigin::SwarmWorker
+    );
 }
