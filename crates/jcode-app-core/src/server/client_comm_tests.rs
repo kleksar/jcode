@@ -204,6 +204,11 @@ async fn comm_message_default_does_not_queue_soft_interrupt_for_connected_sessio
         pending.is_empty(),
         "connected interactive session should not get synthetic user-message interrupt"
     );
+    assert_eq!(
+        swarm_members.read().await[&target_id].status,
+        "ready",
+        "plain notify delivery must not change member status"
+    );
 }
 
 #[tokio::test]

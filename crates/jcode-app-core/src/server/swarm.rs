@@ -1358,6 +1358,65 @@ pub(super) async fn update_member_status_with_report_tldr(
     event_counter: Option<&Arc<std::sync::atomic::AtomicU64>>,
     swarm_event_tx: Option<&broadcast::Sender<SwarmEvent>>,
 ) {
+    update_member_status_with_report_tldr_if_idle(
+        session_id,
+        status,
+        detail,
+        completion_report,
+        report_tldr,
+        false,
+        swarm_members,
+        swarms_by_id,
+        event_history,
+        event_counter,
+        swarm_event_tx,
+    )
+    .await;
+}
+
+/// Move an idle or terminal member to queued without racing a newly started
+/// turn. The condition and normal status bookkeeping share one write lock.
+pub(super) async fn queue_member_if_idle(
+    session_id: &str,
+    swarm_members: &Arc<RwLock<HashMap<String, SwarmMember>>>,
+    swarms_by_id: &Arc<RwLock<HashMap<String, HashSet<String>>>>,
+    event_history: Option<&Arc<RwLock<std::collections::VecDeque<SwarmEvent>>>>,
+    event_counter: Option<&Arc<std::sync::atomic::AtomicU64>>,
+    swarm_event_tx: Option<&broadcast::Sender<SwarmEvent>>,
+) {
+    update_member_status_with_report_tldr_if_idle(
+        session_id,
+        "queued",
+        None,
+        None,
+        None,
+        true,
+        swarm_members,
+        swarms_by_id,
+        event_history,
+        event_counter,
+        swarm_event_tx,
+    )
+    .await;
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "member status updates need swarm membership, broadcast state, optional report text, and event history sinks"
+)]
+async fn update_member_status_with_report_tldr_if_idle(
+    session_id: &str,
+    status: &str,
+    detail: Option<String>,
+    completion_report: Option<String>,
+    report_tldr: Option<String>,
+    only_if_idle: bool,
+    swarm_members: &Arc<RwLock<HashMap<String, SwarmMember>>>,
+    swarms_by_id: &Arc<RwLock<HashMap<String, HashSet<String>>>>,
+    event_history: Option<&Arc<RwLock<std::collections::VecDeque<SwarmEvent>>>>,
+    event_counter: Option<&Arc<std::sync::atomic::AtomicU64>>,
+    swarm_event_tx: Option<&broadcast::Sender<SwarmEvent>>,
+) {
     let completion_report = normalize_completion_report(completion_report);
     let detail_present = detail.is_some();
     let (
@@ -1371,6 +1430,11 @@ pub(super) async fn update_member_status_with_report_tldr(
     ) = {
         let mut members = swarm_members.write().await;
         if let Some(member) = members.get_mut(session_id) {
+            if only_if_idle
+                && !(member.status == "ready" || member_status_is_terminal(&member.status))
+            {
+                return;
+            }
             let previous_status = member.status.clone();
             let status_changed = member.status != status;
             let detail_changed = member.detail != detail;
