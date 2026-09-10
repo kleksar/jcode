@@ -8,7 +8,11 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::sync::{Mutex, mpsc};
 use tokio_stream::wrappers::ReceiverStream;
 
-const EDITOR_SELECTOR: &str = "[contenteditable=true][aria-label='Chat with ChatGPT']";
+/// ChatGPT's stable composer id. The accessible-name selector remains a semantic
+/// fallback for deployments that have not yet adopted the stable id.
+const EDITOR_SELECTOR: &str = "#prompt-textarea[contenteditable=true]";
+const EDITOR_QUERY_SELECTOR: &str =
+    "#prompt-textarea[contenteditable=true], [contenteditable=true][aria-label='Chat with ChatGPT']";
 const TOOL_CALL_START: &str = "<jcode_tool_call>";
 const TOOL_CALL_END: &str = "</jcode_tool_call>";
 const PROMPT_CHUNK_BYTES: usize = 24_000;
@@ -245,7 +249,7 @@ async fn wait_for_editor(tab_id: u64) -> Result<()> {
             "waitFor",
             json!({
                 "tabId": tab_id,
-                "selector": EDITOR_SELECTOR,
+                "selector": EDITOR_QUERY_SELECTOR,
                 "timeout": remaining.as_millis()
             }),
         )
@@ -275,7 +279,10 @@ fn is_transient_bridge_connection_error(error: &anyhow::Error) -> bool {
         .any(|cause| cause.to_string() == TRANSIENT_BRIDGE_CONNECTION_ERROR)
 }
 
-async fn prepare_chatgpt_page(tab_id: u64, descriptor: &ChatGptWebModelDescriptor) -> Result<()> {
+async fn prepare_chatgpt_page(
+    tab_id: u64,
+    descriptor: &ChatGptWebModelDescriptor,
+) -> Result<()> {
     // Temporary chat has a one-time explanatory screen. It is safe to dismiss,
     // but workspace migration/onboarding is deliberately never auto-confirmed.
     let preparation = evaluate(
@@ -393,7 +400,7 @@ async fn insert_prompt(tab_id: u64, prompt: &str) -> Result<()> {
         "fillForm",
         json!({
             "tabId": tab_id,
-            "fields": [{ "selector": EDITOR_SELECTOR, "value": first }]
+            "fields": [{ "selector": EDITOR_QUERY_SELECTOR, "value": first }]
         }),
     )
     .await
@@ -404,7 +411,7 @@ async fn insert_prompt(tab_id: u64, prompt: &str) -> Result<()> {
             "type",
             json!({
                 "tabId": tab_id,
-                "selector": EDITOR_SELECTOR,
+                "selector": EDITOR_QUERY_SELECTOR,
                 "text": chunk,
                 "clear": false,
                 "append": true
@@ -417,7 +424,8 @@ async fn insert_prompt(tab_id: u64, prompt: &str) -> Result<()> {
     let verification = evaluate(
         tab_id,
         r#"
-const editor = document.querySelector('[contenteditable=true][aria-label="Chat with ChatGPT"]');
+const editor = document.querySelector('#prompt-textarea[contenteditable=true]')
+  || document.querySelector('[contenteditable=true][aria-label="Chat with ChatGPT"]');
 const submit = document.querySelector('#composer-submit-button');
 const text = editor
   ? (editor.children.length > 0
@@ -642,12 +650,12 @@ fn parse_tool_call(response: &str) -> Result<Option<ParsedToolCall>> {
     }
     if !trimmed.starts_with(TOOL_CALL_START) || !trimmed.ends_with(TOOL_CALL_END) {
         anyhow::bail!(
-            "GPT-5.6 Pro mentioned a jcode tool-call envelope without emitting it as the entire response"
+            "ChatGPT web response mentioned a jcode tool-call envelope without emitting it as the entire response"
         );
     }
     let payload_text = &trimmed[TOOL_CALL_START.len()..trimmed.len() - TOOL_CALL_END.len()];
     let payload: Value = serde_json::from_str(payload_text.trim())
-        .context("GPT-5.6 Pro emitted invalid JSON in a jcode tool-call envelope")?;
+        .context("ChatGPT web response emitted invalid JSON in a jcode tool-call envelope")?;
     let name = payload
         .get("name")
         .and_then(Value::as_str)
@@ -864,6 +872,7 @@ mod tests {
             .err()
             .expect("incomplete marker should fail");
         assert!(err.to_string().contains("entire response"));
+        assert!(!err.to_string().contains("GPT-5.6"));
     }
 
     #[test]
@@ -931,6 +940,13 @@ mod tests {
     fn picker_labels_collapse_chatgpt_whitespace() {
         assert_eq!(normalize_picker_label("6\nPro"), "6 Pro");
         assert_eq!(normalize_picker_label("  5.6   Pro "), "5.6 Pro");
+    }
+
+    #[test]
+    fn composer_selector_prefers_stable_id_with_semantic_fallback() {
+        assert_eq!(EDITOR_SELECTOR, "#prompt-textarea[contenteditable=true]");
+        assert!(EDITOR_QUERY_SELECTOR.starts_with(EDITOR_SELECTOR));
+        assert!(EDITOR_QUERY_SELECTOR.contains("aria-label='Chat with ChatGPT'"));
     }
 
     #[test]
