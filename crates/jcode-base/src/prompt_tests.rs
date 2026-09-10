@@ -406,7 +406,9 @@ fn prompt_overlay_is_loaded_once_when_project_dir_is_global_jcode_parent() {
     let content = content.expect("expected prompt overlay content");
 
     assert_eq!(
-        content.matches("shared prompt overlay instructions").count(),
+        content
+            .matches("shared prompt overlay instructions")
+            .count(),
         1,
         "the same canonical overlay must be included only once"
     );
@@ -482,7 +484,9 @@ fn prompt_overlays_with_equal_text_from_distinct_files_are_both_loaded() {
 
     assert_eq!(content.matches(overlay_text).count(), 2);
     assert!(
-        content.find("# Project Prompt Overlay (.jcode/prompt-overlay.md)").unwrap()
+        content
+            .find("# Project Prompt Overlay (.jcode/prompt-overlay.md)")
+            .unwrap()
             < content
                 .find("# Global Prompt Overlay (~/.jcode/prompt-overlay.md)")
                 .unwrap(),
