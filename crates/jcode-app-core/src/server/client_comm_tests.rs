@@ -231,19 +231,26 @@ async fn comm_message_wake_preserves_running_and_busy_statuses() {
 
 async fn assert_pending_wake_freshness(wake_mode: &str, initial_status: &str) {
     let _env_lock = crate::storage::lock_test_env();
-    struct WakeModeGuard(Option<std::ffi::OsString>);
+    let runtime_dir = tempfile::tempdir().expect("isolated await runtime");
+    struct WakeModeGuard(Option<std::ffi::OsString>, Option<std::ffi::OsString>);
     impl Drop for WakeModeGuard {
         fn drop(&mut self) {
-            if let Some(value) = &self.0 {
-                jcode_base::env::set_var("JCODE_WAKE_MODE", value);
-            } else {
-                jcode_base::env::remove_var("JCODE_WAKE_MODE");
+            for (key, previous) in [("JCODE_WAKE_MODE", &self.0), ("JCODE_RUNTIME_DIR", &self.1)] {
+                if let Some(value) = previous {
+                    jcode_base::env::set_var(key, value);
+                } else {
+                    jcode_base::env::remove_var(key);
+                }
             }
             crate::config::invalidate_config_cache();
         }
     }
-    let _wake_guard = WakeModeGuard(std::env::var_os("JCODE_WAKE_MODE"));
+    let _wake_guard = WakeModeGuard(
+        std::env::var_os("JCODE_WAKE_MODE"),
+        std::env::var_os("JCODE_RUNTIME_DIR"),
+    );
     jcode_base::env::set_var("JCODE_WAKE_MODE", wake_mode);
+    jcode_base::env::set_var("JCODE_RUNTIME_DIR", runtime_dir.path());
     crate::config::invalidate_config_cache();
     let sender = test_agent().await;
     let target = test_agent().await;
