@@ -15,6 +15,10 @@ const PROMPT_CHUNK_BYTES: usize = 24_000;
 const POLL_INTERVAL: Duration = Duration::from_millis(750);
 const REQUIRED_STABLE_POLLS: usize = 8;
 const MODEL_SELECTION_TIMEOUT: Duration = Duration::from_secs(15);
+const EDITOR_WAIT_TIMEOUT: Duration = Duration::from_secs(30);
+const EDITOR_WAIT_RETRY_INTERVAL: Duration = Duration::from_millis(250);
+const TRANSIENT_BRIDGE_CONNECTION_ERROR: &str =
+    "Error: Could not establish connection. Receiving end does not exist.";
 
 static TOOL_CALL_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 
@@ -234,19 +238,41 @@ fn next_owned_tab_name() -> String {
 }
 
 async fn wait_for_editor(tab_id: u64) -> Result<()> {
-    bridge_command(
-        "waitFor",
-        json!({
-            "tabId": tab_id,
-            "selector": EDITOR_SELECTOR,
-            "timeout": 30_000
-        }),
-    )
-    .await
-    .context(
-        "ChatGPT composer did not load. Confirm Firefox is logged in at chatgpt.com and the workspace is active",
-    )?;
-    Ok(())
+    let deadline = Instant::now() + EDITOR_WAIT_TIMEOUT;
+    loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        let result = bridge_command(
+            "waitFor",
+            json!({
+                "tabId": tab_id,
+                "selector": EDITOR_SELECTOR,
+                "timeout": remaining.as_millis()
+            }),
+        )
+        .await;
+
+        match result {
+            Ok(_) => return Ok(()),
+            Err(err) if is_transient_bridge_connection_error(&err) && Instant::now() < deadline => {
+                tokio::time::sleep(
+                    EDITOR_WAIT_RETRY_INTERVAL
+                        .min(deadline.saturating_duration_since(Instant::now())),
+                )
+                .await;
+            }
+            Err(err) => {
+                return Err(err).context(
+                    "ChatGPT composer did not load. Confirm Firefox is logged in at chatgpt.com and the workspace is active",
+                );
+            }
+        }
+    }
+}
+
+fn is_transient_bridge_connection_error(error: &anyhow::Error) -> bool {
+    error
+        .chain()
+        .any(|cause| cause.to_string() == TRANSIENT_BRIDGE_CONNECTION_ERROR)
 }
 
 async fn prepare_chatgpt_page(tab_id: u64, descriptor: &ChatGptWebModelDescriptor) -> Result<()> {
@@ -905,6 +931,16 @@ mod tests {
     fn picker_labels_collapse_chatgpt_whitespace() {
         assert_eq!(normalize_picker_label("6\nPro"), "6 Pro");
         assert_eq!(normalize_picker_label("  5.6   Pro "), "5.6 Pro");
+    }
+
+    #[test]
+    fn transient_bridge_connection_error_is_classified_exactly() {
+        assert!(is_transient_bridge_connection_error(&anyhow::anyhow!(
+            TRANSIENT_BRIDGE_CONNECTION_ERROR
+        )));
+        assert!(!is_transient_bridge_connection_error(&anyhow::anyhow!(
+            "Error: Could not establish connection. Connection refused."
+        )));
     }
 
     #[test]
