@@ -616,7 +616,7 @@ impl App {
                             return true;
                         }
                         KeyCode::Right => {
-                            self.set_worktree_pane_tab(
+                            self.navigate_worktree_pane_tab(
                                 super::worktree_pane::WorktreePaneTab::Files,
                             );
                             return true;
@@ -657,7 +657,7 @@ impl App {
                             super::worktree_pane::WorktreePaneTab::Diff
                         }
                     };
-                    self.set_worktree_pane_tab(next);
+                    self.navigate_worktree_pane_tab(next);
                     return true;
                 }
                 KeyCode::BackTab => {
@@ -669,7 +669,7 @@ impl App {
                             super::worktree_pane::WorktreePaneTab::Diff
                         }
                     };
-                    self.set_worktree_pane_tab(next);
+                    self.navigate_worktree_pane_tab(next);
                     return true;
                 }
                 _ => {}

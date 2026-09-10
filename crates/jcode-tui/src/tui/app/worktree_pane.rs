@@ -46,6 +46,7 @@ pub(super) struct WorktreePaneState {
     pub(super) tree_preview_scroll: usize,
     pub(super) tree_preview_focused: bool,
     pub(super) document_ui: std::collections::HashMap<String, MarkdownDocumentUiState>,
+    diff_viewport: (usize, i32, bool),
     session_id: String,
     working_dir: Option<String>,
 }
@@ -65,6 +66,7 @@ impl Default for WorktreePaneState {
             tree_preview_scroll: 0,
             tree_preview_focused: false,
             document_ui: std::collections::HashMap::new(),
+            diff_viewport: (0, 0, false),
             session_id: String::new(),
             working_dir: None,
         }
@@ -213,10 +215,24 @@ impl App {
         if self.worktree_pane.tab == tab {
             return;
         }
+        if self.worktree_pane.tab == WorktreePaneTab::Diff {
+            self.worktree_pane.diff_viewport = (
+                self.diff_pane_scroll,
+                self.diff_pane_scroll_x,
+                self.diff_pane_auto_scroll,
+            );
+        }
         self.worktree_pane.tab = tab;
         self.worktree_pane.tree_preview_focused = false;
         self.files_inspector.exit_focus();
         self.reset_worktree_diff_scroll();
+        if tab == WorktreePaneTab::Diff {
+            (
+                self.diff_pane_scroll,
+                self.diff_pane_scroll_x,
+                self.diff_pane_auto_scroll,
+            ) = self.worktree_pane.diff_viewport;
+        }
         self.set_status_notice(match tab {
             WorktreePaneTab::Diff => "Right pane: Diff (Tab switches to Files)",
             WorktreePaneTab::Files => {
@@ -225,8 +241,86 @@ impl App {
         });
     }
 
+    /// User tab navigation carries the Diff selection. Explicit file/link opens
+    /// use set_worktree_pane_tab instead, so a stale Diff selection cannot hijack them.
+    pub(super) fn navigate_worktree_pane_tab(&mut self, tab: WorktreePaneTab) {
+        self.prepare_worktree_pane_state();
+        let selected = (self.worktree_pane.tab == WorktreePaneTab::Diff
+            && tab == WorktreePaneTab::Files
+            && !crate::tui::is_ssh_remote())
+        .then(|| self.worktree_pane.selected_file.clone())
+        .flatten();
+        let mut transfer = None;
+        if let Some(path) = selected {
+            let root = self
+                .session
+                .working_dir
+                .as_ref()
+                .map(std::path::PathBuf::from)
+                .or_else(|| std::env::current_dir().ok());
+            let Some(root) = root else {
+                self.set_status_notice("Cannot locate the project for this file; staying in Diff");
+                return;
+            };
+            let relative = std::path::Path::new(&path);
+            if !relative
+                .components()
+                .all(|part| matches!(part, std::path::Component::Normal(_)))
+            {
+                self.set_status_notice("Cannot open a path outside the project; staying in Diff");
+                return;
+            }
+            let canonical_root = root.canonicalize();
+            let canonical_file = root.join(relative).canonicalize();
+            let available = match (&canonical_root, &canonical_file) {
+                (Ok(root), Ok(file)) => file.starts_with(root) && file.is_file(),
+                _ => false,
+            };
+            if !available {
+                self.set_status_notice(format!(
+                    "File unavailable in the working tree: {path}. View its changes in Diff"
+                ));
+                return;
+            }
+            transfer = Some((root, path));
+        }
+        self.set_worktree_pane_tab(tab);
+        self.worktree_pane.last_activity = Some(Instant::now());
+        if let Some((root, path)) = transfer {
+            let relative = std::path::Path::new(&path);
+            for parent in relative
+                .ancestors()
+                .skip(1)
+                .filter(|parent| !parent.as_os_str().is_empty())
+            {
+                self.worktree_pane
+                    .tree_expanded_dirs
+                    .insert(parent.to_string_lossy().replace('\\', "/"));
+            }
+            if self.worktree_pane.tree_selected_path.as_deref() != Some(&path) {
+                self.worktree_pane.tree_preview_scroll = 0;
+            }
+            let capabilities = if relative
+                .extension()
+                .is_some_and(|ext| ext.eq_ignore_ascii_case("md"))
+            {
+                super::files_inspector::FileInspectorCapabilities {
+                    read: true,
+                    source: true,
+                    changes: true,
+                }
+            } else {
+                super::files_inspector::FileInspectorCapabilities::source_and_changes()
+            };
+            self.worktree_pane.tree_selected_path = Some(path.clone());
+            // select_file supplies Read/Source defaults only for a new selection.
+            // Returning to the same file retains its mode and per-mode offsets.
+            self.files_inspector.select_file(root, path, capabilities);
+        }
+    }
+
     pub(super) fn open_project_files_pane(&mut self) {
-        self.set_worktree_pane_tab(WorktreePaneTab::Files);
+        self.navigate_worktree_pane_tab(WorktreePaneTab::Files);
         self.set_diff_pane_focus(true);
     }
 
@@ -285,7 +379,9 @@ impl App {
             }
             (true, KeyCode::Right) => {
                 match self.worktree_pane.tab {
-                    WorktreePaneTab::Diff => self.set_worktree_pane_tab(WorktreePaneTab::Files),
+                    WorktreePaneTab::Diff => {
+                        self.navigate_worktree_pane_tab(WorktreePaneTab::Files)
+                    }
                     WorktreePaneTab::Files => {}
                 }
                 true
@@ -293,14 +389,9 @@ impl App {
             (true, KeyCode::Left) => {
                 match self.worktree_pane.tab {
                     WorktreePaneTab::Files => {
-                        self.set_worktree_pane_tab(WorktreePaneTab::Diff);
+                        self.navigate_worktree_pane_tab(WorktreePaneTab::Diff);
                         self.prepare_worktree_pane_state();
                         self.worktree_pane.diff_focus = DiffFocus::FileList;
-                        if let Some(path) = crate::tui::ui::worktree_pane_layout()
-                            .and_then(|layout| layout.paths.first().cloned())
-                        {
-                            self.worktree_pane.selected_file = Some(path);
-                        }
                     }
                     WorktreePaneTab::Diff => self.set_diff_pane_focus(false),
                 }
@@ -572,7 +663,7 @@ impl App {
         let stale = !self.worktree_pane_matches_session()
             || crate::tui::ui::worktree_file_is_present(self.session.working_dir.as_deref(), path)
                 == Some(false);
-        if !expired && !stale {
+        if !stale && (!expired || self.worktree_pane.tab == WorktreePaneTab::Files) {
             return false;
         }
         let replacement = crate::tui::ui::worktree_pane_layout()
@@ -590,6 +681,7 @@ impl App {
         self.worktree_pane.selected_file = replacement;
         self.worktree_pane.list_scroll = 0;
         self.worktree_pane.last_activity = None;
+        self.worktree_pane.diff_viewport = (0, 0, false);
         // Do not move an explicit markdown/image pane that replaced the diff.
         if crate::tui::ui::worktree_pane_layout().is_some()
             || !crate::tui::ui::has_explicit_side_pane_content(self)
@@ -616,7 +708,7 @@ impl App {
                 mouse.row,
                 layout.diff_tab_area,
             ) {
-                self.set_worktree_pane_tab(WorktreePaneTab::Diff);
+                self.navigate_worktree_pane_tab(WorktreePaneTab::Diff);
                 self.set_diff_pane_focus(true);
                 return true;
             }
@@ -625,7 +717,7 @@ impl App {
                 mouse.row,
                 layout.files_tab_area,
             ) {
-                self.set_worktree_pane_tab(WorktreePaneTab::Files);
+                self.navigate_worktree_pane_tab(WorktreePaneTab::Files);
                 self.set_diff_pane_focus(true);
                 return true;
             }
