@@ -11,8 +11,7 @@ use tokio_stream::wrappers::ReceiverStream;
 /// ChatGPT's stable composer id. The accessible-name selector remains a semantic
 /// fallback for deployments that have not yet adopted the stable id.
 const EDITOR_SELECTOR: &str = "#prompt-textarea[contenteditable=true]";
-const EDITOR_QUERY_SELECTOR: &str =
-    "#prompt-textarea[contenteditable=true], [contenteditable=true][aria-label='Chat with ChatGPT']";
+const EDITOR_QUERY_SELECTOR: &str = "#prompt-textarea[contenteditable=true], [contenteditable=true][aria-label='Chat with ChatGPT']";
 const TOOL_CALL_START: &str = "<jcode_tool_call>";
 const TOOL_CALL_END: &str = "</jcode_tool_call>";
 const PROMPT_CHUNK_BYTES: usize = 24_000;
@@ -131,12 +130,9 @@ impl ChatGptWebState {
                 anyhow::bail!("ChatGPT web response consumer was closed before submission");
             }
 
-            bridge_command(
-                "click",
-                json!({ "tabId": tab_id, "selector": "#composer-submit-button" }),
-            )
-            .await
-            .context("Failed to submit the prompt in ChatGPT")?;
+            bridge_command("click", submit_prompt_params(tab_id))
+                .await
+                .context("Failed to submit the prompt in ChatGPT")?;
 
             send_phase(tx, jcode_message_types::ConnectionPhase::WaitingForResponse).await?;
 
@@ -156,6 +152,17 @@ impl ChatGptWebState {
             }
         }
     }
+}
+
+fn submit_prompt_params(tab_id: u64) -> Value {
+    // Browser Agent Bridge dispatches a synthetic click and then calls .click()
+    // by default. ChatGPT can handle both before its composer is cleared, sending
+    // the same prompt twice. Keep only the native DOM click, in this owned tab.
+    json!({
+        "tabId": tab_id,
+        "selector": "#composer-submit-button",
+        "dispatchEvents": false
+    })
 }
 
 async fn send_phase(
@@ -279,10 +286,7 @@ fn is_transient_bridge_connection_error(error: &anyhow::Error) -> bool {
         .any(|cause| cause.to_string() == TRANSIENT_BRIDGE_CONNECTION_ERROR)
 }
 
-async fn prepare_chatgpt_page(
-    tab_id: u64,
-    descriptor: &ChatGptWebModelDescriptor,
-) -> Result<()> {
+async fn prepare_chatgpt_page(tab_id: u64, descriptor: &ChatGptWebModelDescriptor) -> Result<()> {
     // Temporary chat has a one-time explanatory screen. It is safe to dismiss,
     // but workspace migration/onboarding is deliberately never auto-confirmed.
     let preparation = evaluate(
@@ -854,6 +858,62 @@ async fn bridge_command(action: &str, params: Value) -> Result<Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn web_submit_disables_duplicate_synthetic_click_and_targets_owned_tab() {
+        for tab_id in [17, 42] {
+            let params = submit_prompt_params(tab_id);
+            assert_eq!(params["tabId"], tab_id);
+            assert_eq!(params["selector"], "#composer-submit-button");
+            assert_eq!(params["dispatchEvents"], false);
+        }
+    }
+
+    #[test]
+    fn independent_web_states_do_not_share_the_turn_lock() {
+        let first = ChatGptWebState::new();
+        let second = ChatGptWebState::new();
+        let _first_turn = first.turn_lock.try_lock().unwrap();
+        assert!(first.turn_lock.try_lock().is_err());
+        assert!(second.turn_lock.try_lock().is_ok());
+    }
+
+    #[test]
+    fn web_prompt_preserves_prior_model_history_once_in_order() {
+        let turns = [
+            (Role::User, "привет, проверка связи"),
+            (Role::Assistant, "Привет! Связь работает, я на месте."),
+            (Role::User, "проверка связи 2"),
+        ];
+        let messages: Vec<_> = turns
+            .into_iter()
+            .map(|(role, text)| Message {
+                role,
+                content: vec![ContentBlock::Text {
+                    text: text.to_string(),
+                    cache_control: None,
+                }],
+                timestamp: None,
+                tool_duration_ms: None,
+            })
+            .collect();
+        let prompt = build_web_prompt(&messages, &[], "system").unwrap();
+        assert_eq!(prompt.matches("# Jcode system instructions\n").count(), 1);
+        let section = prompt.split_once("# Conversation data\n\n").unwrap().1;
+        let (_, data_and_protocol) = section.split_once("\n\n").unwrap();
+        let (data, _) = data_and_protocol
+            .split_once("\n\n# Mandatory Jcode web-transport protocol")
+            .unwrap();
+        let conversation: Value = serde_json::from_str(data).unwrap();
+        assert_eq!(
+            conversation,
+            json!([
+                {"index": 1, "role": "user", "content": [{"type": "text", "text": "привет, проверка связи"}]},
+                {"index": 2, "role": "assistant", "content": [{"type": "text", "text": "Привет! Связь работает, я на месте."}]},
+                {"index": 3, "role": "user", "content": [{"type": "text", "text": "проверка связи 2"}]}
+            ])
+        );
+    }
 
     #[test]
     fn tool_call_parser_accepts_valid_exact_envelope() {
