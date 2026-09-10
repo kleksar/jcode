@@ -213,6 +213,39 @@ async fn comm_message_default_does_not_queue_soft_interrupt_for_connected_sessio
 
 #[tokio::test]
 async fn comm_message_with_wake_queues_soft_interrupt_for_busy_connected_session() {
+    assert_pending_wake_freshness("internal", "ready").await;
+}
+
+#[tokio::test]
+async fn comm_message_external_wake_invalidates_old_ready_before_await() {
+    assert_pending_wake_freshness("external", "ready").await;
+}
+
+#[tokio::test]
+async fn comm_message_wake_preserves_running_and_busy_statuses() {
+    for mode in ["internal", "external"] {
+        for status in ["running", "busy", "streaming", "thinking"] {
+            assert_pending_wake_freshness(mode, status).await;
+        }
+    }
+}
+
+async fn assert_pending_wake_freshness(wake_mode: &str, initial_status: &str) {
+    let _env_lock = crate::storage::lock_test_env();
+    struct WakeModeGuard(Option<std::ffi::OsString>);
+    impl Drop for WakeModeGuard {
+        fn drop(&mut self) {
+            if let Some(value) = &self.0 {
+                jcode_base::env::set_var("JCODE_WAKE_MODE", value);
+            } else {
+                jcode_base::env::remove_var("JCODE_WAKE_MODE");
+            }
+            crate::config::invalidate_config_cache();
+        }
+    }
+    let _wake_guard = WakeModeGuard(std::env::var_os("JCODE_WAKE_MODE"));
+    jcode_base::env::set_var("JCODE_WAKE_MODE", wake_mode);
+    crate::config::invalidate_config_cache();
     let sender = test_agent().await;
     let target = test_agent().await;
 
@@ -316,6 +349,13 @@ async fn comm_message_with_wake_queues_soft_interrupt_for_busy_connected_session
 
     let _busy_guard = target.lock().await;
 
+    swarm_members
+        .write()
+        .await
+        .get_mut(&target_id)
+        .unwrap()
+        .status = initial_status.to_string();
+
     tokio::time::timeout(
         Duration::from_secs(2),
         handle_comm_message(
@@ -369,18 +409,46 @@ async fn comm_message_with_wake_queues_soft_interrupt_for_busy_connected_session
     }
 
     let pending = target_queue.lock().expect("target queue lock");
-    assert_eq!(pending.len(), 1);
-    assert_eq!(pending[0].content, "DM from falcon: hello now");
-    assert_eq!(
-        pending[0].source,
-        jcode_agent_runtime::SoftInterruptSource::System
-    );
+    if wake_mode == "external" {
+        assert!(
+            pending.is_empty(),
+            "external wake must not enqueue an internal turn"
+        );
+    } else {
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].content, "DM from falcon: hello now");
+        assert_eq!(
+            pending[0].source,
+            jcode_agent_runtime::SoftInterruptSource::System
+        );
+    }
     drop(pending);
+
+    if wake_mode == "external" {
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                if let ServerEvent::WakeRequested {
+                    session_id, reason, ..
+                } = target_event_rx.recv().await.expect("external wake event")
+                {
+                    assert_eq!(session_id, target_id);
+                    assert_eq!(reason, "communication_delivery");
+                    break;
+                }
+            }
+        })
+        .await
+        .expect("external wake request should be emitted");
+    }
 
     assert_eq!(
         swarm_members.read().await[&target_id].status,
-        "queued",
-        "a queued wake must invalidate the prior ready result"
+        if initial_status == "ready" {
+            "queued"
+        } else {
+            initial_status
+        },
+        "pending wake must invalidate prior ready, but preserve busy/running states"
     );
 
     let await_runtime = AwaitMembersRuntime::default();

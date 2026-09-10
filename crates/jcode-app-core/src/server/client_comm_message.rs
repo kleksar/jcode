@@ -344,9 +344,9 @@ pub(super) async fn handle_comm_message(
                                 session_id,
                                 swarm_members,
                                 swarms_by_id,
-                                event_history,
-                                event_counter,
-                                swarm_event_tx,
+                                Some(event_history),
+                                Some(event_counter),
+                                Some(swarm_event_tx),
                             )
                             .await;
                             let _ = fanout_session_event(
@@ -382,9 +382,9 @@ pub(super) async fn handle_comm_message(
                                 session_id,
                                 swarm_members,
                                 swarms_by_id,
-                                event_history,
-                                event_counter,
-                                swarm_event_tx,
+                                Some(event_history),
+                                Some(event_counter),
+                                Some(swarm_event_tx),
                             )
                             .await;
                             let _ = queue_soft_interrupt_for_session(
