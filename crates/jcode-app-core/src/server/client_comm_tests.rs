@@ -1,6 +1,5 @@
-use super::super::{
-    AwaitMembersRuntime, CommAwaitMembersContext, handle_comm_await_members, update_member_status,
-};
+use super::super::comm_await::{CommAwaitMembersContext, handle_comm_await_members};
+use super::super::{AwaitMembersRuntime, update_member_status};
 use super::{handle_comm_list, handle_comm_message};
 use crate::agent::Agent;
 use crate::message::{Message, ToolDefinition};
