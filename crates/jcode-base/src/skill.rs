@@ -453,7 +453,8 @@ impl SkillRegistry {
             if !marketplace_path.is_dir() || marketplace_path.is_symlink() {
                 continue;
             }
-            let Some(marketplace_name) = marketplace.file_name().to_str() else {
+            let marketplace_file_name = marketplace.file_name();
+            let Some(marketplace_name) = marketplace_file_name.to_str() else {
                 crate::logging::warn(&format!(
                     "Skills: skipping unidentifiable Claude plugin cache root {}",
                     marketplace_path.display()
@@ -468,7 +469,8 @@ impl SkillRegistry {
                 if !plugin_path.is_dir() || plugin_path.is_symlink() {
                     continue;
                 }
-                let Some(plugin_name) = plugin.file_name().to_str() else {
+                let plugin_file_name = plugin.file_name();
+                let Some(plugin_name) = plugin_file_name.to_str() else {
                     crate::logging::warn(&format!(
                         "Skills: skipping unidentifiable Claude plugin cache root {}",
                         plugin_path.display()
