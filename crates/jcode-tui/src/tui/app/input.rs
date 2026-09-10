@@ -842,6 +842,13 @@ pub(super) fn parse_dropped_paths(text: &str) -> Option<Vec<PathBuf>> {
 }
 
 pub(super) fn handle_text_paste(app: &mut App, text: String) {
+    // Bracketed-paste payloads are terminal bytes, and some terminals report
+    // pasted line breaks as CR even when the clipboard text used LF. Normalize
+    // before counting lines so large pastes still use the compact placeholder.
+    let text = match strip_terminal_control_sequences(&text) {
+        std::borrow::Cow::Borrowed(_) => text,
+        std::borrow::Cow::Owned(cleaned) => cleaned,
+    };
     crate::logging::info(&format!(
         "Text paste: {} chars, {} lines",
         text.len(),
@@ -968,7 +975,8 @@ impl App {
 /// single insertion boundary every input path shares.
 ///
 /// Deliberately conservative: only ESC-introduced sequences and bare CSI-shaped
-/// runs are removed, plus C0 control characters other than tab and newline.
+/// runs are removed. Tabs and line breaks are retained, with CR and CRLF
+/// normalized to LF; other C0 control characters are dropped.
 ///
 /// A *bare* run (one whose ESC introducer was consumed by the torn read) is only
 /// stripped when it looks unmistakably like a terminal report: `[`, at least one
@@ -1029,6 +1037,16 @@ pub(super) fn strip_terminal_control_sequences(text: &str) -> std::borrow::Cow<'
             && let Some(len) = bare_terminal_report_length(&bytes[index..])
         {
             index += len;
+            continue;
+        }
+        // Terminal paste payloads may use CR or CRLF for line boundaries.
+        // Normalize both forms to the composer's canonical LF representation.
+        if byte == b'\r' {
+            cleaned.push('\n');
+            index += 1;
+            if bytes.get(index) == Some(&b'\n') {
+                index += 1;
+            }
             continue;
         }
         // Drop stray C0 controls; keep tab and newline, which are meaningful.
@@ -4143,6 +4161,21 @@ impl App {
 #[cfg(test)]
 mod terminal_control_sequence_tests {
     use super::strip_terminal_control_sequences;
+
+    #[test]
+    fn normalizes_terminal_paste_line_endings() {
+        for (input, expected) in [
+            ("first\rsecond", "first\nsecond"),
+            ("first\r\nsecond", "first\nsecond"),
+            ("first\nsecond", "first\nsecond"),
+        ] {
+            assert_eq!(
+                strip_terminal_control_sequences(input),
+                expected,
+                "input {input:?} should preserve its line boundary"
+            );
+        }
+    }
 
     /// Remnants of terminal reports must never reach the composer (#540).
     #[test]

@@ -1900,6 +1900,17 @@ fn oversized_pasted_submit_is_rejected_and_preserves_input() {
     );
 }
 
+#[test]
+fn carriage_return_multiline_paste_uses_compact_placeholder() {
+    let mut app = create_test_app();
+    let pasted = "one\rtwo\rthree\rfour\rfive";
+
+    crate::tui::app::input::handle_text_paste(&mut app, pasted.to_string());
+
+    assert_eq!(app.input, "[pasted 5 lines]");
+    assert_eq!(app.pasted_contents, ["one\ntwo\nthree\nfour\nfive"]);
+}
+
 fn seed_stale_clear_usage(app: &mut App) {
     app.streaming.streaming_input_tokens = 40_000;
     app.streaming.streaming_output_tokens = 2_000;
