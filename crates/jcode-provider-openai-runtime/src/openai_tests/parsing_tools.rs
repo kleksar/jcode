@@ -1,4 +1,20 @@
 #[test]
+fn returned_service_tier_diagnostics_confirm_only_explicit_response_tier() {
+    let response = serde_json::json!({"service_tier":"priority"});
+    assert_eq!(
+        returned_service_tier_diagnostics(Some(&response)),
+        (Some("priority".to_string()), "confirmed")
+    );
+
+    let missing = serde_json::json!({"status":"completed"});
+    assert_eq!(
+        returned_service_tier_diagnostics(Some(&missing)),
+        (None, "unknown")
+    );
+    assert_eq!(returned_service_tier_diagnostics(None), (None, "unknown"));
+}
+
+#[test]
 fn test_parse_openai_response_completed_captures_incomplete_stop_reason() {
     let data = r#"{"type":"response.completed","response":{"status":"incomplete","incomplete_details":{"reason":"max_output_tokens"}}}"#;
     let mut saw_text_delta = false;

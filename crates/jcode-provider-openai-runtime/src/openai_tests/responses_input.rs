@@ -85,6 +85,89 @@ fn build_test_response_request(
     )
 }
 
+fn provider_with_model_service_tiers(
+    model_service_tiers: HashMap<String, Option<String>>,
+) -> OpenAIProvider {
+    let mut provider = OpenAIProvider::new(CodexCredentials {
+        access_token: "test".to_string(),
+        refresh_token: String::new(),
+        id_token: None,
+        account_id: None,
+        expires_at: None,
+    });
+    provider.model_service_tiers = Arc::new(model_service_tiers);
+    provider
+}
+
+#[test]
+fn model_service_tier_fast_override_wins_over_session_off_for_luna() {
+    let provider = provider_with_model_service_tiers(HashMap::from([(
+        "gpt-5.6-luna".to_string(),
+        OpenAIProvider::normalize_service_tier("fast").unwrap(),
+    )]));
+    provider.set_service_tier("off").unwrap();
+
+    let request = provider.response_request_for_model("gpt-5.6-luna", &[], &[], "system", false);
+
+    assert_eq!(request["service_tier"], serde_json::json!("priority"));
+}
+
+#[test]
+fn model_service_tier_absent_model_keeps_session_fallback() {
+    let provider = provider_with_model_service_tiers(HashMap::from([(
+        "gpt-5.6-luna".to_string(),
+        Some("priority".to_string()),
+    )]));
+    provider.set_service_tier("flex").unwrap();
+
+    let request = provider.response_request_for_model("gpt-5.6-sol", &[], &[], "system", false);
+
+    assert_eq!(request["service_tier"], serde_json::json!("flex"));
+}
+
+#[test]
+fn model_service_tier_off_override_suppresses_provider_fallback() {
+    let provider = provider_with_model_service_tiers(HashMap::from([(
+        "gpt-5.6-luna".to_string(),
+        None,
+    )]));
+    provider.set_service_tier("priority").unwrap();
+
+    let request = provider.response_request_for_model("gpt-5.6-luna", &[], &[], "system", false);
+
+    assert!(request.get("service_tier").is_none());
+}
+
+#[test]
+fn model_service_tier_resolution_isolated_across_model_switches_and_forks() {
+    let provider = provider_with_model_service_tiers(HashMap::from([(
+        "gpt-5.6-luna".to_string(),
+        Some("priority".to_string()),
+    )]));
+    provider.set_service_tier("flex").unwrap();
+    let fork = provider.fork_openai();
+    fork.set_service_tier("off").unwrap();
+
+    provider.set_model("gpt-5.6-luna").unwrap();
+    assert_eq!(
+        provider.service_tier_for_model(&provider.model()).as_deref(),
+        Some("priority")
+    );
+    provider.set_model("gpt-5.6-sol").unwrap();
+    assert_eq!(
+        provider.service_tier_for_model(&provider.model()).as_deref(),
+        Some("flex")
+    );
+    fork.set_model("gpt-5.6-luna").unwrap();
+    assert_eq!(
+        fork.service_tier_for_model(&fork.model()).as_deref(),
+        Some("priority")
+    );
+    fork.set_model("gpt-5.6-sol").unwrap();
+    assert!(fork.service_tier_for_model(&fork.model()).is_none());
+    assert_eq!(provider.service_tier_for_model("gpt-5.6-sol").as_deref(), Some("flex"));
+}
+
 #[test]
 fn test_build_responses_input_injects_missing_tool_output() {
     let expected_missing = format!("[Error] {}", TOOL_OUTPUT_MISSING_TEXT);

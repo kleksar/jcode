@@ -24,7 +24,7 @@ const OPENAI_API_BASE: &str = "https://api.openai.com/v1";
 use reqwest::header::HeaderValue;
 use reqwest::{Client, StatusCode};
 use serde_json::Value;
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::panic::AssertUnwindSafe;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering as AtomicOrdering};
 use std::sync::{Arc, LazyLock, RwLock as StdRwLock, Weak};
@@ -710,6 +710,9 @@ pub struct OpenAIProvider {
     reasoning_effort: Arc<StdRwLock<Option<String>>>,
     model_reasoning_efforts: Arc<StdRwLock<HashMap<String, Vec<String>>>>,
     service_tier: Arc<StdRwLock<Option<String>>>,
+    /// Immutable, exact-model overrides from configuration. The mutable
+    /// `service_tier` remains session-local and is used only as a fallback.
+    model_service_tiers: Arc<HashMap<String, Option<String>>>,
     native_compaction_mode: OpenAINativeCompactionMode,
     native_compaction_threshold_tokens: usize,
     transport_mode: Arc<RwLock<OpenAITransportMode>>,
@@ -827,6 +830,11 @@ impl OpenAIProvider {
                 .openai_service_tier
                 .as_deref(),
         );
+        let model_service_tiers = Self::load_model_service_tiers(
+            &jcode_base::config::config()
+                .provider
+                .openai_model_service_tiers,
+        );
         let transport_mode = OpenAITransportMode::from_config(
             jcode_base::config::config()
                 .provider
@@ -856,6 +864,7 @@ impl OpenAIProvider {
             reasoning_effort: Arc::new(StdRwLock::new(reasoning_effort)),
             model_reasoning_efforts: Arc::new(StdRwLock::new(model_reasoning_efforts)),
             service_tier: Arc::new(StdRwLock::new(service_tier)),
+            model_service_tiers: Arc::new(model_service_tiers),
             native_compaction_mode,
             native_compaction_threshold_tokens,
             transport_mode: Arc::new(RwLock::new(transport_mode)),
@@ -1142,6 +1151,28 @@ impl OpenAIProvider {
         }
     }
 
+    fn load_model_service_tiers(raw: &BTreeMap<String, String>) -> HashMap<String, Option<String>> {
+        raw.iter()
+            .filter_map(|(model, tier)| match Self::normalize_service_tier(tier) {
+                Ok(tier) => Some((model.clone(), tier)),
+                Err(err) => {
+                    jcode_base::logging::warn(&format!(
+                        "{}; ignoring configured OpenAI service tier override for model '{}'",
+                        err, model
+                    ));
+                    None
+                }
+            })
+            .collect()
+    }
+
+    fn service_tier_for_model(&self, model_id: &str) -> Option<String> {
+        self.model_service_tiers
+            .get(model_id)
+            .cloned()
+            .unwrap_or_else(|| self.service_tier())
+    }
+
     fn load_max_output_tokens() -> Option<u32> {
         let raw = std::env::var("JCODE_OPENAI_MAX_OUTPUT_TOKENS").ok();
         let parsed = Self::parse_max_output_tokens(raw.as_deref());
@@ -1228,11 +1259,9 @@ impl OpenAIProvider {
         // Map the `swarm` sentinel (and any future aliases) to the real effort
         // value the API understands.
         let api_reasoning_effort = self.api_reasoning_effort(reasoning_effort.as_deref());
-        let service_tier = self
-            .service_tier
-            .read()
-            .map(|guard| guard.clone())
-            .unwrap_or_else(|poisoned| poisoned.into_inner().clone());
+        // Resolve after the final request model is known. Exact configured model
+        // entries intentionally win over the session tier, including `off`.
+        let service_tier = self.service_tier_for_model(model_id);
         let native_compaction_threshold =
             self.native_compaction_threshold_for_context_window(self.context_window());
         Self::build_response_request(
@@ -1415,7 +1444,9 @@ use self::openai_stream_runtime::{PersistentWsResult, is_retryable_error, openai
 
 use self::stream::{OpenAIResponsesStream, parse_openai_response_event};
 #[cfg(test)]
-use self::stream::{handle_openai_output_item, parse_text_wrapped_tool_call};
+use self::stream::{
+    handle_openai_output_item, parse_text_wrapped_tool_call, returned_service_tier_diagnostics,
+};
 
 mod chatgpt_web;
 #[path = "openai_provider_impl.rs"]

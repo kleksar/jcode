@@ -105,6 +105,31 @@ fn extract_error_with_retry(
 
     (message, retry_after)
 }
+
+/// Returns the provider-confirmed service tier only when the terminal response
+/// explicitly supplies it. A requested tier is not evidence of the tier served.
+pub fn returned_service_tier_diagnostics(
+    response: Option<&Value>,
+) -> (Option<String>, &'static str) {
+    match response
+        .and_then(|response| response.get("service_tier"))
+        .and_then(Value::as_str)
+    {
+        Some(tier) => (Some(tier.to_string()), "confirmed"),
+        None => (None, "unknown"),
+    }
+}
+
+fn log_returned_service_tier(event_kind: &str, response: Option<&Value>) {
+    let (tier, confirmation) = returned_service_tier_diagnostics(response);
+    jcode_logging::info(&format!(
+        "OpenAI response lifecycle: event={} returned_service_tier={} confirmation={}",
+        event_kind,
+        tier.as_deref().unwrap_or("null"),
+        confirmation
+    ));
+}
+
 pub fn parse_text_wrapped_tool_call(text: &str) -> Option<(String, String, String, String)> {
     let marker = "to=functions.";
     let marker_idx = text.find(marker)?;
@@ -433,6 +458,7 @@ pub fn parse_openai_response_event(
             }
         }
         "response.incomplete" => {
+            log_returned_service_tier(&event.kind, event.response.as_ref());
             let stop_reason = event
                 .response
                 .as_ref()
@@ -447,6 +473,7 @@ pub fn parse_openai_response_event(
             return pending.pop_front();
         }
         "response.completed" => {
+            log_returned_service_tier(&event.kind, event.response.as_ref());
             let stop_reason = event
                 .response
                 .as_ref()

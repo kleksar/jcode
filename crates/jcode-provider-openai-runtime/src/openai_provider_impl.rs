@@ -10,6 +10,42 @@ fn catalog_error_is_auth_rejection(err: &anyhow::Error) -> bool {
         .is_some_and(|status| status.0 == 401 || status.0 == 403)
 }
 
+impl OpenAIProvider {
+    pub(super) fn fork_openai(&self) -> Self {
+        let model = self.model();
+        OpenAIProvider {
+            client: self.client.clone(),
+            credentials: Arc::clone(&self.credentials),
+            credential_mode: Arc::clone(&self.credential_mode),
+            model: Arc::new(RwLock::new(model)),
+            prompt_cache_key: self.prompt_cache_key.clone(),
+            prompt_cache_retention: self.prompt_cache_retention.clone(),
+            max_output_tokens: self.max_output_tokens,
+            // Copy the raw stored effort (not the surfaced effective value) so
+            // a fork that later switches models does not inherit another
+            // model's default as if the user had chosen it.
+            reasoning_effort: Arc::new(StdRwLock::new(
+                self.reasoning_effort
+                    .read()
+                    .map(|guard| guard.clone())
+                    .unwrap_or_else(|poisoned| poisoned.into_inner().clone()),
+            )),
+            model_reasoning_efforts: Arc::clone(&self.model_reasoning_efforts),
+            service_tier: Arc::new(StdRwLock::new(self.service_tier())),
+            model_service_tiers: Arc::clone(&self.model_service_tiers),
+            native_compaction_mode: self.native_compaction_mode,
+            native_compaction_threshold_tokens: self.native_compaction_threshold_tokens,
+            transport_mode: Arc::clone(&self.transport_mode),
+            websocket_cooldowns: Arc::clone(&self.websocket_cooldowns),
+            websocket_failure_streaks: Arc::clone(&self.websocket_failure_streaks),
+            persistent_ws: Arc::new(Mutex::new(None)),
+            prewarm: Arc::new(openai_websocket_prewarm::PrewarmSlot::default()),
+            chatgpt_web: Arc::new(chatgpt_web::ChatGptWebState::new()),
+            browser_only: Arc::clone(&self.browser_only),
+        }
+    }
+}
+
 #[async_trait]
 impl Provider for OpenAIProvider {
     fn reload_credentials(&self) {
@@ -1225,36 +1261,7 @@ impl Provider for OpenAIProvider {
     }
 
     fn fork(&self) -> Arc<dyn Provider> {
-        let model = self.model();
-        Arc::new(OpenAIProvider {
-            client: self.client.clone(),
-            credentials: Arc::clone(&self.credentials),
-            credential_mode: Arc::clone(&self.credential_mode),
-            model: Arc::new(RwLock::new(model)),
-            prompt_cache_key: self.prompt_cache_key.clone(),
-            prompt_cache_retention: self.prompt_cache_retention.clone(),
-            max_output_tokens: self.max_output_tokens,
-            // Copy the raw stored effort (not the surfaced effective value) so
-            // a fork that later switches models does not inherit another
-            // model's default as if the user had chosen it.
-            reasoning_effort: Arc::new(StdRwLock::new(
-                self.reasoning_effort
-                    .read()
-                    .map(|guard| guard.clone())
-                    .unwrap_or_else(|poisoned| poisoned.into_inner().clone()),
-            )),
-            model_reasoning_efforts: Arc::clone(&self.model_reasoning_efforts),
-            service_tier: Arc::new(StdRwLock::new(self.service_tier())),
-            native_compaction_mode: self.native_compaction_mode,
-            native_compaction_threshold_tokens: self.native_compaction_threshold_tokens,
-            transport_mode: Arc::clone(&self.transport_mode),
-            websocket_cooldowns: Arc::clone(&self.websocket_cooldowns),
-            websocket_failure_streaks: Arc::clone(&self.websocket_failure_streaks),
-            persistent_ws: Arc::new(Mutex::new(None)),
-            prewarm: Arc::new(openai_websocket_prewarm::PrewarmSlot::default()),
-            chatgpt_web: Arc::new(chatgpt_web::ChatGptWebState::new()),
-            browser_only: Arc::clone(&self.browser_only),
-        })
+        Arc::new(self.fork_openai())
     }
 
     async fn invalidate_credentials(&self) {
