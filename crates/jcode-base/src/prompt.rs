@@ -992,19 +992,28 @@ fn load_prompt_overlay_files_from_dir(working_dir: Option<&Path>) -> (Option<Str
     };
 
     let project_dir = working_dir.unwrap_or(Path::new("."));
-    if let Some((content, size)) = load_file(
-        &project_dir.join(".jcode").join("prompt-overlay.md"),
+    let project_overlay = project_dir.join(".jcode").join("prompt-overlay.md");
+    let loaded_project_overlay = load_file(
+        &project_overlay,
         "Project Prompt Overlay (.jcode/prompt-overlay.md)",
-    ) {
+    );
+    if let Some((content, size)) = loaded_project_overlay.as_ref() {
         total_chars += size;
-        contents.push(content);
+        contents.push(content.clone());
     }
 
     if let Ok(global_overlay) = crate::storage::jcode_dir().map(|dir| dir.join("prompt-overlay.md"))
-        && let Some((content, size)) = load_file(
-            &global_overlay,
-            "Global Prompt Overlay (~/.jcode/prompt-overlay.md)",
-        )
+        // Only deduplicate readable project guidance. If reading or resolving
+        // either path fails, retain the existing best-effort loading behavior.
+        && !(loaded_project_overlay.is_some()
+            && matches!(
+                (
+                    std::fs::canonicalize(&project_overlay),
+                    std::fs::canonicalize(&global_overlay),
+                ),
+                (Ok(project), Ok(global)) if project == global
+            ))
+        && let Some((content, size)) = load_file(&global_overlay, "Global Prompt Overlay (~/.jcode/prompt-overlay.md)")
     {
         total_chars += size;
         contents.push(content);

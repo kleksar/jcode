@@ -389,6 +389,115 @@ fn test_prompt_overlay_files_are_loaded_from_project_and_global_jcode_dirs() {
 }
 
 #[test]
+fn prompt_overlay_is_loaded_once_when_project_dir_is_global_jcode_parent() {
+    let _guard = crate::storage::lock_test_env();
+    let prev_home = std::env::var_os("JCODE_HOME");
+    let home_dir = tempfile::TempDir::new().unwrap();
+    let global_jcode_dir = home_dir.path().join(".jcode");
+    crate::env::set_var("JCODE_HOME", &global_jcode_dir);
+    std::fs::create_dir_all(&global_jcode_dir).unwrap();
+    std::fs::write(
+        global_jcode_dir.join("prompt-overlay.md"),
+        "shared prompt overlay instructions",
+    )
+    .unwrap();
+
+    let (content, chars) = load_prompt_overlay_files_from_dir(Some(home_dir.path()));
+    let content = content.expect("expected prompt overlay content");
+
+    assert_eq!(
+        content.matches("shared prompt overlay instructions").count(),
+        1,
+        "the same canonical overlay must be included only once"
+    );
+    assert_eq!(chars, "shared prompt overlay instructions".len());
+
+    if let Some(prev_home) = prev_home {
+        crate::env::set_var("JCODE_HOME", prev_home);
+    } else {
+        crate::env::remove_var("JCODE_HOME");
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn prompt_overlay_is_loaded_once_through_a_symlink_alias() {
+    let _guard = crate::storage::lock_test_env();
+    let prev_home = std::env::var_os("JCODE_HOME");
+    let global_dir = tempfile::TempDir::new().unwrap();
+    crate::env::set_var("JCODE_HOME", global_dir.path());
+    std::fs::write(
+        global_dir.path().join("prompt-overlay.md"),
+        "symlinked prompt overlay instructions",
+    )
+    .unwrap();
+
+    let project_dir = tempfile::TempDir::new().unwrap();
+    let project_jcode_dir = project_dir.path().join(".jcode");
+    std::fs::create_dir_all(&project_jcode_dir).unwrap();
+    std::os::unix::fs::symlink(
+        global_dir.path().join("prompt-overlay.md"),
+        project_jcode_dir.join("prompt-overlay.md"),
+    )
+    .unwrap();
+
+    let (content, chars) = load_prompt_overlay_files_from_dir(Some(project_dir.path()));
+    let content = content.expect("expected prompt overlay content");
+
+    assert_eq!(
+        content
+            .matches("symlinked prompt overlay instructions")
+            .count(),
+        1,
+        "symlink aliases of one overlay must be included only once"
+    );
+    assert_eq!(chars, "symlinked prompt overlay instructions".len());
+
+    if let Some(prev_home) = prev_home {
+        crate::env::set_var("JCODE_HOME", prev_home);
+    } else {
+        crate::env::remove_var("JCODE_HOME");
+    }
+}
+
+#[test]
+fn prompt_overlays_with_equal_text_from_distinct_files_are_both_loaded() {
+    let _guard = crate::storage::lock_test_env();
+    let prev_home = std::env::var_os("JCODE_HOME");
+    let global_dir = tempfile::TempDir::new().unwrap();
+    crate::env::set_var("JCODE_HOME", global_dir.path());
+    let overlay_text = "equal-text prompt overlay instructions";
+    std::fs::write(global_dir.path().join("prompt-overlay.md"), overlay_text).unwrap();
+
+    let project_dir = tempfile::TempDir::new().unwrap();
+    std::fs::create_dir_all(project_dir.path().join(".jcode")).unwrap();
+    std::fs::write(
+        project_dir.path().join(".jcode/prompt-overlay.md"),
+        overlay_text,
+    )
+    .unwrap();
+
+    let (content, chars) = load_prompt_overlay_files_from_dir(Some(project_dir.path()));
+    let content = content.expect("expected prompt overlay content");
+
+    assert_eq!(content.matches(overlay_text).count(), 2);
+    assert!(
+        content.find("# Project Prompt Overlay (.jcode/prompt-overlay.md)").unwrap()
+            < content
+                .find("# Global Prompt Overlay (~/.jcode/prompt-overlay.md)")
+                .unwrap(),
+        "distinct overlay files must retain project-then-global ordering"
+    );
+    assert_eq!(chars, overlay_text.len() * 2);
+
+    if let Some(prev_home) = prev_home {
+        crate::env::set_var("JCODE_HOME", prev_home);
+    } else {
+        crate::env::remove_var("JCODE_HOME");
+    }
+}
+
+#[test]
 fn test_preferred_tools_files_are_loaded_from_project_and_global_jcode_dirs() {
     let _guard = crate::storage::lock_test_env();
     let prev_home = std::env::var_os("JCODE_HOME");
