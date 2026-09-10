@@ -290,6 +290,61 @@ fn attached_swarm_member(
     }
 }
 
+#[tokio::test]
+async fn adopted_worktree_updates_agent_member_persistence_and_remote_client() {
+    let _env_guard = crate::storage::lock_test_env();
+    let home = tempfile::tempdir().expect("create temporary JCODE_HOME");
+    let _home_guard = ScopedEnvVar::set("JCODE_HOME", home.path());
+    let worktree = home.path().join("feature-worktree");
+    std::fs::create_dir_all(&worktree).expect("create adopted worktree");
+
+    let provider: Arc<dyn Provider> = Arc::new(StreamingMockProvider::default());
+    let agent = test_agent(provider).await;
+    let session_id = {
+        let mut agent = agent.lock().await;
+        agent
+            .rename_session_title(Some("worktree propagation fixture".to_string()))
+            .expect("persist initial session");
+        agent.session_id().to_string()
+    };
+    let sessions = Arc::new(RwLock::new(HashMap::from([(
+        session_id.clone(),
+        Arc::clone(&agent),
+    )])));
+    let (event_tx, mut event_rx) = mpsc::unbounded_channel();
+    let mut member = attached_swarm_member(&session_id, event_tx.clone());
+    member
+        .event_txs
+        .insert("remote-client".to_string(), event_tx);
+    let swarm_members = Arc::new(RwLock::new(HashMap::from([(session_id.clone(), member)])));
+    let adopted = worktree.to_string_lossy().into_owned();
+
+    Server::adopt_session_worktree(&sessions, &swarm_members, &session_id, adopted.clone()).await;
+
+    assert_eq!(agent.lock().await.working_dir(), Some(adopted.as_str()));
+    assert_eq!(
+        swarm_members
+            .read()
+            .await
+            .get(&session_id)
+            .and_then(|member| member.working_dir.as_deref()),
+        Some(worktree.as_path())
+    );
+    let event = timeout(Duration::from_secs(1), event_rx.recv())
+        .await
+        .expect("working-directory event timeout")
+        .expect("working-directory event channel closed");
+    assert!(matches!(
+        event,
+        ServerEvent::WorkingDirChanged {
+            session_id: ref event_session_id,
+            working_dir: ref event_working_dir,
+        } if event_session_id == &session_id && event_working_dir == &adopted
+    ));
+    let persisted = crate::session::Session::load(&session_id).expect("load persisted session");
+    assert_eq!(persisted.working_dir.as_deref(), Some(adopted.as_str()));
+}
+
 fn persisted_headless_member(
     session_id: &str,
     swarm_id: &str,
