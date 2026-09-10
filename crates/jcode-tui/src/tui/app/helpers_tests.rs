@@ -1,12 +1,66 @@
 use super::{
     build_resume_command, effort_display_label, extract_bracketed_system_message,
-    format_countdown_until, gather_ambient_info_inner, inferred_reasoning_efforts,
-    partition_queued_messages, resume_invocation_args, resumed_window_title,
+    format_countdown_until, gather_ambient_info_inner, gather_git_info_inner,
+    inferred_reasoning_efforts, partition_queued_messages, resume_invocation_args,
+    resumed_window_title,
 };
 use crate::ambient::{AmbientManager, Priority, ScheduleRequest, ScheduleTarget};
 use crate::terminal_launch::{detected_resume_terminal, shell_command};
 use crate::tui::session_picker::ResumeTarget;
 use chrono::{Duration as ChronoDuration, Utc};
+
+#[test]
+fn git_info_is_gathered_from_the_requested_working_directory() {
+    fn git(repo: &std::path::Path, args: &[&str]) {
+        let output = std::process::Command::new("git")
+            .args(args)
+            .current_dir(repo)
+            .env("GIT_AUTHOR_NAME", "Jcode Test")
+            .env("GIT_AUTHOR_EMAIL", "jcode@example.invalid")
+            .env("GIT_COMMITTER_NAME", "Jcode Test")
+            .env("GIT_COMMITTER_EMAIL", "jcode@example.invalid")
+            .output()
+            .expect("run git command");
+        assert!(
+            output.status.success(),
+            "git {} failed: {}",
+            args.join(" "),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    let sandbox = tempfile::tempdir().expect("create temporary sandbox");
+    let main_repo = sandbox.path().join("main");
+    let worktree_repo = sandbox.path().join("session-worktree");
+    std::fs::create_dir(&main_repo).expect("create main repository directory");
+    git(&main_repo, &["init", "-b", "main"]);
+    std::fs::write(main_repo.join("README.md"), "test\n").expect("write initial file");
+    git(&main_repo, &["add", "README.md"]);
+    git(&main_repo, &["commit", "-m", "initial"]);
+    git(
+        &main_repo,
+        &[
+            "worktree",
+            "add",
+            "-b",
+            "feat/session-worktree",
+            worktree_repo.to_str().expect("UTF-8 worktree path"),
+        ],
+    );
+
+    assert_eq!(
+        gather_git_info_inner(&main_repo)
+            .expect("main repository git info")
+            .branch,
+        "main"
+    );
+    assert_eq!(
+        gather_git_info_inner(&worktree_repo)
+            .expect("worktree repository git info")
+            .branch,
+        "feat/session-worktree"
+    );
+}
 
 struct EnvVarGuard {
     key: &'static str,

@@ -155,6 +155,9 @@ const CONFIG_ENV_KEYS: &[&str] = &[
     "JCODE_SEARXNG_URL",
     "JCODE_SHOW_AGENTGREP_OUTPUT",
     "JCODE_SHOW_BASH_OUTPUT",
+    "JCODE_BASH_OUTPUT_BACKEND",
+    "JCODE_RTK_BINARY",
+    "JCODE_RTK_REWRITE_TIMEOUT_MS",
     "JCODE_SHOW_DIFFS",
     "JCODE_SHOW_THINKING",
     "JCODE_SIDE_PANEL_TOGGLE_KEY",
@@ -663,6 +666,8 @@ pub struct ToolConfig {
         alias = "mcp_tools_auto_threshold_tokens"
     )]
     pub mcp_tools_token_threshold: usize,
+    /// Shell-command output optimization settings.
+    pub bash: BashToolConfig,
 }
 
 impl Default for ToolConfig {
@@ -674,7 +679,36 @@ impl Default for ToolConfig {
             disable_base_tools: false,
             mcp_tools: McpToolsMode::Auto,
             mcp_tools_token_threshold: 8_000,
+            bash: BashToolConfig::default(),
         }
+    }
+}
+
+/// Controls optional output optimization for the built-in `bash` tool.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct BashToolConfig {
+    /// Output backend: `raw` (default) or `rtk`.
+    pub output_backend: String,
+    /// RTK executable name or path.
+    pub rtk_binary: String,
+    /// Maximum time allowed for RTK's command-rewrite decision.
+    pub rtk_rewrite_timeout_ms: u64,
+}
+
+impl Default for BashToolConfig {
+    fn default() -> Self {
+        Self {
+            output_backend: "raw".to_string(),
+            rtk_binary: "rtk".to_string(),
+            rtk_rewrite_timeout_ms: 500,
+        }
+    }
+}
+
+impl BashToolConfig {
+    pub fn uses_rtk(&self) -> bool {
+        self.output_backend.trim().eq_ignore_ascii_case("rtk")
     }
 }
 

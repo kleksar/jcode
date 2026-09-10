@@ -51,6 +51,114 @@ struct NativeAutoCompactionProvider;
 
 struct NativeCompactionStreamProvider;
 
+#[cfg(unix)]
+#[tokio::test]
+async fn public_agent_tool_dispatch_uses_real_rtk_backend() {
+    let Some(rtk_binary) = std::env::var_os("JCODE_TEST_RTK_BINARY") else {
+        return;
+    };
+    let _env_guard = crate::storage::lock_test_env();
+    let previous_home = std::env::var_os("JCODE_HOME");
+    let previous_data_home = std::env::var_os("XDG_DATA_HOME");
+    let previous_backend = std::env::var_os("JCODE_BASH_OUTPUT_BACKEND");
+    let previous_binary = std::env::var_os("JCODE_RTK_BINARY");
+    let previous_timeout = std::env::var_os("JCODE_RTK_REWRITE_TIMEOUT_MS");
+    let temp = tempfile::tempdir().expect("temp dir");
+    let jcode_home = temp.path().join("jcode-home");
+    let data_home = temp.path().join("data-home");
+    let repo = temp.path().join("repo");
+    std::fs::create_dir_all(&jcode_home).expect("create jcode home");
+    std::fs::create_dir_all(&repo).expect("create repository");
+
+    crate::env::set_var("JCODE_HOME", &jcode_home);
+    crate::env::set_var("XDG_DATA_HOME", &data_home);
+    crate::env::set_var("JCODE_BASH_OUTPUT_BACKEND", "rtk");
+    crate::env::set_var("JCODE_RTK_BINARY", &rtk_binary);
+    crate::env::set_var("JCODE_RTK_REWRITE_TIMEOUT_MS", "2000");
+    crate::config::Config::invalidate_cache();
+
+    assert!(
+        std::process::Command::new("git")
+            .args(["init", "--quiet"])
+            .current_dir(&repo)
+            .status()
+            .expect("run git init")
+            .success()
+    );
+    for (key, value) in [
+        ("user.email", "rtk-dispatch@example.invalid"),
+        ("user.name", "RTK Dispatch Test"),
+    ] {
+        assert!(
+            std::process::Command::new("git")
+                .args(["config", key, value])
+                .current_dir(&repo)
+                .status()
+                .expect("configure git repository")
+                .success()
+        );
+    }
+    std::fs::write(repo.join("history.txt"), "public dispatch\n").expect("write fixture");
+    assert!(
+        std::process::Command::new("git")
+            .args(["add", "history.txt"])
+            .current_dir(&repo)
+            .status()
+            .expect("stage fixture")
+            .success()
+    );
+    assert!(
+        std::process::Command::new("git")
+            .args(["commit", "--quiet", "-m", "public dispatch"])
+            .current_dir(&repo)
+            .status()
+            .expect("commit fixture")
+            .success()
+    );
+
+    let provider: Arc<dyn Provider> = Arc::new(NativeAutoCompactionProvider);
+    let registry = Registry::new(provider.clone()).await;
+    let mut agent = Agent::new(provider, registry);
+    agent.set_working_dir(&repo.to_string_lossy());
+    let output = agent
+        .execute_tool("bash", serde_json::json!({"command": "git log -n 1"}))
+        .await
+        .expect("execute bash through Agent tool dispatch");
+
+    assert_eq!(
+        output
+            .metadata
+            .as_ref()
+            .and_then(|value| value.get("bash_output_backend"))
+            .and_then(serde_json::Value::as_str),
+        Some("rtk")
+    );
+    assert!(
+        output
+            .metadata
+            .as_ref()
+            .and_then(|value| value.get("rewritten_command"))
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|command| command.starts_with("rtk ")),
+        "public dispatch should expose the accepted RTK rewrite in metadata"
+    );
+    assert!(output.output.contains("public dispatch"));
+
+    for (name, previous) in [
+        ("JCODE_HOME", previous_home),
+        ("XDG_DATA_HOME", previous_data_home),
+        ("JCODE_BASH_OUTPUT_BACKEND", previous_backend),
+        ("JCODE_RTK_BINARY", previous_binary),
+        ("JCODE_RTK_REWRITE_TIMEOUT_MS", previous_timeout),
+    ] {
+        match previous {
+            Some(value) => crate::env::set_var(name, value),
+            None => crate::env::remove_var(name),
+        }
+    }
+    crate::config::Config::invalidate_cache();
+}
+
 #[derive(Clone)]
 struct ExplicitPinProvider {
     model: Arc<std::sync::Mutex<String>>,
