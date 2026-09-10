@@ -1664,6 +1664,31 @@ fn format_context_history(target: &str, messages: &[HistoryMessage]) -> ToolOutp
     ToolOutput::new(format_comm_context_history(target, messages))
 }
 
+fn validate_read_context_limit(limit: Option<usize>) -> Result<()> {
+    if limit == Some(0) {
+        return Err(anyhow::anyhow!(
+            "'limit' must be a positive integer for read_context action"
+        ));
+    }
+    Ok(())
+}
+
+fn format_limited_context_history(
+    target: &str,
+    messages: &[HistoryMessage],
+    limit: Option<usize>,
+) -> Result<ToolOutput> {
+    validate_read_context_limit(limit)?;
+    let messages = match limit {
+        Some(limit) => {
+            let start = messages.len().saturating_sub(limit);
+            &messages[start..]
+        }
+        None => messages,
+    };
+    Ok(format_context_history(target, messages))
+}
+
 #[cfg(test)]
 fn format_awaited_members(
     completed: bool,
@@ -2039,7 +2064,7 @@ impl Tool for CommunicateTool {
                 "limit": {
                     "type": "integer",
                     "minimum": 1,
-                    "description": "Optional max items for summary-style reads."
+                    "description": "Optional max items for summary-style reads. For read_context, returns the last N messages in chronological order."
                 },
                 "task_id": {
                     "type": "string",
@@ -2890,6 +2915,11 @@ impl Tool for CommunicateTool {
             }
 
             "report" => {
+                if params.artifact.is_some() {
+                    return Err(anyhow::anyhow!(
+                        "'artifact' is not supported for report action; include the artifact path in 'message' or use complete_node"
+                    ));
+                }
                 let message = params
                     .message
                     .ok_or_else(|| anyhow::anyhow!("'message' is required for report action"))?;
@@ -2948,6 +2978,7 @@ impl Tool for CommunicateTool {
             }
 
             "read_context" => {
+                validate_read_context_limit(params.limit)?;
                 let target = params.target_session.ok_or_else(|| {
                     anyhow::anyhow!("'target_session' is required for read_context action")
                 })?;
@@ -2960,7 +2991,7 @@ impl Tool for CommunicateTool {
 
                 match send_request(request).await {
                     Ok(ServerEvent::CommContextHistory { messages, .. }) => {
-                        Ok(format_context_history(&target, &messages))
+                        format_limited_context_history(&target, &messages, params.limit)
                     }
                     Ok(response) => {
                         ensure_success(&response)?;

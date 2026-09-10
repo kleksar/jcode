@@ -1112,6 +1112,79 @@ async fn spawn_execute_rejects_missing_label_before_sending_request() {
     assert_eq!(error.to_string(), "'label' is required for spawn action");
 }
 
+#[tokio::test]
+async fn report_execute_rejects_unsupported_artifact_before_sending_request() {
+    let working_dir = tempfile::tempdir().expect("working dir");
+    let error = CommunicateTool::new()
+        .execute(
+            json!({
+                "action": "report",
+                "message": "handoff complete",
+                "artifact": {"summary": "would otherwise be dropped"}
+            }),
+            test_ctx("session-parent", working_dir.path()),
+        )
+        .await
+        .expect_err("report artifact must fail locally rather than be dropped");
+
+    assert_eq!(
+        error.to_string(),
+        "'artifact' is not supported for report action; include the artifact path in 'message' or use complete_node"
+    );
+}
+
+#[tokio::test]
+async fn read_context_execute_rejects_zero_limit_before_sending_request() {
+    let working_dir = tempfile::tempdir().expect("working dir");
+    let error = CommunicateTool::new()
+        .execute(
+            json!({"action": "read_context", "target_session": "child", "limit": 0}),
+            test_ctx("session-parent", working_dir.path()),
+        )
+        .await
+        .expect_err("zero read_context limit must fail locally");
+
+    assert_eq!(
+        error.to_string(),
+        "'limit' must be a positive integer for read_context action"
+    );
+}
+
+#[test]
+fn read_context_limit_keeps_the_last_messages_in_chronological_order() {
+    let messages = vec![
+        HistoryMessage {
+            role: "user".to_string(),
+            content: "first".to_string(),
+            tool_calls: None,
+            tool_data: None,
+        },
+        HistoryMessage {
+            role: "assistant".to_string(),
+            content: "second".to_string(),
+            tool_calls: None,
+            tool_data: None,
+        },
+        HistoryMessage {
+            role: "user".to_string(),
+            content: "third".to_string(),
+            tool_calls: None,
+            tool_data: None,
+        },
+    ];
+
+    let output =
+        super::format_limited_context_history("child", &messages, Some(2)).expect("positive limit");
+
+    assert!(!output.output.contains("first"));
+    let second = output.output.find("second").expect("second retained");
+    let third = output.output.find("third").expect("third retained");
+    assert!(
+        second < third,
+        "retained messages must remain chronological"
+    );
+}
+
 #[test]
 fn description_includes_swarm_prompt_guidance() {
     let tool = CommunicateTool::new();
