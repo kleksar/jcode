@@ -66,6 +66,23 @@ pub(super) use server_events::handle_server_event;
 const CONNECTION_MESSAGE_TITLE: &str = "Connection";
 const RELOAD_MARKER_MAX_AGE: Duration = Duration::from_secs(30);
 
+#[derive(Debug, PartialEq, Eq)]
+enum RemoteRouteDispatch {
+    Structured(crate::provider::RouteSelection),
+    LegacyModel(String),
+}
+
+/// Preserve structured route metadata where it is wire-safe. `RuntimeKey::Other`
+/// is a tagged serde newtype and cannot be represented by the remote protocol's
+/// internally tagged payload, so older servers must receive its legacy model spec.
+fn remote_route_dispatch(selection: crate::provider::RouteSelection) -> RemoteRouteDispatch {
+    if matches!(selection.runtime_key, crate::provider::RuntimeKey::Other(_)) {
+        RemoteRouteDispatch::LegacyModel(selection.routed_model_spec())
+    } else {
+        RemoteRouteDispatch::Structured(selection)
+    }
+}
+
 fn handle_ctrl_kill_to_end(app: &mut App, code: KeyCode, modifiers: KeyModifiers) -> bool {
     // Match the local draft semantics before remote navigation can claim Ctrl+K.
     // Ctrl+Shift+K remains reserved for scrolling.
@@ -695,7 +712,13 @@ async fn apply_terminal_event(
                 handle_remote_key_event(app, key, remote).await?;
                 if let Some(selection) = app.pending_route_selection.take() {
                     app.pending_model_switch = None;
-                    match remote.set_route_selection(selection).await {
+                    let route_switch = match remote_route_dispatch(selection) {
+                        RemoteRouteDispatch::Structured(selection) => {
+                            remote.set_route_selection(selection).await
+                        }
+                        RemoteRouteDispatch::LegacyModel(model) => remote.set_model(&model).await,
+                    };
+                    match route_switch {
                         Ok(_) => {
                             app.remote_model_switch_in_flight = true;
                             forward_pending_reasoning_effort(app, remote).await;
@@ -2382,6 +2405,41 @@ fn handle_disconnected_key_internal(
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod route_dispatch_tests {
+    use super::*;
+
+    fn selection(runtime_key: crate::provider::RuntimeKey) -> crate::provider::RouteSelection {
+        crate::provider::RouteSelection {
+            model: "gpt-6-astra[web]".to_string(),
+            runtime_key,
+            api_method: "chatgpt-web".to_string(),
+            provider_label: "OpenAI".to_string(),
+            detail: String::new(),
+        }
+    }
+
+    #[test]
+    fn other_runtime_key_uses_legacy_model_spec() {
+        let selection = selection(crate::provider::RuntimeKey::Other("chatgpt-web".to_string()));
+
+        assert_eq!(
+            remote_route_dispatch(selection),
+            RemoteRouteDispatch::LegacyModel("gpt-6-astra[web]".to_string())
+        );
+    }
+
+    #[test]
+    fn known_runtime_key_keeps_structured_route_selection() {
+        let selection = selection(crate::provider::RuntimeKey::OpenAIOAuth);
+
+        assert_eq!(
+            remote_route_dispatch(selection.clone()),
+            RemoteRouteDispatch::Structured(selection)
+        );
+    }
 }
 
 #[cfg(test)]
