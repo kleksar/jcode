@@ -370,6 +370,8 @@ openai_reasoning_effort = "low"
 # Defaults to `priority` to match Codex /fast behavior for OpenAI OAuth
 # (higher speed, higher usage). Set to "off" (or "standard") to disable.
 openai_service_tier = "priority"
+# Per-model OpenAI service tier overrides. Exact model names are keys.
+# openai_model_service_tiers = { "gpt-5.6" = "flex" }
 # Preserve provider-native reasoning/thinking for future-turn context when supported.
 # Applies to OpenRouter, Anthropic, and OpenAI native reasoning replay. Display is separate.
 preserve_reasoning_context = true
@@ -403,6 +405,11 @@ cross_provider_failover = "countdown"
 # Env overrides: JCODE_MAX_RETRIES, JCODE_RETRY_BACKOFF_CAP_SECS.
 # max_retries = 8
 # retry_backoff_cap_secs = 30
+
+[skills]
+# Exact installed Claude plugin manifest IDs whose skills should not load.
+# Example: ["superpowers@claude-plugins-official"]
+excluded_claude_plugins = []
 
 [server]
 # Who executes autonomous wake requests from background completion/stall,

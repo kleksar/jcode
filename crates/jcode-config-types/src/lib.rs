@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 
 mod display;
 pub use display::DisplayConfig;
@@ -1230,6 +1231,8 @@ pub struct ProviderConfig {
     pub openai_transport: Option<String>,
     /// OpenAI service tier override (priority|flex)
     pub openai_service_tier: Option<String>,
+    /// Per-model OpenAI service tier overrides, keyed by exact model name.
+    pub openai_model_service_tiers: BTreeMap<String, String>,
     /// OpenAI native compaction mode: "auto", "explicit", or "off".
     pub openai_native_compaction_mode: String,
     /// Token threshold at which OpenAI auto native compaction should trigger.
@@ -1272,6 +1275,7 @@ impl Default for ProviderConfig {
             anthropic_reasoning_effort: None,
             openai_transport: None,
             openai_service_tier: Some("priority".to_string()),
+            openai_model_service_tiers: BTreeMap::new(),
             openai_native_compaction_mode: "auto".to_string(),
             openai_native_compaction_threshold_tokens: 200_000,
             preserve_reasoning_context: true,

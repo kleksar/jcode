@@ -498,6 +498,9 @@ pub struct Config {
     /// Provider configuration
     pub provider: ProviderConfig,
 
+    /// Skill discovery configuration.
+    pub skills: SkillsConfig,
+
     /// Named provider profiles, keyed by profile name.
     ///
     /// Example:
@@ -576,6 +579,14 @@ impl WakeMode {
 pub struct ServerConfig {
     /// Ownership model for autonomous wake requests.
     pub wake_mode: WakeMode,
+}
+
+/// Controls discovery of skills installed by external tools.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SkillsConfig {
+    /// Exact Claude plugin manifest IDs whose skills must not be loaded.
+    pub excluded_claude_plugins: BTreeSet<String>,
 }
 
 /// Agent Client Protocol adapter configuration.

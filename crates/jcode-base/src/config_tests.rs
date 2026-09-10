@@ -3,6 +3,7 @@ use super::{
     McpToolsMode, ProviderConfig, SessionPickerResumeAction, SwarmSpawnMode, ToolConfig,
     config_env_fingerprint, populate_context_limits_from_config_ref,
 };
+use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::path::Path;
 
@@ -27,6 +28,48 @@ fn test_openai_fast_mode_defaults_to_priority() {
     assert_eq!(
         ProviderConfig::default().openai_service_tier.as_deref(),
         Some("priority")
+    );
+}
+
+#[test]
+fn openai_model_service_tiers_default_empty_and_roundtrip() {
+    assert_eq!(
+        ProviderConfig::default().openai_model_service_tiers,
+        BTreeMap::new()
+    );
+
+    let cfg: Config = toml::from_str("[provider.openai_model_service_tiers]\ngpt-5.6 = \"flex\"\n")
+        .expect("per-model service tiers should parse");
+    assert_eq!(
+        cfg.provider.openai_model_service_tiers.get("gpt-5.6"),
+        Some(&"flex".to_string())
+    );
+    let serialized = toml::to_string(&cfg).expect("config should serialize");
+    let reparsed: Config = toml::from_str(&serialized).expect("serialized config should parse");
+    assert_eq!(
+        reparsed.provider.openai_model_service_tiers,
+        cfg.provider.openai_model_service_tiers
+    );
+}
+
+#[test]
+fn excluded_claude_plugins_default_empty_and_roundtrip() {
+    assert!(Config::default().skills.excluded_claude_plugins.is_empty());
+
+    let cfg: Config = toml::from_str(
+        "[skills]\nexcluded_claude_plugins = [\"superpowers@claude-plugins-official\"]\n",
+    )
+    .expect("Claude plugin exclusions should parse");
+    assert!(
+        cfg.skills
+            .excluded_claude_plugins
+            .contains("superpowers@claude-plugins-official")
+    );
+    let serialized = toml::to_string(&cfg).expect("config should serialize");
+    let reparsed: Config = toml::from_str(&serialized).expect("serialized config should parse");
+    assert_eq!(
+        reparsed.skills.excluded_claude_plugins,
+        cfg.skills.excluded_claude_plugins
     );
 }
 
@@ -651,6 +694,10 @@ fn test_generated_default_config_has_expected_user_defaults() {
         "generated default config should enable OpenAI fast mode"
     );
     assert!(
+        content.contains("[skills]") && content.contains("excluded_claude_plugins = []"),
+        "generated default config should document Claude plugin exclusions"
+    );
+    assert!(
         content.contains("[tools]") && content.contains("profile = \"full\""),
         "generated default config should document tool profiles"
     );
@@ -688,6 +735,7 @@ fn test_generated_default_config_has_expected_user_defaults() {
     let parsed: Config =
         toml::from_str(&content).expect("generated default config should parse as Config");
     assert_eq!(parsed.agents.swarm_spawn_mode, SwarmSpawnMode::Inline);
+    assert!(parsed.skills.excluded_claude_plugins.is_empty());
     assert!(
         parsed.display.show_thinking,
         "freshly created user config should request model reasoning"
