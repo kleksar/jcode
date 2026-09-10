@@ -379,24 +379,30 @@ impl SkillRegistry {
 
         let mut roots = Vec::new();
         match Self::installed_plugin_paths(&plugins_root.join("installed_plugins.json")) {
-            Some(installs) => {
+            Some(installs) if !installs.is_empty() => {
                 for (plugin_id, path) in installs {
                     if excluded_plugins.contains(&plugin_id) {
                         continue;
                     }
-                    roots.push(path);
+                    roots.push((path, PLUGIN_SCAN_MAX_DEPTH));
                 }
             }
-            None => roots.extend(Self::cache_plugin_roots(plugins_root, excluded_plugins)),
+            _ => roots.extend(
+                Self::cache_plugin_roots(plugins_root, excluded_plugins)
+                    .into_iter()
+                    // The cache scan already descended marketplace/plugin.
+                    // Keep the original depth budget relative to cache/.
+                    .map(|path| (path, PLUGIN_SCAN_MAX_DEPTH.saturating_sub(2))),
+            ),
         }
         let repos = plugins_root.join("repos");
         if repos.is_dir() {
-            roots.push(repos);
+            roots.push((repos, PLUGIN_SCAN_MAX_DEPTH));
         }
 
         let mut dirs = std::collections::BTreeSet::new();
-        for root in roots {
-            Self::collect_plugin_skills_dirs(&root, PLUGIN_SCAN_MAX_DEPTH, &mut dirs);
+        for (root, depth) in roots {
+            Self::collect_plugin_skills_dirs(&root, depth, &mut dirs);
         }
         dirs.into_iter().collect()
     }
@@ -1621,6 +1627,47 @@ mod tests {
     }
 
     #[test]
+    fn plugin_exclusion_preserves_cache_fallback_for_unusable_manifest_installs() {
+        for stale in [false, true] {
+            let temp = tempfile::tempdir().expect("tempdir");
+            let root = temp.path();
+            write_plugin_skill(
+                &root.join("cache/official/superpowers/1.0.0"),
+                "brainstorming",
+            );
+            write_plugin_skill(&root.join("cache/official/telegram/1.0.0"), "access");
+            if stale {
+                write_installed_plugins_manifest(root, &[&root.join("missing-install")]);
+            } else {
+                write_installed_plugins_manifest(root, &[]);
+            }
+            let excluded = BTreeSet::from(["superpowers@official".to_string()]);
+            let mut registry = SkillRegistry::default();
+            assert_eq!(registry.load_plugin_skills_from_root(root, &excluded), 1);
+            assert!(registry.contains("access"));
+            assert!(!registry.contains("brainstorming"));
+            let mut unfiltered = SkillRegistry::default();
+            assert_eq!(
+                unfiltered.load_plugin_skills_from_root(root, &BTreeSet::new()),
+                2
+            );
+        }
+    }
+
+    #[test]
+    fn plugin_exclusion_does_not_trigger_cache_fallback_for_filtered_manifest() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let root = temp.path();
+        let installed = root.join("cache/official/superpowers/1.0.0");
+        write_plugin_skill(&installed, "brainstorming");
+        write_plugin_skill(&root.join("cache/official/stale/1.0.0"), "stale-skill");
+        write_installed_plugins_manifest_with_ids(root, &[("superpowers@official", &installed)]);
+        let excluded = BTreeSet::from(["superpowers@official".to_string()]);
+        let mut registry = SkillRegistry::default();
+        assert_eq!(registry.load_plugin_skills_from_root(root, &excluded), 0);
+    }
+
+    #[test]
     fn plugin_skills_load_from_repos_layout() {
         let temp = tempfile::tempdir().expect("tempdir");
         let plugins_root = temp.path();
@@ -1716,6 +1763,6 @@ mod tests {
     fn plugin_skill_dirs_empty_for_missing_root() {
         let temp = tempfile::tempdir().expect("tempdir");
         let missing = temp.path().join("does-not-exist");
-        assert!(SkillRegistry::plugin_skill_dirs_under(&missing).is_empty());
+        assert!(SkillRegistry::plugin_skill_dirs_under(&missing, &BTreeSet::new()).is_empty());
     }
 }

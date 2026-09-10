@@ -38,8 +38,9 @@ fn openai_model_service_tiers_default_empty_and_roundtrip() {
         BTreeMap::new()
     );
 
-    let cfg: Config = toml::from_str("[provider.openai_model_service_tiers]\ngpt-5.6 = \"flex\"\n")
-        .expect("per-model service tiers should parse");
+    let cfg: Config =
+        toml::from_str("[provider.openai_model_service_tiers]\n\"gpt-5.6\" = \"flex\"\n")
+            .expect("per-model service tiers should parse");
     assert_eq!(
         cfg.provider.openai_model_service_tiers.get("gpt-5.6"),
         Some(&"flex".to_string())
