@@ -26,9 +26,55 @@ pub const ALL_CLAUDE_MODELS: &[&str] = &[
     "claude-sonnet-4-20250514",
 ];
 
+/// Metadata for a model routed through the browser-backed ChatGPT Web transport.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ChatGptWebModelDescriptor {
+    pub model_id: &'static str,
+    pub query_slug: &'static str,
+    pub picker_label: &'static str,
+    pub response_slug: &'static str,
+    pub display_label: &'static str,
+}
+
+/// Stable jcode id for the legacy ChatGPT Web route.
+pub const CHATGPT_WEB_MODEL: &str = "gpt-5.6-pro[web]";
+
+/// Stable jcode id for the GPT-6 Astra ChatGPT Web route.
+pub const CHATGPT_WEB_ASTRA_MODEL: &str = "gpt-6-astra[web]";
+
+/// Supported ChatGPT Web model routes and their browser-facing metadata.
+pub const CHATGPT_WEB_MODELS: &[ChatGptWebModelDescriptor] = &[
+    ChatGptWebModelDescriptor {
+        model_id: CHATGPT_WEB_MODEL,
+        query_slug: "gpt-5-6-pro",
+        picker_label: "5.6 Pro",
+        response_slug: "gpt-5-6-pro",
+        display_label: "GPT-5.6 Pro",
+    },
+    ChatGptWebModelDescriptor {
+        model_id: CHATGPT_WEB_ASTRA_MODEL,
+        query_slug: "gpt-6-pro",
+        picker_label: "6 Pro",
+        response_slug: "gpt-6-pro",
+        display_label: "GPT-6 Astra",
+    },
+];
+
+/// Return browser-facing metadata for a supported ChatGPT Web model id.
+pub fn chatgpt_web_model_descriptor(model: &str) -> Option<&'static ChatGptWebModelDescriptor> {
+    let model = model.trim();
+    CHATGPT_WEB_MODELS
+        .iter()
+        .find(|descriptor| descriptor.model_id == model)
+}
+
+/// True when `model` is a supported ChatGPT Web model id.
+pub fn is_chatgpt_web_model(model: &str) -> bool {
+    chatgpt_web_model_descriptor(model).is_some()
+}
+
 /// Available OpenAI models used by model lists and provider routing.
 /// The list is curated best-first; position 0 is the quality-first default.
-pub const CHATGPT_WEB_MODEL: &str = "gpt-5.6-pro[web]";
 
 /// GPT Pro reasoning models. These are exposed only on the OpenAI platform
 /// API (`api.openai.com` with an `OPENAI_API_KEY`); the ChatGPT/Codex OAuth
@@ -68,6 +114,7 @@ pub const ALL_OPENAI_MODELS: &[&str] = &[
     // jcode model id so it can never be mistaken for an API/Codex model with
     // the same upstream slug.
     CHATGPT_WEB_MODEL,
+    CHATGPT_WEB_ASTRA_MODEL,
     "gpt-5.6",
     "gpt-5.6-terra",
     "gpt-5.6-luna",
@@ -100,9 +147,30 @@ mod gpt_5_6_catalog_tests {
     use super::*;
 
     #[test]
+    fn chatgpt_web_registry_maps_supported_routes() {
+        let legacy = chatgpt_web_model_descriptor("gpt-5.6-pro[web]").unwrap();
+        assert_eq!(legacy.query_slug, "gpt-5-6-pro");
+        assert_eq!(legacy.picker_label, "5.6 Pro");
+        assert_eq!(legacy.response_slug, "gpt-5-6-pro");
+
+        let astra = chatgpt_web_model_descriptor("gpt-6-astra[web]").unwrap();
+        assert_eq!(astra.query_slug, "gpt-6-pro");
+        assert_eq!(astra.picker_label, "6 Pro");
+        assert_eq!(astra.response_slug, "gpt-6-pro");
+    }
+
+    #[test]
+    fn chatgpt_web_registry_rejects_unknown_routes() {
+        assert!(chatgpt_web_model_descriptor("gpt-6-astra").is_none());
+        assert!(chatgpt_web_model_descriptor("gpt-7-pro[web]").is_none());
+        assert!(!is_chatgpt_web_model("gpt-6-astra"));
+    }
+
+    #[test]
     fn openai_catalog_exposes_the_complete_gpt_5_6_family() {
         for model in [
             "gpt-6-astra",
+            "gpt-6-astra[web]",
             "gpt-5.6-sol",
             "gpt-5.6-pro",
             "gpt-5.6-pro[web]",
