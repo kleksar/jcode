@@ -1,7 +1,12 @@
+use super::super::{
+    AwaitMembersRuntime, CommAwaitMembersContext, handle_comm_await_members, update_member_status,
+};
 use super::{handle_comm_list, handle_comm_message};
 use crate::agent::Agent;
 use crate::message::{Message, ToolDefinition};
-use crate::protocol::{CommDeliveryMode, NotificationType, ServerEvent};
+use crate::protocol::{
+    CommDeliveryMode, NotificationType, ServerEvent, default_comm_await_target_statuses,
+};
 use crate::provider::{EventStream, Provider};
 use crate::server::{ClientConnectionInfo, SessionInterruptQueues, SwarmEvent, SwarmMember};
 use crate::tool::Registry;
@@ -365,6 +370,66 @@ async fn comm_message_with_wake_queues_soft_interrupt_for_busy_connected_session
         pending[0].source,
         jcode_agent_runtime::SoftInterruptSource::System
     );
+    drop(pending);
+
+    assert_eq!(
+        swarm_members.read().await[&target_id].status,
+        "queued",
+        "a queued wake must invalidate the prior ready result"
+    );
+
+    let await_runtime = AwaitMembersRuntime::default();
+    handle_comm_await_members(
+        2,
+        sender_id.clone(),
+        default_comm_await_target_statuses(),
+        vec![target_id.clone()],
+        None,
+        Some(5),
+        false,
+        false,
+        false,
+        CommAwaitMembersContext {
+            client_event_tx: &client_event_tx,
+            swarm_members: &swarm_members,
+            swarms_by_id: &swarms_by_id,
+            swarm_event_tx: &swarm_event_tx,
+            await_members_runtime: &await_runtime,
+        },
+    )
+    .await;
+    assert!(
+        tokio::time::timeout(Duration::from_millis(50), client_event_rx.recv())
+            .await
+            .is_err(),
+        "the old ready status must not satisfy a new default await"
+    );
+
+    update_member_status(
+        &target_id,
+        "ready",
+        None,
+        &swarm_members,
+        &swarms_by_id,
+        Some(&event_history),
+        Some(&event_counter),
+        Some(&swarm_event_tx),
+    )
+    .await;
+    match tokio::time::timeout(Duration::from_secs(1), client_event_rx.recv())
+        .await
+        .expect("fresh terminal status should resolve await")
+        .expect("await response should be sent")
+    {
+        ServerEvent::CommAwaitMembersResponse {
+            completed, members, ..
+        } => {
+            assert!(completed);
+            assert_eq!(members[0].session_id, target_id);
+            assert_eq!(members[0].status, "ready");
+        }
+        other => panic!("unexpected await response: {other:?}"),
+    }
 }
 
 #[tokio::test]

@@ -1,7 +1,8 @@
 use super::live_turn::{LiveTurnSwarmContext, run_live_turn_if_idle};
 use super::{
     ClientConnectionInfo, SessionInterruptQueues, SwarmEvent, SwarmEventType, SwarmMember,
-    fanout_session_event, queue_soft_interrupt_for_session, record_swarm_event, truncate_detail,
+    fanout_session_event, member_status_is_terminal, queue_soft_interrupt_for_session,
+    record_swarm_event, truncate_detail, update_member_status,
 };
 use crate::agent::Agent;
 use crate::protocol::{CommDeliveryMode, NotificationType, ServerEvent};
@@ -13,6 +14,39 @@ use tokio::sync::{Mutex, RwLock, broadcast, mpsc};
 
 type SessionAgents = Arc<RwLock<HashMap<String, Arc<Mutex<Agent>>>>>;
 type ChannelSubscriptions = Arc<RwLock<HashMap<String, HashMap<String, HashSet<String>>>>>;
+
+/// A wake that has been accepted but has not started a turn must invalidate a
+/// prior idle/terminal result before an await can observe it.
+async fn mark_wake_pending_if_idle(
+    session_id: &str,
+    swarm_members: &Arc<RwLock<HashMap<String, SwarmMember>>>,
+    swarms_by_id: &Arc<RwLock<HashMap<String, HashSet<String>>>>,
+    event_history: &Arc<RwLock<std::collections::VecDeque<SwarmEvent>>>,
+    event_counter: &Arc<std::sync::atomic::AtomicU64>,
+    swarm_event_tx: &broadcast::Sender<SwarmEvent>,
+) {
+    let pending_detail = {
+        let members = swarm_members.read().await;
+        members.get(session_id).and_then(|member| {
+            (member.status == "ready" || member_status_is_terminal(&member.status))
+                .then(|| member.detail.clone())
+        })
+    };
+
+    if let Some(detail) = pending_detail {
+        update_member_status(
+            session_id,
+            "queued",
+            detail,
+            swarm_members,
+            swarms_by_id,
+            Some(event_history),
+            Some(event_counter),
+            Some(swarm_event_tx),
+        )
+        .await;
+    }
+}
 
 async fn swarm_id_for_session(
     session_id: &str,
@@ -339,6 +373,15 @@ pub(super) async fn handle_comm_message(
                         if crate::config::config().server.wake_mode
                             == crate::config::WakeMode::External
                         {
+                            mark_wake_pending_if_idle(
+                                session_id,
+                                swarm_members,
+                                swarms_by_id,
+                                event_history,
+                                event_counter,
+                                swarm_event_tx,
+                            )
+                            .await;
                             let _ = fanout_session_event(
                                 swarm_members,
                                 session_id,
@@ -368,6 +411,15 @@ pub(super) async fn handle_comm_message(
                         .await;
 
                         if !woke_immediately {
+                            mark_wake_pending_if_idle(
+                                session_id,
+                                swarm_members,
+                                swarms_by_id,
+                                event_history,
+                                event_counter,
+                                swarm_event_tx,
+                            )
+                            .await;
                             let _ = queue_soft_interrupt_for_session(
                                 session_id,
                                 notification_msg.clone(),
