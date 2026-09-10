@@ -786,7 +786,11 @@ impl Provider for OpenAIProvider {
             anyhow::bail!(
                 "OpenAI API credentials are not available for '{}'. The browser-only runtime can use '{}'; run `jcode login --provider openai` before selecting API models.",
                 model,
-                CHATGPT_WEB_MODEL,
+                jcode_provider_core::CHATGPT_WEB_MODELS
+                    .iter()
+                    .map(|descriptor| descriptor.model_id)
+                    .collect::<Vec<_>>()
+                    .join("', '"),
             );
         }
         if !is_chatgpt_web_model(model)
@@ -855,19 +859,27 @@ impl Provider for OpenAIProvider {
 
     fn available_models(&self) -> Vec<&'static str> {
         if self.is_browser_only() {
-            return vec![CHATGPT_WEB_MODEL];
+            return jcode_provider_core::CHATGPT_WEB_MODELS
+                .iter()
+                .map(|descriptor| descriptor.model_id)
+                .collect();
         }
         jcode_provider_core::ALL_OPENAI_MODELS.to_vec()
     }
 
     fn available_models_for_switching(&self) -> Vec<String> {
         if self.is_browser_only() {
-            return vec![CHATGPT_WEB_MODEL.to_string()];
+            return jcode_provider_core::CHATGPT_WEB_MODELS
+                .iter()
+                .map(|descriptor| descriptor.model_id.to_string())
+                .collect();
         }
         let mut models =
             jcode_base::provider::cached_openai_model_ids().unwrap_or_else(|| vec![self.model()]);
-        if !models.iter().any(|model| model == CHATGPT_WEB_MODEL) {
-            models.insert(0, CHATGPT_WEB_MODEL.to_string());
+        for descriptor in jcode_provider_core::CHATGPT_WEB_MODELS.iter().rev() {
+            if !models.iter().any(|model| model == descriptor.model_id) {
+                models.insert(0, descriptor.model_id.to_string());
+            }
         }
         // Platform-API-only GPT Pro models are absent from the Codex OAuth
         // catalog by design; surface them whenever an OPENAI_API_KEY exists.

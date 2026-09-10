@@ -363,6 +363,10 @@ mod tests {
             pretty_model_display_name("gpt-5.6-pro[web]"),
             "GPT-5.6 Pro (web)"
         );
+        assert_eq!(
+            pretty_model_display_name("gpt-6-astra[web]"),
+            "GPT-6 Astra (web)"
+        );
         // Dated snapshots read as a date, not as extra version digits.
         assert_eq!(
             pretty_model_display_name("claude-haiku-4-5-20251001"),
@@ -408,6 +412,10 @@ mod tests {
         assert_eq!(
             pretty_known_model_family("gpt-5.6-pro[web]").as_deref(),
             Some("GPT-5.6 Pro (web)")
+        );
+        assert_eq!(
+            pretty_known_model_family("gpt-6-astra[web]").as_deref(),
+            Some("GPT-6 Astra (web)")
         );
         // Open-weights, third-party, namespaced, and profile-scoped ids stay raw so
         // they remain copy-pasteable and unambiguous in the picker.

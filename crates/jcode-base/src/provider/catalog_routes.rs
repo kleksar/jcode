@@ -2,8 +2,8 @@ use crate::auth::{AuthState, AuthStatus};
 
 use super::pricing::cheapness_for_route;
 use super::{
-    ALL_OPENAI_MODELS, AccountModelAvailabilityState, CHATGPT_WEB_MODEL, GROK_BUILD_PROFILE_ID,
-    ModelRoute, MultiProvider, Provider, ProviderRegistry, anthropic_api_key_route_availability,
+    ALL_OPENAI_MODELS, AccountModelAvailabilityState, GROK_BUILD_PROFILE_ID, ModelRoute,
+    MultiProvider, Provider, ProviderRegistry, anthropic_api_key_route_availability,
     anthropic_oauth_route_availability, bedrock, build_anthropic_oauth_route,
     build_chatgpt_web_route, build_copilot_route, build_openai_api_key_route,
     build_openai_oauth_route, build_openrouter_auto_route, build_openrouter_endpoint_route,
@@ -29,8 +29,8 @@ pub fn simplified_model_routes_for_picker(
     let mut routes = Vec::new();
 
     for model in display_models {
-        if model == CHATGPT_WEB_MODEL {
-            routes.push(build_chatgpt_web_route());
+        if jcode_provider_core::is_chatgpt_web_model(&model) {
+            routes.push(build_chatgpt_web_route(&model));
             continue;
         }
         if !model.contains('/') && provider_for_model(&model) == Some("openai") {
@@ -384,8 +384,8 @@ fn append_openai_routes(
     };
 
     for model in openai_models {
-        if model == CHATGPT_WEB_MODEL {
-            routes.push(build_chatgpt_web_route());
+        if jcode_provider_core::is_chatgpt_web_model(&model) {
+            routes.push(build_chatgpt_web_route(&model));
             continue;
         }
         let availability = model_availability_for_account(&model);

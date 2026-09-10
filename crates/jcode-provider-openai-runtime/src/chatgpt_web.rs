@@ -1,6 +1,6 @@
 use anyhow::{Context, Result};
 use jcode_message_types::{ContentBlock, Message, Role, StreamEvent, ToolDefinition};
-use jcode_provider_core::EventStream;
+use jcode_provider_core::{ChatGptWebModelDescriptor, EventStream, chatgpt_web_model_descriptor};
 use serde_json::{Value, json};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -8,9 +8,6 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::sync::{Mutex, mpsc};
 use tokio_stream::wrappers::ReceiverStream;
 
-use super::CHATGPT_WEB_MODEL;
-
-const CHATGPT_WEB_URL: &str = "https://chatgpt.com/?model=gpt-5-6-pro&temporary-chat=true";
 const EDITOR_SELECTOR: &str = "[contenteditable=true][aria-label='Chat with ChatGPT']";
 const TOOL_CALL_START: &str = "<jcode_tool_call>";
 const TOOL_CALL_END: &str = "</jcode_tool_call>";
@@ -43,7 +40,8 @@ impl ChatGptWebState {
         model: &str,
     ) -> Result<EventStream> {
         let prompt = build_web_prompt(messages, tools, system)?;
-        let model = model.to_string();
+        let descriptor = chatgpt_web_model_descriptor(model)
+            .ok_or_else(|| anyhow::anyhow!("Unsupported ChatGPT web model: {model}"))?;
         let advertised_tools: Vec<String> = tools.iter().map(|tool| tool.name.clone()).collect();
         let (tx, rx) = mpsc::channel(128);
 
@@ -59,8 +57,10 @@ impl ChatGptWebState {
             }
             if tx
                 .send(Ok(StreamEvent::StatusDetail {
-                    detail: "Using GPT-5.6 Pro through your logged-in ChatGPT web session"
-                        .to_string(),
+                    detail: format!(
+                        "Using {} through your logged-in ChatGPT web session",
+                        descriptor.display_label
+                    ),
                 }))
                 .await
                 .is_err()
@@ -68,9 +68,11 @@ impl ChatGptWebState {
                 return;
             }
 
-            match self.run_turn(&prompt, &model, &tx).await {
+            match self.run_turn(&prompt, descriptor, &tx).await {
                 Ok(response) => {
-                    if let Err(err) = emit_response(&tx, &response, &advertised_tools).await {
+                    if let Err(err) =
+                        emit_response(&tx, &response, &advertised_tools, descriptor).await
+                    {
                         let _ = tx.send(Err(err)).await;
                     }
                 }
@@ -86,12 +88,9 @@ impl ChatGptWebState {
     async fn run_turn(
         &self,
         prompt: &str,
-        model: &str,
+        descriptor: &'static ChatGptWebModelDescriptor,
         tx: &mpsc::Sender<Result<StreamEvent>>,
     ) -> Result<String> {
-        if model != CHATGPT_WEB_MODEL {
-            anyhow::bail!("Unsupported ChatGPT web model: {model}");
-        }
         if tx.is_closed() {
             anyhow::bail!("ChatGPT web response consumer was closed before browser setup");
         }
@@ -108,12 +107,12 @@ impl ChatGptWebState {
         }
 
         let _turn_guard = self.turn_lock.lock().await;
-        let (tab_id, fork_name) = open_chatgpt_tab().await?;
+        let (tab_id, fork_name) = open_chatgpt_tab(descriptor).await?;
         let result = async {
             send_phase(tx, jcode_message_types::ConnectionPhase::Authenticating).await?;
 
             wait_for_editor(tab_id).await?;
-            prepare_chatgpt_page(tab_id).await?;
+            prepare_chatgpt_page(tab_id, descriptor).await?;
             insert_prompt(tab_id, prompt).await?;
             if tx.is_closed() {
                 anyhow::bail!("ChatGPT web response consumer was closed before submission");
@@ -133,16 +132,17 @@ impl ChatGptWebState {
 
             send_phase(tx, jcode_message_types::ConnectionPhase::WaitingForResponse).await?;
 
-            poll_for_response(tab_id, tx).await
+            poll_for_response(tab_id, tx, descriptor).await
         }
         .await;
         let cleanup = close_chatgpt_tab(tab_id, &fork_name).await;
         match (result, cleanup) {
             (Ok(response), Ok(())) => Ok(response),
             (Err(err), Ok(())) => Err(err),
-            (Ok(_), Err(cleanup_err)) => Err(cleanup_err.context(
-                "GPT-5.6 Pro answered, but jcode could not securely close its browser tab",
-            )),
+            (Ok(_), Err(cleanup_err)) => Err(cleanup_err.context(format!(
+                "{} answered, but jcode could not securely close its browser tab",
+                descriptor.display_label
+            ))),
             (Err(err), Err(cleanup_err)) => {
                 Err(err.context(format!("Browser tab cleanup also failed: {cleanup_err:#}")))
             }
@@ -159,7 +159,14 @@ async fn send_phase(
         .map_err(|_| anyhow::anyhow!("ChatGPT web response consumer was closed"))
 }
 
-async fn open_chatgpt_tab() -> Result<(u64, String)> {
+fn chatgpt_web_url(descriptor: &ChatGptWebModelDescriptor) -> String {
+    format!(
+        "https://chatgpt.com/?model={}&temporary-chat=true",
+        descriptor.query_slug
+    )
+}
+
+async fn open_chatgpt_tab(descriptor: &ChatGptWebModelDescriptor) -> Result<(u64, String)> {
     let source = bridge_command("getActiveTab", json!({}))
         .await
         .context("Failed to find a Firefox tab to duplicate for ChatGPT")?;
@@ -186,7 +193,7 @@ async fn open_chatgpt_tab() -> Result<(u64, String)> {
 
     if let Err(err) = bridge_command(
         "navigate",
-        json!({ "tabId": tab_id, "url": CHATGPT_WEB_URL, "wait": true }),
+        json!({ "tabId": tab_id, "url": chatgpt_web_url(descriptor), "wait": true }),
     )
     .await
     {
@@ -242,7 +249,7 @@ async fn wait_for_editor(tab_id: u64) -> Result<()> {
     Ok(())
 }
 
-async fn prepare_chatgpt_page(tab_id: u64) -> Result<()> {
+async fn prepare_chatgpt_page(tab_id: u64, descriptor: &ChatGptWebModelDescriptor) -> Result<()> {
     // Temporary chat has a one-time explanatory screen. It is safe to dismiss,
     // but workspace migration/onboarding is deliberately never auto-confirmed.
     let preparation = evaluate(
@@ -264,8 +271,9 @@ const continueButton = Array.from(document.querySelectorAll('button')).find(b =>
   return false;
 });
 if (continueButton) continueButton.click();
-const model = Array.from(document.querySelectorAll('button.__composer-pill'))
-  .map(b => b.innerText.trim()).find(Boolean) || '';
+const model = Array.from(
+  document.querySelectorAll('form[data-type="unified-composer"] button[aria-haspopup="menu"]')
+).map(button => button.innerText || '').find(text => /\bPro\b/.test(text)) || '';
 const temporary = !!document.querySelector('button[aria-label="Turn off temporary chat"]')
   || document.body.innerText.includes("This chat won't appear your conversation history");
 const signedOut = Array.from(document.querySelectorAll('button,a'))
@@ -294,15 +302,16 @@ return { onboarding: false, model, temporary, signedOut };
             let current = evaluate(
                 tab_id,
                 r#"
-const model = Array.from(document.querySelectorAll('button.__composer-pill'))
-  .map(b => b.innerText.trim()).find(Boolean) || '';
+const model = Array.from(
+  document.querySelectorAll('form[data-type="unified-composer"] button[aria-haspopup="menu"]')
+).map(button => button.innerText || '').find(text => /\bPro\b/.test(text)) || '';
 const temporary = !!document.querySelector('button[aria-label="Turn off temporary chat"]')
   || document.body.innerText.includes("This chat won't appear your conversation history");
 return { model, temporary };
 "#,
             )
             .await?;
-            if page_verification_ready(&current) || Instant::now() >= deadline {
+            if page_verification_ready(&current, descriptor) || Instant::now() >= deadline {
                 break current;
             }
             tokio::time::sleep(Duration::from_millis(250)).await;
@@ -312,14 +321,16 @@ return { model, temporary };
         .get("model")
         .and_then(Value::as_str)
         .unwrap_or_default();
-    if selected_model != "Pro" {
+    if normalize_picker_label(selected_model) != descriptor.picker_label {
         anyhow::bail!(
-            "ChatGPT did not select GPT-5.6 Pro (model picker showed '{}'). Confirm this workspace has GPT-5.6 Pro access",
+            "ChatGPT did not select {} (model picker showed '{}'). Confirm this workspace has {} access",
+            descriptor.display_label,
             if selected_model.is_empty() {
                 "unknown"
             } else {
                 selected_model
-            }
+            },
+            descriptor.display_label,
         );
     }
     if verification.get("temporary").and_then(Value::as_bool) != Some(true) {
@@ -330,9 +341,20 @@ return { model, temporary };
     Ok(())
 }
 
-fn page_verification_ready(verification: &Value) -> bool {
-    verification.get("model").and_then(Value::as_str) == Some("Pro")
+fn normalize_picker_label(raw: &str) -> String {
+    raw.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+fn page_verification_ready(verification: &Value, descriptor: &ChatGptWebModelDescriptor) -> bool {
+    verification
+        .get("model")
+        .and_then(Value::as_str)
+        .is_some_and(|model| normalize_picker_label(model) == descriptor.picker_label)
         && verification.get("temporary").and_then(Value::as_bool) == Some(true)
+}
+
+fn response_model_matches(slug: &str, descriptor: &ChatGptWebModelDescriptor) -> bool {
+    slug.trim() == descriptor.response_slug
 }
 
 async fn insert_prompt(tab_id: u64, prompt: &str) -> Result<()> {
@@ -404,7 +426,11 @@ return { length: text.length, hash: hash >>> 0, submitDisabled: !submit || submi
     Ok(())
 }
 
-async fn poll_for_response(tab_id: u64, tx: &mpsc::Sender<Result<StreamEvent>>) -> Result<String> {
+async fn poll_for_response(
+    tab_id: u64,
+    tx: &mpsc::Sender<Result<StreamEvent>>,
+    descriptor: &ChatGptWebModelDescriptor,
+) -> Result<String> {
     let timeout_secs = std::env::var("JCODE_CHATGPT_WEB_TIMEOUT_SECS")
         .ok()
         .and_then(|raw| raw.parse::<u64>().ok())
@@ -434,7 +460,8 @@ return true;
         }
         if Instant::now() >= deadline {
             anyhow::bail!(
-                "GPT-5.6 Pro web response timed out after {} seconds (override with JCODE_CHATGPT_WEB_TIMEOUT_SECS)",
+                "{} web response timed out after {} seconds (override with JCODE_CHATGPT_WEB_TIMEOUT_SECS)",
+                descriptor.display_label,
                 timeout_secs
             );
         }
@@ -501,14 +528,15 @@ return { text, busy, terminal, alert, model: message ? message.dataset.messageMo
                 .get("model")
                 .and_then(Value::as_str)
                 .unwrap_or_default();
-            if upstream_model != "gpt-5-6-pro" {
+            if !response_model_matches(upstream_model, descriptor) {
                 anyhow::bail!(
-                    "ChatGPT answered with model '{}' instead of gpt-5-6-pro",
+                    "ChatGPT answered with model '{}' instead of {}",
                     if upstream_model.is_empty() {
                         "unknown"
                     } else {
                         upstream_model
-                    }
+                    },
+                    descriptor.response_slug,
                 );
             }
             return Ok(text);
@@ -519,7 +547,10 @@ return { text, busy, terminal, alert, model: message ? message.dataset.messageMo
             last_status_second = elapsed;
             let _ = tx
                 .send(Ok(StreamEvent::StatusDetail {
-                    detail: format!("GPT-5.6 Pro is working in ChatGPT web ({}s)", elapsed),
+                    detail: format!(
+                        "{} is working in ChatGPT web ({}s)",
+                        descriptor.display_label, elapsed
+                    ),
                 }))
                 .await;
         }
@@ -532,11 +563,13 @@ async fn emit_response(
     tx: &mpsc::Sender<Result<StreamEvent>>,
     response: &str,
     advertised_tools: &[String],
+    descriptor: &ChatGptWebModelDescriptor,
 ) -> Result<()> {
     if let Some(parsed) = parse_tool_call(response)? {
         if !advertised_tools.iter().any(|name| name == &parsed.name) {
             anyhow::bail!(
-                "GPT-5.6 Pro requested unknown jcode tool '{}'; advertised tools were: {}",
+                "{} requested unknown jcode tool '{}'; advertised tools were: {}",
+                descriptor.display_label,
                 parsed.name,
                 advertised_tools.join(", ")
             );
@@ -856,19 +889,50 @@ mod tests {
     }
 
     #[test]
-    fn page_verification_requires_exact_pro_and_temporary_chat() {
-        assert!(page_verification_ready(
-            &json!({ "model": "Pro", "temporary": true })
-        ));
-        assert!(!page_verification_ready(
-            &json!({ "model": "", "temporary": true })
-        ));
-        assert!(!page_verification_ready(
-            &json!({ "model": "Instant", "temporary": true })
-        ));
-        assert!(!page_verification_ready(
-            &json!({ "model": "Pro", "temporary": false })
-        ));
+    fn chatgpt_web_urls_use_registered_query_slugs() {
+        for descriptor in jcode_provider_core::CHATGPT_WEB_MODELS {
+            assert_eq!(
+                chatgpt_web_url(descriptor),
+                format!(
+                    "https://chatgpt.com/?model={}&temporary-chat=true",
+                    descriptor.query_slug
+                )
+            );
+        }
+    }
+
+    #[test]
+    fn picker_labels_collapse_chatgpt_whitespace() {
+        assert_eq!(normalize_picker_label("6\nPro"), "6 Pro");
+        assert_eq!(normalize_picker_label("  5.6   Pro "), "5.6 Pro");
+    }
+
+    #[test]
+    fn page_verification_requires_registered_model_and_temporary_chat() {
+        for descriptor in jcode_provider_core::CHATGPT_WEB_MODELS {
+            assert!(page_verification_ready(
+                &json!({ "model": descriptor.picker_label, "temporary": true }),
+                descriptor
+            ));
+            assert!(!page_verification_ready(
+                &json!({ "model": "Instant", "temporary": true }),
+                descriptor
+            ));
+            assert!(!page_verification_ready(
+                &json!({ "model": descriptor.picker_label, "temporary": false }),
+                descriptor
+            ));
+        }
+    }
+
+    #[test]
+    fn response_slug_must_match_selected_web_model() {
+        let legacy = chatgpt_web_model_descriptor(jcode_provider_core::CHATGPT_WEB_MODEL).unwrap();
+        let astra =
+            chatgpt_web_model_descriptor(jcode_provider_core::CHATGPT_WEB_ASTRA_MODEL).unwrap();
+        assert!(response_model_matches(legacy.response_slug, legacy));
+        assert!(response_model_matches(astra.response_slug, astra));
+        assert!(!response_model_matches(legacy.response_slug, astra));
     }
 
     #[test]

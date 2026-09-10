@@ -78,11 +78,13 @@ fn test_chatgpt_web_model_bypasses_live_api_catalog() {
 
     assert_eq!(provider.model(), CHATGPT_WEB_MODEL);
     assert_eq!(provider.transport().as_deref(), Some("browser"));
-    assert!(
-        provider
-            .available_models_for_switching()
-            .contains(&CHATGPT_WEB_MODEL.to_string())
-    );
+    for descriptor in jcode_provider_core::CHATGPT_WEB_MODELS {
+        assert!(
+            provider
+                .available_models_for_switching()
+                .contains(&descriptor.model_id.to_string())
+        );
+    }
     provider.set_model("gpt-5.6-sol").unwrap();
     provider.set_model(CHATGPT_WEB_MODEL).unwrap();
     assert_eq!(provider.model(), CHATGPT_WEB_MODEL);
@@ -96,10 +98,26 @@ fn test_chatgpt_browser_only_runtime_rejects_api_models_and_uses_local_compactio
     let provider = OpenAIProvider::new_browser_only();
 
     assert_eq!(provider.model(), CHATGPT_WEB_MODEL);
-    assert_eq!(provider.available_models(), vec![CHATGPT_WEB_MODEL]);
+    assert_eq!(
+        provider.available_models(),
+        jcode_provider_core::CHATGPT_WEB_MODELS
+            .iter()
+            .map(|descriptor| descriptor.model_id)
+            .collect::<Vec<_>>()
+    );
     assert_eq!(
         provider.available_models_for_switching(),
-        vec![CHATGPT_WEB_MODEL.to_string()]
+        jcode_provider_core::CHATGPT_WEB_MODELS
+            .iter()
+            .map(|descriptor| descriptor.model_id.to_string())
+            .collect::<Vec<_>>()
+    );
+    provider
+        .set_model(jcode_provider_core::CHATGPT_WEB_ASTRA_MODEL)
+        .unwrap();
+    assert_eq!(
+        provider.model(),
+        jcode_provider_core::CHATGPT_WEB_ASTRA_MODEL
     );
     assert!(provider.supports_compaction());
     assert!(provider.uses_jcode_compaction());
@@ -115,15 +133,18 @@ fn test_chatgpt_browser_only_runtime_rejects_api_models_and_uses_local_compactio
 #[test]
 fn test_chatgpt_web_model_environment_override_is_trimmed() {
     let _guard = jcode_base::storage::lock_test_env();
-    let _model = EnvVarGuard::set("JCODE_OPENAI_MODEL", "  gpt-5.6-pro[web]  ");
-    let provider = OpenAIProvider::new(CodexCredentials {
-        access_token: "test".to_string(),
-        refresh_token: String::new(),
-        id_token: None,
-        account_id: None,
-        expires_at: None,
-    });
-    assert_eq!(provider.model(), CHATGPT_WEB_MODEL);
+    for descriptor in jcode_provider_core::CHATGPT_WEB_MODELS {
+        let model = format!("  {}  ", descriptor.model_id);
+        let _model = EnvVarGuard::set("JCODE_OPENAI_MODEL", &model);
+        let provider = OpenAIProvider::new(CodexCredentials {
+            access_token: "test".to_string(),
+            refresh_token: String::new(),
+            id_token: None,
+            account_id: None,
+            expires_at: None,
+        });
+        assert_eq!(provider.model(), descriptor.model_id);
+    }
 }
 
 #[test]
