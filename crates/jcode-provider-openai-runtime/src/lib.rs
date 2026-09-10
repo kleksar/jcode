@@ -46,7 +46,7 @@ const ORIGINATOR: &str = "codex_cli_rs";
 pub(crate) const CHATGPT_WEB_MODEL: &str = jcode_provider_core::CHATGPT_WEB_MODEL;
 
 pub(crate) fn is_chatgpt_web_model(model: &str) -> bool {
-    model.trim() == CHATGPT_WEB_MODEL
+    jcode_provider_core::is_chatgpt_web_model(model)
 }
 
 /// Whether the hosted `image_generation` tool can be attached for `model_id`.
@@ -1444,9 +1444,9 @@ use self::openai_stream_runtime::{PersistentWsResult, is_retryable_error, openai
 
 use self::stream::{OpenAIResponsesStream, parse_openai_response_event};
 #[cfg(test)]
-use self::stream::{
-    handle_openai_output_item, parse_text_wrapped_tool_call, returned_service_tier_diagnostics,
-};
+use self::stream::{handle_openai_output_item, parse_text_wrapped_tool_call};
+#[cfg(test)]
+use jcode_provider_openai::stream::returned_service_tier_diagnostics;
 
 mod chatgpt_web;
 #[path = "openai_provider_impl.rs"]

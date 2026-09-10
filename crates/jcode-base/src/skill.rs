@@ -1544,8 +1544,6 @@ mod tests {
             "configure",
             "exa-agent",
             "search",
-            "dotenv",
-            "dotenvx",
             "context-mode",
             "context-mode-ops",
             "ctx-doctor",
@@ -1568,8 +1566,8 @@ mod tests {
         }
         for (root, skills) in [
             (&telegram, &RETAINED_SKILLS[..2]),
-            (&exa, &RETAINED_SKILLS[2..6]),
-            (&context_mode, &RETAINED_SKILLS[6..]),
+            (&exa, &RETAINED_SKILLS[2..4]),
+            (&context_mode, &RETAINED_SKILLS[4..]),
         ] {
             for skill in skills {
                 write_plugin_skill(root, skill);
@@ -1584,6 +1582,11 @@ mod tests {
                 ("context-mode@context-mode", &context_mode),
             ],
         );
+
+        // Dependency-bundled skills are not part of the installed plugin's
+        // discoverable domain surface. Preserve the existing node_modules skip.
+        write_plugin_skill(&exa.join("node_modules/dotenv"), "dotenv");
+        write_plugin_skill(&exa.join("node_modules/dotenv"), "dotenvx");
 
         let mut excluded = BTreeSet::new();
         excluded.insert("superpowers@claude-plugins-official".to_string());
