@@ -991,14 +991,14 @@ fn line_number(value: Option<usize>) -> String {
 
 fn build_file_index(
     snapshot: &WorktreeChangesSnapshot,
-    selected: Option<&str>,
+    highlighted: Option<&str>,
 ) -> Vec<Line<'static>> {
     let mut rendered = Vec::new();
     for file in &snapshot.files {
         rendered.push(Line::from(vec![
             Span::styled(
                 file.path.clone(),
-                if selected == Some(file.path.as_str()) {
+                if highlighted == Some(file.path.as_str()) {
                     Style::default().fg(tool_color()).add_modifier(
                         ratatui::style::Modifier::BOLD | ratatui::style::Modifier::UNDERLINED,
                     )
@@ -1019,6 +1019,48 @@ fn build_file_index(
         ]));
     }
     rendered
+}
+
+fn rendered_file_height(file: &WorktreeFileChange) -> usize {
+    // File title + diff lines + optional truncation notice + trailing separator.
+    1 + file.lines.len() + usize::from(file.truncated) + 1
+}
+
+fn viewport_active_file(snapshot: &WorktreeChangesSnapshot, scroll: usize) -> Option<&str> {
+    let mut start = 0usize;
+    for file in &snapshot.files {
+        let end = start.saturating_add(rendered_file_height(file));
+        if scroll < end {
+            return Some(file.path.as_str());
+        }
+        start = end;
+    }
+    snapshot.files.last().map(|file| file.path.as_str())
+}
+
+fn follow_active_file_in_index(
+    snapshot: &WorktreeChangesSnapshot,
+    requested_scroll: usize,
+    list_height: usize,
+    active: Option<&str>,
+) -> usize {
+    let max_scroll = snapshot.files.len().saturating_sub(list_height);
+    let requested_scroll = requested_scroll.min(max_scroll);
+    let Some(active_index) =
+        active.and_then(|path| snapshot.files.iter().position(|file| file.path == path))
+    else {
+        return requested_scroll;
+    };
+    if active_index < requested_scroll {
+        active_index
+    } else if active_index >= requested_scroll.saturating_add(list_height) {
+        active_index
+            .saturating_add(1)
+            .saturating_sub(list_height)
+            .min(max_scroll)
+    } else {
+        requested_scroll
+    }
 }
 
 fn build_render_lines(
@@ -2114,7 +2156,7 @@ pub(super) fn draw_worktree_changes(
     let list_height =
         (snapshot.files.len() as u16).min((inner.height.saturating_sub(2) / 2).max(1));
     let list_area = Rect::new(inner.x, inner.y, inner.width, list_height);
-    let list_scroll = app
+    let requested_list_scroll = app
         .worktree_file_list_scroll()
         .min(snapshot.files.len().saturating_sub(list_height as usize));
     let header_bottom = list_area.bottom().saturating_add(1).min(inner.bottom());
@@ -2138,10 +2180,28 @@ pub(super) fn draw_worktree_changes(
         inner.width,
         inner.bottom().saturating_sub(body_y),
     );
+    let lines = cached_render_lines(snapshot, selected);
+    let total_lines = lines.len();
+    super::set_pinned_pane_total_lines(total_lines);
+    let max_scroll = total_lines.saturating_sub(body.height as usize);
+    super::set_last_diff_pane_max_scroll(max_scroll);
+    let scroll = scroll.min(max_scroll);
+    super::set_last_diff_pane_effective_scroll(scroll);
+    let viewport_active = selected.or_else(|| viewport_active_file(snapshot, scroll));
+    let list_scroll = if selected.is_none() {
+        follow_active_file_in_index(
+            snapshot,
+            requested_list_scroll,
+            list_height as usize,
+            viewport_active,
+        )
+    } else {
+        requested_list_scroll
+    };
     super::clear_area(frame, inner);
     frame.render_widget(
         Paragraph::new(
-            build_file_index(snapshot, selected)
+            build_file_index(snapshot, viewport_active)
                 .into_iter()
                 .skip(list_scroll)
                 .take(list_height as usize)
@@ -2210,13 +2270,6 @@ pub(super) fn draw_worktree_changes(
         })
     });
 
-    let lines = cached_render_lines(snapshot, selected);
-    let total_lines = lines.len();
-    super::set_pinned_pane_total_lines(total_lines);
-    let max_scroll = total_lines.saturating_sub(body.height as usize);
-    super::set_last_diff_pane_max_scroll(max_scroll);
-    let scroll = scroll.min(max_scroll);
-    super::set_last_diff_pane_effective_scroll(scroll);
     let visible_end = (scroll + body.height as usize).min(total_lines);
     super::record_side_pane_snapshot(lines.as_slice(), scroll, visible_end, body);
 
@@ -2241,6 +2294,72 @@ mod tests {
         worktree_redraw_pending().store(true, Ordering::Release);
         assert!(poll_worktree_changes(None));
         assert!(!poll_worktree_changes(None));
+    }
+
+    fn active_file_fixture(path: &str, line_count: usize, truncated: bool) -> WorktreeFileChange {
+        WorktreeFileChange {
+            path: path.to_string(),
+            additions: line_count,
+            deletions: 0,
+            lines: (0..line_count)
+                .map(|line| WorktreeDiffLine {
+                    kind: WorktreeLineKind::Add,
+                    old_line: None,
+                    new_line: Some(line + 1),
+                    content: format!("line {line}"),
+                })
+                .collect(),
+            truncated,
+            error: None,
+        }
+    }
+
+    #[test]
+    fn viewport_active_file_tracks_rendered_file_boundaries() {
+        let first = active_file_fixture("first.rs", 2, false);
+        let first_height = rendered_file_height(&first);
+        let second = active_file_fixture("second.rs", 1, true);
+        let snapshot = WorktreeChangesSnapshot {
+            files: vec![first, second],
+            ..Default::default()
+        };
+
+        assert_eq!(viewport_active_file(&snapshot, 0), Some("first.rs"));
+        assert_eq!(
+            viewport_active_file(&snapshot, first_height - 1),
+            Some("first.rs")
+        );
+        assert_eq!(
+            viewport_active_file(&snapshot, first_height),
+            Some("second.rs")
+        );
+        assert_eq!(
+            viewport_active_file(&snapshot, usize::MAX),
+            Some("second.rs")
+        );
+    }
+
+    #[test]
+    fn file_index_follows_active_file_only_when_it_leaves_the_window() {
+        let snapshot = WorktreeChangesSnapshot {
+            files: (0..6)
+                .map(|index| active_file_fixture(&format!("{index}.rs"), 1, false))
+                .collect(),
+            ..Default::default()
+        };
+
+        assert_eq!(
+            follow_active_file_in_index(&snapshot, 0, 3, Some("1.rs")),
+            0
+        );
+        assert_eq!(
+            follow_active_file_in_index(&snapshot, 0, 3, Some("4.rs")),
+            2
+        );
+        assert_eq!(
+            follow_active_file_in_index(&snapshot, 3, 3, Some("1.rs")),
+            1
+        );
     }
 
     #[test]

@@ -219,6 +219,51 @@ fn worktree_rendered_region(
 }
 
 #[test]
+fn all_files_diff_highlights_viewport_file_without_enabling_filter() {
+    use ratatui::style::Modifier;
+
+    let _lock = scroll_render_test_lock();
+    let (_repo, mut app, mut terminal) = inspector_fixture();
+    app.set_worktree_pane_tab(super::worktree_pane::WorktreePaneTab::Diff);
+    app.worktree_pane.selected_file = None;
+    app.reset_worktree_diff_scroll();
+
+    render_and_snap(&app, &mut terminal);
+    let initial = crate::tui::ui::worktree_pane_layout().unwrap();
+    assert!(initial.paths.len() >= 2, "paths={:?}", initial.paths);
+    let first = &terminal.backend().buffer()[(initial.list_area.x, initial.list_area.y)];
+    assert!(first.modifier.contains(Modifier::BOLD));
+    assert!(first.modifier.contains(Modifier::UNDERLINED));
+    assert_eq!(app.current_worktree_selected_file(), None);
+    assert!(worktree_rendered_region(&terminal, initial.area).contains("all files"));
+
+    app.diff_pane_scroll = usize::MAX;
+    app.diff_pane_auto_scroll = false;
+    render_and_snap(&app, &mut terminal);
+    let scrolled = crate::tui::ui::worktree_pane_layout().unwrap();
+    let last_index = scrolled.paths.len() - 1;
+    let last_row = scrolled.list_area.y + (last_index - scrolled.list_scroll) as u16;
+    let last = &terminal.backend().buffer()[(scrolled.list_area.x, last_row)];
+    assert!(last.modifier.contains(Modifier::BOLD));
+    assert!(last.modifier.contains(Modifier::UNDERLINED));
+    assert_eq!(app.current_worktree_selected_file(), None);
+    assert!(worktree_rendered_region(&terminal, scrolled.area).contains("all files"));
+
+    let last_path = scrolled.paths[last_index].clone();
+    assert!(app.handle_worktree_pane_mouse(worktree_test_mouse(
+        MouseEventKind::Down(MouseButton::Left),
+        scrolled.list_area.x + 1,
+        last_row,
+    )));
+    assert_eq!(
+        app.current_worktree_selected_file(),
+        Some(last_path.as_str())
+    );
+    let filtered = render_and_snap(&app, &mut terminal);
+    assert!(filtered.contains("1 file · click again: all"));
+}
+
+#[test]
 fn files_inspector_enter_focus_stays_in_files_without_side_panel_page() {
     use crate::tui::app::files_inspector::FileInspectorMode::{Changes, Read, Source};
     let _lock = scroll_render_test_lock();
