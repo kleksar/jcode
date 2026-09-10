@@ -1262,7 +1262,7 @@ mod tests {
             reset_in: "6d 20h".to_string(),
         }));
 
-        let text = footer_compositor_spans(facts, quota, 80)
+        let text = footer_compositor_spans(facts, quota, Vec::new(), 80)
             .iter()
             .map(|span| span.content.as_ref())
             .collect::<String>();
@@ -1281,12 +1281,47 @@ mod tests {
             ..Default::default()
         };
 
-        let text = footer_compositor_spans(footer_context_spans(&data), Vec::new(), 9)
+        let text = footer_compositor_spans(footer_context_spans(&data), Vec::new(), Vec::new(), 9)
             .iter()
             .map(|span| span.content.as_ref())
             .collect::<String>();
 
         assert_eq!(text, "115k/272k");
+    }
+
+    #[test]
+    fn footer_compositor_right_aligns_complete_session_label() {
+        let spans = footer_compositor_spans(
+            vec![Span::raw("model")],
+            vec![Span::raw("quota")],
+            vec![Span::raw("🐍 snake")],
+            30,
+        );
+        let text = spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect::<String>();
+
+        assert_eq!(unicode_width::UnicodeWidthStr::width(text.as_str()), 30);
+        assert!(text.starts_with("model  quota"), "footer: {text:?}");
+        assert!(text.ends_with("🐍 snake"), "footer: {text:?}");
+    }
+
+    #[test]
+    fn footer_compositor_hides_session_label_when_it_cannot_fit_whole() {
+        let spans = footer_compositor_spans(
+            vec![Span::raw("model")],
+            Vec::new(),
+            vec![Span::raw("🐍 snake")],
+            9,
+        );
+        let text = spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect::<String>();
+
+        assert!(!text.contains("snake"), "footer: {text:?}");
+        assert!(!text.contains('🐍'), "footer: {text:?}");
     }
 
     #[test]
@@ -2537,6 +2572,20 @@ fn footer_context_spans(data: &crate::tui::info_widget::InfoWidgetData) -> Vec<S
     spans
 }
 
+fn footer_session_spans(app: &dyn TuiState) -> Vec<Span<'static>> {
+    let Some(name) = app
+        .session_display_name()
+        .filter(|name| !name.trim().is_empty())
+    else {
+        return Vec::new();
+    };
+    let icon = crate::id::session_icon(&name);
+    vec![
+        Span::styled(format!("{icon} "), Style::default().fg(rgb(120, 120, 132))),
+        Span::styled(name, Style::default().fg(rgb(175, 175, 188)).bold()),
+    ]
+}
+
 fn compact_context_usage_text(used: usize, limit: usize) -> Option<String> {
     (used > 0 && limit > 0).then(|| {
         format!(
@@ -2624,6 +2673,7 @@ pub(super) fn draw_session_footer(frame: &mut Frame, app: &dyn TuiState, area: R
     let spans = footer_compositor_spans(
         footer_fact_spans(app),
         footer_quota_spans(app.footer_quota()),
+        footer_session_spans(app),
         area.width as usize,
     );
     frame.render_widget(
@@ -2635,19 +2685,30 @@ pub(super) fn draw_session_footer(frame: &mut Frame, app: &dyn TuiState, area: R
 fn footer_compositor_spans(
     facts: Vec<Span<'static>>,
     mut quota: Vec<Span<'static>>,
+    mut session: Vec<Span<'static>>,
     width: usize,
 ) -> Vec<Span<'static>> {
+    let has_left = !facts.is_empty() || !quota.is_empty();
+    let mut session_width = session.iter().map(Span::width).sum::<usize>();
+    if session_width > width || (has_left && session_width.saturating_add(3) > width) {
+        session.clear();
+        session_width = 0;
+    }
+
+    let session_gap = usize::from(session_width > 0 && has_left) * 2;
+    let left_width = width.saturating_sub(session_width + session_gap);
+
     // Prefer the percentage over the reset clock on narrow terminals, without
     // letting an over-wide quota erase the entire model/footer row.
-    if quota.iter().map(|span| span.width()).sum::<usize>() > width / 2 {
+    if quota.iter().map(|span| span.width()).sum::<usize>() > left_width / 2 {
         quota.truncate(2);
     }
-    if quota.iter().map(|span| span.width()).sum::<usize>() > width {
+    if quota.iter().map(|span| span.width()).sum::<usize>() > left_width {
         quota.clear();
     }
     let quota_width = quota.iter().map(|span| span.width()).sum::<usize>();
     let gap = usize::from(!facts.is_empty() && !quota.is_empty()) * 2;
-    let facts_width = width.saturating_sub(quota_width + gap);
+    let facts_width = left_width.saturating_sub(quota_width + gap);
 
     // Keep the quota adjacent to the model rather than anchoring it to the
     // right edge. Reserve its width before truncating the session facts.
@@ -2656,6 +2717,15 @@ fn footer_compositor_spans(
         spans.push(Span::raw("  "));
     }
     spans.extend(quota);
+
+    if !session.is_empty() {
+        let left_rendered_width = spans.iter().map(Span::width).sum::<usize>();
+        let padding = width.saturating_sub(left_rendered_width + session_width);
+        if padding > 0 {
+            spans.push(Span::raw(" ".repeat(padding)));
+        }
+        spans.extend(session);
+    }
     spans
 }
 

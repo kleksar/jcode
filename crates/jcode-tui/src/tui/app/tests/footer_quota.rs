@@ -40,6 +40,29 @@ fn test_footer_quota_hides_floating_diagnostics_but_preserves_model_effort() {
 }
 
 #[test]
+fn footer_renders_current_session_label_at_right_edge() {
+    use crate::tui::TuiState;
+    let _lock = scroll_render_test_lock();
+    let app = create_test_app();
+    let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(140, 30)).unwrap();
+
+    render_and_snap(&app, &mut terminal);
+
+    let footer = (0..140)
+        .map(|x| terminal.backend().buffer()[(x, 29)].symbol())
+        .collect::<String>();
+    let name = app.session_display_name().unwrap();
+    let icon = crate::id::session_icon(&name);
+    let name_start = footer.find(&name).expect("session name should render");
+    let name_end = name_start + name.len();
+    assert!(
+        footer[..name_start].trim_end().ends_with(icon),
+        "footer: {footer:?}"
+    );
+    assert!(footer[name_end..].starts_with('│'), "footer: {footer:?}");
+}
+
+#[test]
 fn test_footer_quota_accepts_verified_weekly_usage_only() {
     use crate::tui::{
         FooterQuota,
