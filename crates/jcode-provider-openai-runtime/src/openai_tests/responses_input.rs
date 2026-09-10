@@ -127,10 +127,8 @@ fn model_service_tier_absent_model_keeps_session_fallback() {
 
 #[test]
 fn model_service_tier_off_override_suppresses_provider_fallback() {
-    let provider = provider_with_model_service_tiers(HashMap::from([(
-        "gpt-5.6-luna".to_string(),
-        None,
-    )]));
+    let provider =
+        provider_with_model_service_tiers(HashMap::from([("gpt-5.6-luna".to_string(), None)]));
     provider.set_service_tier("priority").unwrap();
 
     let request = provider.response_request_for_model("gpt-5.6-luna", &[], &[], "system", false);
@@ -150,12 +148,16 @@ fn model_service_tier_resolution_isolated_across_model_switches_and_forks() {
 
     provider.set_model("gpt-5.6-luna").unwrap();
     assert_eq!(
-        provider.service_tier_for_model(&provider.model()).as_deref(),
+        provider
+            .service_tier_for_model(&provider.model())
+            .as_deref(),
         Some("priority")
     );
     provider.set_model("gpt-5.6-sol").unwrap();
     assert_eq!(
-        provider.service_tier_for_model(&provider.model()).as_deref(),
+        provider
+            .service_tier_for_model(&provider.model())
+            .as_deref(),
         Some("flex")
     );
     fork.set_model("gpt-5.6-luna").unwrap();
@@ -165,7 +167,10 @@ fn model_service_tier_resolution_isolated_across_model_switches_and_forks() {
     );
     fork.set_model("gpt-5.6-sol").unwrap();
     assert!(fork.service_tier_for_model(&fork.model()).is_none());
-    assert_eq!(provider.service_tier_for_model("gpt-5.6-sol").as_deref(), Some("flex"));
+    assert_eq!(
+        provider.service_tier_for_model("gpt-5.6-sol").as_deref(),
+        Some("flex")
+    );
 }
 
 #[test]
