@@ -8,6 +8,17 @@
   and its base (e.g. `main`) otherwise. Never integrate branches owned by non-maintainers
   or other agents yourself; tell the user and let them decide how to proceed.
 
+### Branch topology
+
+- `custom/ui-stable` is the sole canonical branch for everyday user development.
+- Before any commit, pull, or push, verify the current branch. `origin` is the fork and
+  `upstream` is the official repository. Update `upstream` only by an explicit merge of
+  `upstream/master` into `custom/ui-stable`.
+- Do not conduct user development on `master` or perform ordinary pulls on `master`.
+  `master` remains the archival and official-tracking line.
+- Recovery and integration branches are temporary and must not be used after a successful
+  fast-forward and push to `custom/ui-stable`.
+
 ## Install Notes
 - `~/.local/bin/jcode` is the launcher symlink used from `PATH`.
 - `~/.jcode/builds/current/jcode` is the active local/source-build channel; self-dev builds and `scripts/install_release.sh` point the launcher here.
