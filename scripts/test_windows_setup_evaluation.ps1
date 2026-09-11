@@ -149,16 +149,17 @@ try {
     $env:JCODE_INSTALL_PS1_IMPORT_ONLY = '1'
     $env:JCODE_SKIP_SERVER_RELOAD = '1'
     $env:JCODE_INSTALL_SKIP_BINARY_VALIDATION = '1'
+    $env:JCODE_RELEASE_METADATA_BASE = 'https://metadata.example/releases'
     . $installScript -SkipAlacrittySetup -SkipHotkeySetup
 
     Invoke-Case 'release_lookup_avoids_unauthenticated_github_api' {
-        Assert-Equal 'v1.2.3' (Resolve-JcodeReleaseTagFromUri 'https://github.com/1jehuang/jcode/releases/tag/v1.2.3') 'release redirect parser should extract the stable tag'
+        Assert-Equal 'v1.2.3' (Resolve-JcodeReleaseTagFromUri 'https://github.com/kleksar/jcode/releases/tag/v1.2.3') 'release redirect parser should extract the stable tag'
         Assert-Equal 'v1.2.3-rc.1' (Resolve-JcodeReleaseTagFromUri 'https://github.com/1jehuang/jcode/releases/tag/v1.2.3-rc.1?source=latest') 'release redirect parser should stop before query parameters'
         Assert-Equal $true (Test-JcodeReleaseTag 'v1.2.3') 'stable release tags should validate'
         Assert-Equal $false (Test-JcodeReleaseTag 'latest') 'unversioned release labels should not validate'
         $scriptText = Get-Content -LiteralPath $installScript -Raw
         Assert-NotContains $scriptText 'api.github.com/repos/$Repo/releases/latest' 'installer should not use the rate-limited unauthenticated GitHub API'
-        Assert-Contains $scriptText 'jcode.sh/releases' 'installer should include independent static release metadata'
+        Assert-NotContains $scriptText 'jcode.sh/releases' 'fork installer must not fall back to upstream release metadata'
 
         $script:releaseLookupRequests = @()
         function Invoke-WebRequest {
@@ -169,13 +170,13 @@ try {
                 [string]$OutFile
             )
             $script:releaseLookupRequests += $Uri
-            if ($Uri -eq 'https://jcode.sh/releases/latest/version') {
+            if ($Uri -eq 'https://metadata.example/releases/latest/version') {
                 return [pscustomobject]@{ Content = "v1.2.3`n" }
             }
-            if ($Uri -eq 'https://jcode.sh/releases/v1.2.3/download-bases') {
+            if ($Uri -eq 'https://metadata.example/releases/v1.2.3/download-bases') {
                 return [pscustomobject]@{ Content = "https://mirror.example/releases/v1.2.3`n" }
             }
-            if ($Uri -eq 'https://github.com/1jehuang/jcode/releases/latest') {
+            if ($Uri -eq 'https://github.com/kleksar/jcode/releases/latest') {
                 throw 'simulated GitHub block'
             }
             throw "unexpected URI: $Uri"
@@ -184,7 +185,7 @@ try {
             Assert-Equal 'v1.2.3' (Get-LatestJcodeReleaseTag) 'static metadata should cover a blocked GitHub release lookup'
             $bases = @(Get-JcodeReleaseDownloadBases 'v1.2.3')
             Assert-Equal 'https://mirror.example/releases/v1.2.3' $bases[0] 'configured mirror should be preferred'
-            Assert-Equal 'https://github.com/1jehuang/jcode/releases/download/v1.2.3' $bases[1] 'GitHub should remain the final fallback'
+            Assert-Equal 'https://github.com/kleksar/jcode/releases/download/v1.2.3' $bases[1] 'GitHub should remain the final fallback'
         } finally {
             Remove-Item Function:\Invoke-WebRequest -ErrorAction SilentlyContinue
         }

@@ -34,12 +34,12 @@ The most intelligent harness
 
 ```bash
 # macOS & Linux
-curl -fsSL https://jcode.sh/install | bash
+curl -fsSL https://raw.githubusercontent.com/kleksar/jcode/custom/ui-stable/scripts/install.sh | bash
 ```
 
 ```powershell
 # Windows 11 (PowerShell 5.1+)
-irm https://jcode.sh/install.ps1 | iex
+irm https://raw.githubusercontent.com/kleksar/jcode/custom/ui-stable/scripts/install.ps1 | iex
 ```
 
 Need Homebrew, source builds, provider setup, or want an agent to set it up for you?
@@ -807,18 +807,14 @@ Set up jcode on this machine for me.
 
 1. Detect the operating system, available package managers, and shell environment, then install jcode using the best matching command below instead of referring me somewhere else:
 
-   - macOS with Homebrew available:
-     brew tap 1jehuang/jcode
-     brew install jcode
-
    - macOS or Linux via install script:
-     curl -fsSL https://jcode.sh/install | bash
+     curl -fsSL https://raw.githubusercontent.com/kleksar/jcode/custom/ui-stable/scripts/install.sh | bash
 
    - Windows PowerShell:
-     irm https://jcode.sh/install.ps1 | iex
+     irm https://raw.githubusercontent.com/kleksar/jcode/custom/ui-stable/scripts/install.ps1 | iex
 
    - From source if the above paths are not appropriate:
-     git clone https://github.com/1jehuang/jcode.git
+     git clone --branch custom/ui-stable https://github.com/kleksar/jcode.git
      cd jcode
      cargo build --release
      scripts/install_release.sh
@@ -866,7 +862,7 @@ This is intended to be a copy-paste bootstrap prompt for jcode itself or any oth
 
 ```bash
 # macOS & Linux
-curl -fsSL https://jcode.sh/install | bash
+curl -fsSL https://raw.githubusercontent.com/kleksar/jcode/custom/ui-stable/scripts/install.sh | bash
 ```
 
 On Termux, install the glibc runtime and `patchelf` first so the installer can
@@ -875,12 +871,12 @@ launcher that avoids Termux's `LD_PRELOAD` shim:
 
 ```bash
 pkg install glibc patchelf
-curl -fsSL https://jcode.sh/install | bash
+curl -fsSL https://raw.githubusercontent.com/kleksar/jcode/custom/ui-stable/scripts/install.sh | bash
 ```
 
 ```powershell
 # Windows 11 x64 or ARM64 (PowerShell 5.1+)
-irm https://jcode.sh/install.ps1 | iex
+irm https://raw.githubusercontent.com/kleksar/jcode/custom/ui-stable/scripts/install.ps1 | iex
 ```
 
 The Windows installer selects the correct architecture and verifies the download
@@ -893,17 +889,10 @@ instead of unexpectedly starting a long compilation. An explicit source build
 is available with `-BuildFromSource` and requires Git, Rust, and Visual Studio
 2022 Build Tools with the **Desktop development with C++** workload.
 
-### macOS via Homebrew
-
-```bash
-brew tap 1jehuang/jcode
-brew install jcode
-```
-
 ### From Source (all platforms)
 
 ```bash
-git clone https://github.com/1jehuang/jcode.git
+git clone --branch custom/ui-stable https://github.com/kleksar/jcode.git
 cd jcode
 cargo build --release
 ```
@@ -932,14 +921,14 @@ Removes installed binaries and the launcher but keeps your config, auth, and
 sessions so a clean reinstall picks up where you left off:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/1jehuang/jcode/master/scripts/uninstall.sh | bash -s -- --yes
+curl -fsSL https://raw.githubusercontent.com/kleksar/jcode/custom/ui-stable/scripts/uninstall.sh | bash -s -- --yes
 ```
 
 For a full wipe of everything including config, auth, sessions, logs, and
 memory (useful for recovering from a broken install):
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/1jehuang/jcode/master/scripts/uninstall.sh | bash -s -- --purge --yes
+curl -fsSL https://raw.githubusercontent.com/kleksar/jcode/custom/ui-stable/scripts/uninstall.sh | bash -s -- --purge --yes
 ```
 
 Add `--dry-run` to preview what would be removed without deleting anything.

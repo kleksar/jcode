@@ -1,8 +1,11 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-REPO="1jehuang/jcode"
-RELEASE_METADATA_BASE="${JCODE_RELEASE_METADATA_BASE:-https://jcode.sh/releases}"
+# This checkout is published from the kleksar fork. Do not fall back to the
+# upstream jcode.sh metadata because it describes different release assets.
+# Operators who run their own trusted release mirror may opt in explicitly.
+REPO="${JCODE_REPO:-kleksar/jcode}"
+RELEASE_METADATA_BASE="${JCODE_RELEASE_METADATA_BASE:-}"
 IS_WINDOWS=false
 IS_TERMUX=false
 INSTALL_STAGE="startup"
@@ -155,8 +158,11 @@ fi
 INSTALL_STAGE="release_lookup"
 VERSION="${JCODE_VERSION:-}"
 if [ -z "$VERSION" ]; then
-  METADATA_VERSION=$(curl -fsSL --retry 2 --connect-timeout 10 \
-    "$RELEASE_METADATA_BASE/latest/version" 2>/dev/null | tr -d '\r\n' || true)
+  METADATA_VERSION=""
+  if [ -n "$RELEASE_METADATA_BASE" ]; then
+    METADATA_VERSION=$(curl -fsSL --retry 2 --connect-timeout 10 \
+      "$RELEASE_METADATA_BASE/latest/version" 2>/dev/null | tr -d '\r\n' || true)
+  fi
   LATEST_RELEASE_URL=$(curl -fsSIL --retry 2 --connect-timeout 10 \
     -o /dev/null -w '%{url_effective}' "https://github.com/$REPO/releases/latest" 2>/dev/null || true)
   case "$LATEST_RELEASE_URL" in
@@ -208,8 +214,11 @@ tmpdir=$(mktemp -d)
 INSTALL_STAGE="artifact_download"
 download_mode=""
 downloaded_asset=""
-DOWNLOAD_BASES=$(curl -fsSL --retry 2 --connect-timeout 10 \
-  "$RELEASE_METADATA_BASE/$VERSION/download-bases" 2>/dev/null || true)
+DOWNLOAD_BASES=""
+if [ -n "$RELEASE_METADATA_BASE" ]; then
+  DOWNLOAD_BASES=$(curl -fsSL --retry 2 --connect-timeout 10 \
+    "$RELEASE_METADATA_BASE/$VERSION/download-bases" 2>/dev/null || true)
+fi
 DOWNLOAD_BASES=$(printf '%s\n%s\n' "$DOWNLOAD_BASES" "$GITHUB_RELEASE_BASE" |
   awk '/^https:\/\/[^[:space:]]+$/ && !seen[$0]++')
 
@@ -233,9 +242,12 @@ done
 if [ -n "$download_mode" ]; then
   INSTALL_STAGE="artifact_verification"
   EXPECTED_SHA256=""
-  for checksum_url in \
-    "$RELEASE_METADATA_BASE/$VERSION/SHA256SUMS" \
-    "$GITHUB_RELEASE_BASE/SHA256SUMS"; do
+  checksum_urls="$GITHUB_RELEASE_BASE/SHA256SUMS"
+  if [ -n "$RELEASE_METADATA_BASE" ]; then
+    checksum_urls="$RELEASE_METADATA_BASE/$VERSION/SHA256SUMS
+$checksum_urls"
+  fi
+  while IFS= read -r checksum_url; do
     CHECKSUMS=$(curl -fsSL --retry 2 --connect-timeout 10 \
       "$checksum_url" 2>/dev/null || true)
     EXPECTED_SHA256=$(printf '%s\n' "$CHECKSUMS" |
@@ -244,7 +256,9 @@ if [ -n "$download_mode" ]; then
       break
     fi
     EXPECTED_SHA256=""
-  done
+  done <<EOF
+$checksum_urls
+EOF
   printf '%s' "$EXPECTED_SHA256" | grep -Eq '^[0-9a-f]{64}$' \
     || err "Could not find a trusted SHA-256 checksum for $downloaded_asset in $VERSION"
   ACTUAL_SHA256=$(sha256_file "$tmpdir/jcode.download") \

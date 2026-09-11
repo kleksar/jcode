@@ -31,16 +31,16 @@ done
 [ -z "${DOWNLOAD_URL_LOG:-}" ] || printf '%s\n' "$url" >> "$DOWNLOAD_URL_LOG"
 case "$url" in
   *telemetry.jcode.sh*) printf '%s\n' "$payload" >> "$INSTALL_TELEMETRY_LOG" ;;
-  *jcode.sh/releases/latest/version)
+  *metadata.example/releases/latest/version)
     [ "${FAIL_RELEASE:-0}" != "1" ] || exit 22
     [ "${FAIL_METADATA_RELEASE:-0}" != "1" ] || exit 22
     printf 'v1.2.3\n'
     ;;
-  *jcode.sh/releases/v1.2.3/download-bases)
+  *metadata.example/releases/v1.2.3/download-bases)
     printf 'https://mirror.invalid/releases/v1.2.3\n'
-    printf 'https://github.com/1jehuang/jcode/releases/download/v1.2.3\n'
+    printf 'https://github.com/kleksar/jcode/releases/download/v1.2.3\n'
     ;;
-  *jcode.sh/releases/v1.2.3/SHA256SUMS)
+  *metadata.example/releases/v1.2.3/SHA256SUMS)
     if [ "${METADATA_CHECKSUM_HTML:-0}" = "1" ]; then
       printf '<!doctype html><title>fallback page</title>\n'
       exit 0
@@ -57,7 +57,7 @@ case "$url" in
   *github.com*/releases/latest)
     [ "${FAIL_RELEASE:-0}" != "1" ] || exit 22
     [ "${FAIL_GITHUB_RELEASE:-0}" != "1" ] || exit 22
-    printf 'https://github.com/1jehuang/jcode/releases/tag/v1.2.3'
+    printf 'https://github.com/kleksar/jcode/releases/tag/v1.2.3'
     ;;
   *mirror.invalid*) exit 22 ;;
   *github.com*/releases/download/*)
@@ -116,6 +116,7 @@ JCODE_INSTALL_DIR="$tmp/install-metadata-fallback" \
 JCODE_SKIP_SERVER_RELOAD=1 \
 JCODE_NO_TELEMETRY=1 \
 FAIL_GITHUB_RELEASE=1 \
+JCODE_RELEASE_METADATA_BASE=https://metadata.example/releases \
 bash "$repo_dir/scripts/install.sh" >/dev/null
 test -x "$tmp/install-metadata-fallback/jcode"
 

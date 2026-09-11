@@ -48,11 +48,15 @@ if ($PSVersionTable.PSVersion.Major -lt 5) {
     exit 1
 }
 
-$Repo = "1jehuang/jcode"
+$Repo = if ($env:JCODE_REPO) {
+    $env:JCODE_REPO.Trim('/')
+} else {
+    "kleksar/jcode"
+}
 $ReleaseMetadataBase = if ($env:JCODE_RELEASE_METADATA_BASE) {
     $env:JCODE_RELEASE_METADATA_BASE.TrimEnd('/')
 } else {
-    "https://jcode.sh/releases"
+    $null
 }
 
 if (-not $InstallDir) {
@@ -106,11 +110,13 @@ function Get-LatestJcodeReleaseTag {
     # Avoid api.github.com here. Its unauthenticated limit is only 60 requests
     # per public IP per hour, so installs are unreliable behind shared NAT/VPNs.
     $metadataTag = $null
-    try {
-        $metadataResponse = Invoke-WebRequest -UseBasicParsing -Uri "$ReleaseMetadataBase/latest/version"
-        $candidate = (ConvertFrom-JcodeWebContent -Content $metadataResponse.Content).Trim()
-        if (Test-JcodeReleaseTag $candidate) { $metadataTag = $candidate }
-    } catch {}
+    if ($ReleaseMetadataBase) {
+        try {
+            $metadataResponse = Invoke-WebRequest -UseBasicParsing -Uri "$ReleaseMetadataBase/latest/version"
+            $candidate = (ConvertFrom-JcodeWebContent -Content $metadataResponse.Content).Trim()
+            if (Test-JcodeReleaseTag $candidate) { $metadataTag = $candidate }
+        } catch {}
+    }
 
     try {
         $response = Invoke-WebRequest -UseBasicParsing -Method Head -Uri "https://github.com/$Repo/releases/latest"
@@ -148,15 +154,17 @@ function Get-LatestJcodeReleaseTag {
 
 function Get-JcodeReleaseDownloadBases([string]$ReleaseTag) {
     $bases = New-Object System.Collections.Generic.List[string]
-    try {
-        $response = Invoke-WebRequest -UseBasicParsing -Uri "$ReleaseMetadataBase/$ReleaseTag/download-bases"
-        foreach ($line in ((ConvertFrom-JcodeWebContent -Content $response.Content) -split "`r?`n")) {
-            $candidate = $line.Trim().TrimEnd('/')
-            if ($candidate -match '^https://\S+$' -and -not $bases.Contains($candidate)) {
-                $bases.Add($candidate)
+    if ($ReleaseMetadataBase) {
+        try {
+            $response = Invoke-WebRequest -UseBasicParsing -Uri "$ReleaseMetadataBase/$ReleaseTag/download-bases"
+            foreach ($line in ((ConvertFrom-JcodeWebContent -Content $response.Content) -split "`r?`n")) {
+                $candidate = $line.Trim().TrimEnd('/')
+                if ($candidate -match '^https://\S+$' -and -not $bases.Contains($candidate)) {
+                    $bases.Add($candidate)
+                }
             }
-        }
-    } catch {}
+        } catch {}
+    }
 
     $githubBase = "https://github.com/$Repo/releases/download/$ReleaseTag"
     if (-not $bases.Contains($githubBase)) { $bases.Add($githubBase) }
@@ -183,10 +191,11 @@ function Get-JcodeSha256FromManifest {
 
 function Get-ReleaseChecksum([string]$ReleaseTag, [string]$AssetName) {
     $lastError = $null
-    foreach ($checksumUrl in @(
-        "$ReleaseMetadataBase/$ReleaseTag/SHA256SUMS",
-        "https://github.com/$Repo/releases/download/$ReleaseTag/SHA256SUMS"
-    )) {
+    $checksumUrls = @("https://github.com/$Repo/releases/download/$ReleaseTag/SHA256SUMS")
+    if ($ReleaseMetadataBase) {
+        $checksumUrls = @("$ReleaseMetadataBase/$ReleaseTag/SHA256SUMS") + $checksumUrls
+    }
+    foreach ($checksumUrl in $checksumUrls) {
         try {
             $response = Invoke-WebRequest -UseBasicParsing -Uri $checksumUrl
             $expected = Get-JcodeSha256FromManifest -ManifestText (ConvertFrom-JcodeWebContent -Content $response.Content) -AssetName $AssetName
