@@ -32,6 +32,27 @@ fn test_openai_fast_mode_defaults_to_priority() {
 }
 
 #[test]
+fn disabled_model_routes_default_empty_and_roundtrip() {
+    assert!(ProviderConfig::default().disabled_model_routes.is_empty());
+
+    let cfg: Config = toml::from_str(
+        "[provider]\ndisabled_model_routes = [\"gpt-6-astra[web]\"]\n",
+    )
+    .expect("disabled model routes should parse");
+    assert_eq!(
+        cfg.provider.disabled_model_routes,
+        vec!["gpt-6-astra[web]"]
+    );
+
+    let serialized = toml::to_string(&cfg).expect("config should serialize");
+    let reparsed: Config = toml::from_str(&serialized).expect("serialized config should parse");
+    assert_eq!(
+        reparsed.provider.disabled_model_routes,
+        cfg.provider.disabled_model_routes
+    );
+}
+
+#[test]
 fn openai_model_service_tiers_default_empty_and_roundtrip() {
     assert_eq!(
         ProviderConfig::default().openai_model_service_tiers,

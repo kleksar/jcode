@@ -1223,6 +1223,12 @@ pub struct ProviderConfig {
     pub default_model: Option<String>,
     /// Default provider to use (claude|openai|copilot|openrouter)
     pub default_provider: Option<String>,
+    /// Exact canonical built-in route ids to hide and reject. Empty by default.
+    ///
+    /// This is deliberately route-id based rather than provider based, so (for
+    /// example) disabling `gpt-6-astra[web]` does not disable `gpt-6-astra`
+    /// on the OpenAI API.
+    pub disabled_model_routes: Vec<String>,
     /// Reasoning effort for OpenAI Responses API (none|minimal|low|medium|high|xhigh|max)
     pub openai_reasoning_effort: Option<String>,
     /// Reasoning effort for Anthropic Messages API output_config (none|low|medium|high|xhigh; max aliases to strongest supported)
@@ -1271,6 +1277,7 @@ impl Default for ProviderConfig {
         Self {
             default_model: None,
             default_provider: None,
+            disabled_model_routes: Vec::new(),
             openai_reasoning_effort: Some("low".to_string()),
             anthropic_reasoning_effort: None,
             openai_transport: None,

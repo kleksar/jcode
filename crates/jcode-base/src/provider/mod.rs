@@ -80,6 +80,51 @@ pub(crate) use routing::{
     anthropic_api_key_route_availability, anthropic_oauth_route_availability,
 };
 
+/// Whether a catalog route is disabled by the exact canonical built-in route id
+/// in provider configuration. The API method check keeps an identically named
+/// route offered by a user-configured compatible provider untouched.
+pub(super) fn route_is_disabled_by_config(
+    route: &ModelRoute,
+    config: &crate::config::ProviderConfig,
+) -> bool {
+    route.api_method == "chatgpt-web"
+        && jcode_provider_core::is_chatgpt_web_model(&route.model)
+        && config
+            .disabled_model_routes
+            .iter()
+            .any(|disabled| disabled == &route.model)
+}
+
+pub(super) fn filter_disabled_model_routes(routes: &mut Vec<ModelRoute>) {
+    let config = &crate::config::config().provider;
+    routes.retain(|route| !route_is_disabled_by_config(route, config));
+}
+
+fn disabled_builtin_web_model(model: &str, config: &crate::config::ProviderConfig) -> bool {
+    jcode_provider_core::is_chatgpt_web_model(model)
+        && config
+            .disabled_model_routes
+            .iter()
+            .any(|disabled| disabled == model)
+}
+
+fn ensure_builtin_web_model_enabled_with_config(
+    model: &str,
+    config: &crate::config::ProviderConfig,
+) -> Result<()> {
+    if disabled_builtin_web_model(model, config) {
+        anyhow::bail!(
+            "Model route '{}' is disabled by [provider].disabled_model_routes",
+            model
+        );
+    }
+    Ok(())
+}
+
+fn ensure_builtin_web_model_enabled(model: &str) -> Result<()> {
+    ensure_builtin_web_model_enabled_with_config(model, &crate::config::config().provider)
+}
+
 /// Process-wide handle to the live agent provider.
 ///
 /// The memory sidecar ([`crate::sidecar::Sidecar`]) needs to make small,
@@ -581,7 +626,8 @@ impl MultiProvider {
             return entry;
         }
 
-        let routes = catalog_routes::multiprovider_model_routes(self);
+        let mut routes = catalog_routes::multiprovider_model_routes(self);
+        filter_disabled_model_routes(&mut routes);
         let entry = RoutesMemoEntry {
             built_at: std::time::Instant::now(),
             auth_generation,
@@ -1127,6 +1173,10 @@ impl MultiProvider {
                 Ok(())
             }
             ActiveProvider::OpenAI => {
+                // Check after every provider/credential alias has resolved to
+                // OpenAI. This prevents `openai-oauth:` or `openai-api:` from
+                // bypassing a disabled built-in ChatGPT Web route.
+                ensure_builtin_web_model_enabled(model)?;
                 let Some(openai) = self.openai_provider() else {
                     // No OpenAI runtime: still run the same model-name
                     // validation the runtime itself would. A cross-provider
@@ -2129,6 +2179,13 @@ impl Provider for MultiProvider {
     fn set_route_selection(&self, selection: &RouteSelection) -> Result<()> {
         if selection.model.trim().is_empty() {
             anyhow::bail!("Model cannot be empty");
+        }
+
+        // Structured picker/RPC selections retain their route method. Reject
+        // the disabled built-in route before converting it to any legacy model
+        // spec, so route aliases cannot turn it into an API selection.
+        if selection.api_method == "chatgpt-web" {
+            ensure_builtin_web_model_enabled(selection.model.trim())?;
         }
 
         // The subscription is a distinct endpoint/auth runtime, not a model

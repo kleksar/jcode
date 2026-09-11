@@ -119,6 +119,38 @@ fn openai_compatible_profile_catalog_cache_is_stale_at_soft_refresh_boundary() {
     ));
 }
 
+#[test]
+fn disabled_model_routes_match_only_the_exact_builtin_web_route() {
+    let mut config = crate::config::ProviderConfig::default();
+    config.disabled_model_routes = vec!["gpt-6-astra[web]".to_string()];
+
+    let web_astra = build_chatgpt_web_route("gpt-6-astra[web]");
+    let web_pro = build_chatgpt_web_route("gpt-5.6-pro[web]");
+    let api_astra = build_openai_oauth_route("gpt-6-astra", true, "");
+    let compatible_same_name = ModelRoute {
+        model: "gpt-6-astra[web]".to_string(),
+        provider: "Example gateway".to_string(),
+        api_method: "openai-compatible:example".to_string(),
+        available: true,
+        detail: String::new(),
+        cheapness: None,
+    };
+
+    assert!(route_is_disabled_by_config(&web_astra, &config));
+    assert!(!route_is_disabled_by_config(&web_pro, &config));
+    assert!(!route_is_disabled_by_config(&api_astra, &config));
+    assert!(!route_is_disabled_by_config(&compatible_same_name, &config));
+    assert!(!disabled_builtin_web_model("gpt-6-astra", &config));
+    assert!(!disabled_builtin_web_model("GPT-6-ASTRA[WEB]", &config));
+    assert!(ensure_builtin_web_model_enabled_with_config("gpt-5.6-pro[web]", &config).is_ok());
+    assert_eq!(
+        ensure_builtin_web_model_enabled_with_config("gpt-6-astra[web]", &config)
+            .expect_err("disabled route must be rejected")
+            .to_string(),
+        "Model route 'gpt-6-astra[web]' is disabled by [provider].disabled_model_routes"
+    );
+}
+
 fn with_env_var<T>(key: &str, value: &str, f: impl FnOnce() -> T) -> T {
     let prev = std::env::var_os(key);
     crate::env::set_var(key, value);

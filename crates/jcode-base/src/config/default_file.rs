@@ -367,6 +367,10 @@ tool_profile = "acp"
 # `claude` and `anthropic-api` are distinct providers with distinct credentials.
 # See docs/AUTH_CREDENTIAL_SOURCES.md for where each credential lives.
 # default_provider = "copilot"
+# Exact canonical built-in route ids to hide and reject. This does not disable
+# similarly named API routes. For example, this hides only the ChatGPT Web
+# route while leaving the OpenAI API route available:
+# disabled_model_routes = ["gpt-6-astra[web]"]
 # OpenAI reasoning effort (none|minimal|low|medium|high|xhigh|max)
 openai_reasoning_effort = "low"
 # Anthropic reasoning effort for Claude reasoning models (none|low|medium|high|xhigh|max)
