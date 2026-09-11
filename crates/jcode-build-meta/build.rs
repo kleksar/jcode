@@ -116,7 +116,10 @@ fn main() {
     //   Dirty:   v0.2.17-dev (abc1234, dirty)
     let is_release = std::env::var("JCODE_RELEASE_BUILD").is_ok();
     let version = if is_release {
-        format!("v{}.{}.{} ({})", major, minor, patch, git_hash)
+        // Preserve a release tag's prerelease/build suffix in `--version`, for
+        // example `v0.84.1-fork.4`, so installers can verify the exact tagged
+        // binary rather than treating it as the base Cargo package version.
+        format!("v{} ({})", build_semver, git_hash)
     } else if dirty {
         format!("v{}.{}.{}-dev ({}, dirty)", major, minor, patch, git_hash)
     } else {
