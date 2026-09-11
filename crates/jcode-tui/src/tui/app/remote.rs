@@ -2423,7 +2423,9 @@ mod route_dispatch_tests {
 
     #[test]
     fn other_runtime_key_uses_legacy_model_spec() {
-        let selection = selection(crate::provider::RuntimeKey::Other("chatgpt-web".to_string()));
+        let selection = selection(crate::provider::RuntimeKey::Other(
+            "chatgpt-web".to_string(),
+        ));
 
         assert_eq!(
             remote_route_dispatch(selection),
