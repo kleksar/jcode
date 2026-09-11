@@ -72,6 +72,9 @@ fn create_visible_spawn_session(
     effort_override: Option<&str>,
     selfdev_requested: bool,
 ) -> anyhow::Result<(String, PathBuf)> {
+    if let Some(model) = model_override {
+        crate::provider::ensure_model_route_enabled(model.trim(), route_api_method_override)?;
+    }
     let cwd = working_dir
         .map(PathBuf::from)
         .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
@@ -615,6 +618,12 @@ pub(super) async fn spawn_swarm_agent(
     let spawn_model = selection.model.clone();
     let spawn_provider_key = selection.provider_key.clone();
     let spawn_route_api_method = selection.route_api_method.clone();
+    if let Some(model) = spawn_model.as_deref() {
+        crate::provider::ensure_model_route_enabled(
+            model.trim(),
+            spawn_route_api_method.as_deref(),
+        )?;
+    }
     let spawn_effort = resolve_swarm_spawn_effort(
         requested_effort.as_deref(),
         agents_config.swarm_effort.as_deref(),

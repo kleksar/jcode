@@ -124,6 +124,7 @@ impl Provider for OpenAIProvider {
     ) -> Result<EventStream> {
         let selected_model = self.model();
         if is_chatgpt_web_model(&selected_model) {
+            jcode_base::provider::ensure_model_route_enabled(&selected_model, Some("chatgpt-web"))?;
             return Arc::clone(&self.chatgpt_web)
                 .complete(messages, tools, system, &selected_model)
                 .await;

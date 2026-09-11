@@ -54,6 +54,12 @@ pub(super) async fn create_headless_session(
     memory_scope: HeadlessMemoryScope,
     origin: crate::session::SessionOrigin,
 ) -> Result<String> {
+    if let Some(model) = model_override.as_deref() {
+        crate::provider::ensure_model_route_enabled(
+            model.trim(),
+            route_api_method_override.as_deref(),
+        )?;
+    }
     let memory_enabled = crate::config::config().features.memory;
     let swarm_enabled = crate::config::config().features.swarm;
 

@@ -121,8 +121,18 @@ fn ensure_builtin_web_model_enabled_with_config(
     Ok(())
 }
 
-fn ensure_builtin_web_model_enabled(model: &str) -> Result<()> {
+pub fn ensure_model_route_enabled(model: &str, api_method: Option<&str>) -> Result<()> {
+    // A bare supported `[web]` id is always the built-in route. When callers
+    // retain a route method, require `chatgpt-web` so an identically named
+    // user-configured compatible route remains selectable.
+    if api_method.is_some_and(|method| method != "chatgpt-web") {
+        return Ok(());
+    }
     ensure_builtin_web_model_enabled_with_config(model, &crate::config::config().provider)
+}
+
+fn ensure_builtin_web_model_enabled(model: &str) -> Result<()> {
+    ensure_model_route_enabled(model, None)
 }
 
 /// Process-wide handle to the live agent provider.
