@@ -214,8 +214,12 @@ fn root_package_version(repo_root: &Path) -> Option<String> {
 }
 
 fn parse_semver(value: &str) -> Option<(u32, u32, u32)> {
+    // `JCODE_BUILD_SEMVER` is also used for release tags such as
+    // `v0.84.1-fork.3`. Parse the numeric core for comparisons while preserving
+    // the full override string for the displayed release version.
     let trimmed = value.trim().trim_start_matches('v');
-    let mut parts = trimmed.split('.');
+    let core = trimmed.split(['-', '+']).next()?;
+    let mut parts = core.split('.');
     let major = parts.next()?.parse().ok()?;
     let minor = parts.next()?.parse().ok()?;
     let patch = parts.next()?.parse().ok()?;
