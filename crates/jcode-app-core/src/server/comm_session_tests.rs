@@ -20,6 +20,36 @@ use std::sync::atomic::AtomicU64;
 use std::time::Instant;
 use tokio::sync::{Mutex, RwLock, broadcast, mpsc};
 
+struct DisabledWebRouteHome {
+    home: tempfile::TempDir,
+    previous: Option<std::ffi::OsString>,
+}
+
+impl DisabledWebRouteHome {
+    fn new() -> Self {
+        let home = tempfile::TempDir::new().expect("create test home");
+        std::fs::write(
+            home.path().join("config.toml"),
+            "[provider]\ndisabled_model_routes = [\"gpt-6-astra[web]\"]\n",
+        )
+        .expect("write disabled route config");
+        let previous = std::env::var_os("JCODE_HOME");
+        crate::env::set_var("JCODE_HOME", home.path());
+        crate::config::invalidate_config_cache();
+        Self { home, previous }
+    }
+}
+
+impl Drop for DisabledWebRouteHome {
+    fn drop(&mut self) {
+        match self.previous.take() {
+            Some(value) => crate::env::set_var("JCODE_HOME", value),
+            None => crate::env::remove_var("JCODE_HOME"),
+        }
+        crate::config::invalidate_config_cache();
+    }
+}
+
 struct MockProvider;
 
 #[async_trait]
@@ -124,6 +154,36 @@ async fn resolve_spawn_working_dir_prefers_explicit_then_spawner_agent_dir() {
             .await
             .as_deref(),
         Some("/tmp/spawner-agent")
+    );
+}
+
+#[test]
+fn visible_disabled_web_spawn_rejects_before_session_persistence_or_window_launch() {
+    let _lock = crate::storage::lock_test_env();
+    let home = DisabledWebRouteHome::new();
+
+    let error = prepare_visible_spawn_session(
+        Some("/visible-disabled-web"),
+        Some("gpt-6-astra[web]"),
+        None,
+        Some("chatgpt-web"),
+        None,
+        false,
+        Some("must not persist"),
+        |_, _, _, _| -> anyhow::Result<bool> {
+            panic!("disabled route must reject before opening a window")
+        },
+    )
+    .expect_err("disabled visible Web route must be rejected");
+
+    assert!(error.to_string().contains("disabled_model_routes"));
+    assert!(
+        !home.home.path().join("sessions").exists(),
+        "disabled route must not persist a session"
+    );
+    assert!(
+        !home.home.path().join("client-input").exists(),
+        "disabled route must not persist startup input"
     );
 }
 

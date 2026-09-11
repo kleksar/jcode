@@ -147,6 +147,37 @@ fn test_chatgpt_web_model_environment_override_is_trimmed() {
     }
 }
 
+#[tokio::test]
+async fn disabled_current_web_model_rejects_before_browser_request() {
+    let _guard = jcode_base::storage::lock_test_env();
+    let home = tempfile::TempDir::new().expect("create test home");
+    let home_env = EnvVarGuard::set_path("JCODE_HOME", home.path());
+    std::fs::write(
+        home.path().join("config.toml"),
+        "[provider]\ndisabled_model_routes = [\"gpt-6-astra[web]\"]\n",
+    )
+    .expect("write disabled route config");
+    jcode_base::config::invalidate_config_cache();
+    let _model = EnvVarGuard::set("JCODE_OPENAI_MODEL", "gpt-6-astra[web]");
+    let provider = OpenAIProvider::new(CodexCredentials {
+        access_token: "test".to_string(),
+        refresh_token: String::new(),
+        id_token: None,
+        account_id: None,
+        expires_at: None,
+    });
+
+    let error = match provider.complete(&[], &[], "", None).await {
+        Ok(_) => panic!("disabled current Web route must reject before browser use"),
+        Err(error) => error,
+    };
+    assert!(error.to_string().contains("disabled_model_routes"));
+    assert_eq!(provider.model(), "gpt-6-astra[web]", "must not fall back");
+
+    drop(home_env);
+    jcode_base::config::invalidate_config_cache();
+}
+
 #[test]
 fn test_summarize_ws_input_counts_tool_outputs() {
     let items = vec![

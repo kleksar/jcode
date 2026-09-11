@@ -371,6 +371,7 @@ mod tests {
                 Some(value) => crate::env::set_var("JCODE_HOME", value),
                 None => crate::env::remove_var("JCODE_HOME"),
             }
+            crate::config::invalidate_config_cache();
         }
     }
 
@@ -479,6 +480,61 @@ mod tests {
             false,
         )
         .await;
+    }
+
+    #[tokio::test]
+    async fn disabled_web_headless_spawn_rejects_before_provider_or_session_creation() {
+        let _lock = crate::storage::lock_test_env();
+        let env = OriginTestHome::new();
+        std::fs::write(
+            env.home.path().join("config.toml"),
+            "[provider]\ndisabled_model_routes = [\"gpt-6-astra[web]\"]\n",
+        )
+        .expect("write disabled route config");
+        crate::config::invalidate_config_cache();
+        let sessions: SessionAgents = Arc::new(RwLock::new(HashMap::new()));
+        let global = Arc::new(RwLock::new(String::new()));
+        let members = Arc::new(RwLock::new(HashMap::new()));
+        let swarms = Arc::new(RwLock::new(HashMap::new()));
+        let coordinators = Arc::new(RwLock::new(HashMap::new()));
+        let plans = Arc::new(RwLock::new(HashMap::new()));
+        let queues: SessionInterruptQueues = Arc::new(RwLock::new(HashMap::new()));
+        let provider: Arc<dyn Provider> = Arc::new(OriginTestProvider);
+
+        let error = create_headless_session(
+            &sessions,
+            &global,
+            &provider,
+            "create_session:/headless-disabled-web",
+            &members,
+            &swarms,
+            &coordinators,
+            &plans,
+            &queues,
+            false,
+            Some("gpt-6-astra[web]".to_string()),
+            None,
+            Some("chatgpt-web".to_string()),
+            None,
+            None,
+            Some("origin-parent".to_string()),
+            HeadlessMemoryScope::RealProject,
+            SessionOrigin::SwarmWorker,
+        )
+        .await
+        .expect_err("disabled headless Web route must be rejected");
+
+        assert!(error.to_string().contains("disabled_model_routes"));
+        assert!(sessions.read().await.is_empty());
+        assert!(global.read().await.is_empty());
+        assert!(members.read().await.is_empty());
+        assert!(swarms.read().await.is_empty());
+        assert!(coordinators.read().await.is_empty());
+        assert!(queues.read().await.is_empty());
+        assert!(
+            !env.home.path().join("sessions").exists(),
+            "disabled route must not create a persisted session"
+        );
     }
 
     #[tokio::test]
