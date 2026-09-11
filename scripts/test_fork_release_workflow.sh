@@ -5,6 +5,7 @@ repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 fork_workflow="$repo_root/.github/workflows/fork-release.yml"
 official_workflow="$repo_root/.github/workflows/release.yml"
 installer="$repo_root/scripts/install.sh"
+powershell_installer="$repo_root/scripts/install.ps1"
 readme="$repo_root/README.md"
 
 require_literal() {
@@ -17,18 +18,22 @@ require_literal() {
 }
 
 require_literal "$fork_workflow" "github.repository == 'kleksar/jcode'"
-require_literal "$fork_workflow" 'scripts/build_linux_compat.sh dist'
 # These are literal workflow and shell source contracts, not expressions to expand.
 # shellcheck disable=SC2016
 require_literal "$fork_workflow" 'gh release create "${GITHUB_REF_NAME}"'
 require_literal "$fork_workflow" 'SHA256SUMS'
 
 for asset in \
-  jcode-linux-x86_64 \
-  jcode-linux-aarch64 \
   jcode-macos-aarch64 \
-  jcode-macos-x86_64; do
+  jcode-windows-x86_64-unsigned; do
   require_literal "$fork_workflow" "$asset"
+done
+
+for excluded in jcode-linux-x86_64 jcode-linux-aarch64 jcode-macos-x86_64 jcode-windows-aarch64; do
+  if grep -Fq -- "$excluded" "$fork_workflow"; then
+    printf 'unexpected target in initial two-platform publisher: %s\n' "$excluded" >&2
+    exit 1
+  fi
 done
 
 require_literal "$official_workflow" "if: github.repository == '1jehuang/jcode'"
@@ -36,6 +41,11 @@ require_literal "$official_workflow" "if: github.repository == '1jehuang/jcode'"
 require_literal "$installer" 'REPO="${JCODE_REPO:-kleksar/jcode}"'
 # shellcheck disable=SC2016
 require_literal "$installer" 'RELEASE_METADATA_BASE="${JCODE_RELEASE_METADATA_BASE:-}"'
+require_literal "$powershell_installer" 'jcode-windows-x86_64-unsigned'
+require_literal "$powershell_installer" 'SmartScreen warning'
+require_literal "$powershell_installer" 'SHA-256 was verified against the release SHA256SUMS'
+require_literal "$readme" 'Windows x64 binary is unsigned'
+require_literal "$readme" 'do not disable or bypass Windows security protections'
 require_literal "$readme" 'https://raw.githubusercontent.com/kleksar/jcode/custom/ui-stable/scripts/install.sh'
 
 printf 'fork release workflow contract tests passed\n'

@@ -79,8 +79,5 @@ run_case() {
 }
 
 run_case Darwin arm64 jcode-macos-aarch64
-run_case Darwin x86_64 jcode-macos-x86_64
-run_case Linux aarch64 jcode-linux-aarch64
-run_case Linux x86_64 jcode-linux-x86_64
 
-printf 'fork installer tests passed: 4 platform mappings, 4 checksum failures\n'
+printf 'fork installer tests passed: macOS Apple Silicon mapping and checksum failure\n'

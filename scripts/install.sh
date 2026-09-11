@@ -102,17 +102,12 @@ fi
 
 case "$OS" in
   Linux)
-    case "$ARCH" in
-      x86_64)  ARTIFACT="jcode-linux-x86_64" ;;
-      aarch64|arm64) ARTIFACT="jcode-linux-aarch64" ;;
-      *)       err "Unsupported Linux architecture: $ARCH" ;;
-    esac
+    err "The initial fork binary release supports macOS Apple Silicon and Windows x64 only. Build from source on Linux."
     ;;
   Darwin)
     case "$ARCH" in
       arm64)   ARTIFACT="jcode-macos-aarch64" ;;
-      x86_64)  ARTIFACT="jcode-macos-x86_64" ;;
-      *)       err "Unsupported macOS architecture: $ARCH" ;;
+      *)       err "The initial fork binary release supports macOS Apple Silicon only. Build from source for $ARCH." ;;
     esac
     ;;
   MINGW*|MSYS*|CYGWIN*)

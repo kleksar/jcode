@@ -77,34 +77,36 @@ try {
     Set-Content -LiteralPath $freshProfileBinary -Value "@echo off`r`n>&2 echo jcode collects anonymous usage statistics.`r`necho jcode v0.47.0 (f7f5898c)" -NoNewline
     Assert-Equal 'v0.47.0' (Get-JcodeVersionFromBinary $freshProfileBinary) 'binary version probe should tolerate a successful fresh-profile telemetry notice on stderr'
 
-    Write-Host 'test_windows_architecture_detection_prefers_native_arm64'
-    Assert-Equal 'jcode-windows-x86_64' (Resolve-JcodeWindowsArtifact @('X64', 'AMD64')) 'x64 Windows should select the x64 release asset'
-    Assert-Equal 'jcode-windows-aarch64' (Resolve-JcodeWindowsArtifact @('Arm64')) 'native ARM64 Windows should select the ARM64 release asset'
-    Assert-Equal 'jcode-windows-aarch64' (Resolve-JcodeWindowsArtifact @('X64', 'AMD64', 'ARM64')) 'emulated x64 PowerShell on Windows ARM64 should prefer the native ARM64 release asset'
+    Write-Host 'test_windows_architecture_detection_limits_initial_fork_release'
+    Assert-Equal 'jcode-windows-x86_64-unsigned' (Resolve-JcodeWindowsArtifact @('X64', 'AMD64')) 'x64 Windows should select the x64 release asset'
+    $armRejected = $false
+    try { Resolve-JcodeWindowsArtifact @('Arm64') | Out-Null } catch { $armRejected = $true }
+    Assert-Equal $true $armRejected 'native ARM64 Windows must fail closed until a matching fork asset is published'
+    $emulatedArmRejected = $false
+    try { Resolve-JcodeWindowsArtifact @('X64', 'AMD64', 'ARM64') | Out-Null } catch { $emulatedArmRejected = $true }
+    Assert-Equal $true $emulatedArmRejected 'Windows ARM64 must not silently receive the x64 fork asset'
     Assert-Equal $null (Resolve-JcodeWindowsArtifact @('x86', 'unknown')) 'unsupported architectures should not silently select an asset'
 
     Write-Host 'test_release_checksum_validation'
     $checksumFile = Join-Path $testRoot 'checksum.bin'
     Set-Content -LiteralPath $checksumFile -Value 'known-content' -NoNewline
     $digest = (Get-FileHash -LiteralPath $checksumFile -Algorithm SHA256).Hash.ToLowerInvariant()
-    $manifest = "$digest  nested/path/jcode-windows-x86_64.exe"
+    $manifest = "$digest  nested/path/jcode-windows-x86_64-unsigned.exe"
     $manifestBytes = [System.Text.Encoding]::UTF8.GetBytes($manifest)
     Assert-Equal $manifest (ConvertFrom-JcodeWebContent -Content $manifest) 'web response decoder should preserve string content'
     Assert-Equal $manifest (ConvertFrom-JcodeWebContent -Content $manifestBytes) 'web response decoder should decode Windows PowerShell 5.1 byte-array content as UTF-8'
-    Assert-Equal $digest (Get-JcodeSha256FromManifest -ManifestText (ConvertFrom-JcodeWebContent -Content $manifestBytes) -AssetName 'jcode-windows-x86_64.exe') 'checksum parser should accept a manifest decoded from a byte-array web response'
-    Assert-Equal $digest (Get-JcodeSha256FromManifest -ManifestText $manifest -AssetName 'jcode-windows-x86_64.exe') 'checksum parser should match release assets by file name'
+    Assert-Equal $digest (Get-JcodeSha256FromManifest -ManifestText (ConvertFrom-JcodeWebContent -Content $manifestBytes) -AssetName 'jcode-windows-x86_64-unsigned.exe') 'checksum parser should accept a manifest decoded from a byte-array web response'
+    Assert-Equal $digest (Get-JcodeSha256FromManifest -ManifestText $manifest -AssetName 'jcode-windows-x86_64-unsigned.exe') 'checksum parser should match release assets by file name'
     Assert-Equal $null (Get-JcodeSha256FromManifest -ManifestText $manifest -AssetName 'missing.exe') 'checksum parser should fail closed when the requested asset is absent'
-    Assert-Equal $digest (Assert-JcodeFileChecksum -FilePath $checksumFile -ExpectedSha256 $digest -AssetName 'jcode-windows-x86_64.exe') 'checksum validation should accept the matching digest'
+    Assert-Equal $digest (Assert-JcodeFileChecksum -FilePath $checksumFile -ExpectedSha256 $digest -AssetName 'jcode-windows-x86_64-unsigned.exe') 'checksum validation should accept the matching digest'
     $checksumThrew = $false
     try {
-        Assert-JcodeFileChecksum -FilePath $checksumFile -ExpectedSha256 ('0' * 64) -AssetName 'jcode-windows-x86_64.exe' | Out-Null
+        Assert-JcodeFileChecksum -FilePath $checksumFile -ExpectedSha256 ('0' * 64) -AssetName 'jcode-windows-x86_64-unsigned.exe' | Out-Null
     } catch {
         $checksumThrew = $true
     }
     Assert-Equal $true $checksumThrew 'checksum validation should reject a mismatched digest'
     Assert-Equal $false (Test-Path -LiteralPath $checksumFile) 'checksum validation should delete a mismatched download'
-    $armManifest = "$digest  nested/path/jcode-windows-aarch64.exe"
-    Assert-Equal $digest (Get-JcodeSha256FromManifest -ManifestText $armManifest -AssetName 'jcode-windows-aarch64.exe') 'checksum parser should match the Windows ARM64 release asset'
 
     Write-Host 'test_temp_cleanup_tolerates_windows_short_paths'
     $installText = Get-Content -LiteralPath $installScript -Raw

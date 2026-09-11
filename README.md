@@ -33,18 +33,19 @@ The most intelligent harness
 </div>
 
 ```bash
-# macOS & Linux
+# macOS Apple Silicon
 curl -fsSL https://raw.githubusercontent.com/kleksar/jcode/custom/ui-stable/scripts/install.sh | bash
 ```
 
 ```powershell
 # Windows 11 (PowerShell 5.1+)
 $script = [scriptblock]::Create((irm https://raw.githubusercontent.com/kleksar/jcode/custom/ui-stable/scripts/install.ps1))
-& $script -BuildFromSource
+& $script
 ```
 
-The fork publishes checksum-verified prebuilt binaries for macOS and Linux.
-Windows currently builds from source until fork-specific code signing is configured.
+The initial fork release publishes only checksum-verified macOS Apple Silicon and Windows x64 binaries.
+
+> **Windows x64 binary is unsigned.** Windows may display a SmartScreen warning. The PowerShell installer verifies the downloaded asset against `SHA256SUMS` before activation. Review the published checksum yourself and do not disable or bypass Windows security protections.
 
 Need Homebrew, source builds, provider setup, or want an agent to set it up for you?
 [Jump to detailed installation](#detailed-installation).
@@ -865,7 +866,7 @@ This is intended to be a copy-paste bootstrap prompt for jcode itself or any oth
 ### Quick Install
 
 ```bash
-# macOS & Linux
+# macOS Apple Silicon
 curl -fsSL https://raw.githubusercontent.com/kleksar/jcode/custom/ui-stable/scripts/install.sh | bash
 ```
 

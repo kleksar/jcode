@@ -909,12 +909,12 @@ function Resolve-JcodeWindowsArtifact([string[]]$ArchitectureCandidates) {
     foreach ($arch in @($ArchitectureCandidates)) {
         if (-not $arch) { continue }
         switch -Regex ($arch.Trim()) {
-            '^(Arm64|ARM64|AARCH64|aarch64)$' { return "jcode-windows-aarch64" }
+            '^(Arm64|ARM64|AARCH64|aarch64)$' { Write-Err 'Windows ARM64 is not in the initial fork binary release. Build from source.' }
             '^(X64|AMD64|x86_64)$' { $sawX64 = $true }
         }
     }
 
-    if ($sawX64) { return "jcode-windows-x86_64" }
+    if ($sawX64) { return "jcode-windows-x86_64-unsigned" }
     return $null
 }
 
@@ -934,7 +934,7 @@ function Get-JcodeWindowsArtifact {
     if ($artifact) { return $artifact }
 
     $displayArch = if ($candidates.Count -gt 0) { $candidates -join ", " } else { "<unknown>" }
-    Write-Err "Unsupported architecture: $displayArch (supported: x86_64, ARM64)"
+    Write-Err "Unsupported architecture: $displayArch (the initial fork binary release supports Windows x86_64 only)"
 }
 
 function Invoke-JcodeInstall {
@@ -1030,6 +1030,7 @@ if (-not $ResolvedArtifactExePath -and -not $ResolvedArtifactTgzPath -and $Downl
     $downloadedAssetName = if ($DownloadMode -eq "bin") { "$Artifact.exe" } else { "$Artifact.tar.gz" }
     $expectedSha256 = Get-ReleaseChecksum -ReleaseTag $Version -AssetName $downloadedAssetName
     Assert-JcodeFileChecksum -FilePath $DownloadPath -ExpectedSha256 $expectedSha256 -AssetName $downloadedAssetName | Out-Null
+    Write-Warn "This fork Windows x64 binary is unsigned. Windows may show a SmartScreen warning. Its SHA-256 was verified against the release SHA256SUMS; do not bypass Windows security prompts."
 }
 
 $DestBin = Join-Path $VersionDir "jcode.exe"

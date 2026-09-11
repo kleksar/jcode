@@ -1,12 +1,12 @@
 {
   "version": "0.84.1",
   "date": "2026-09-11",
-  "title": "Fork release installer",
+  "title": "Initial two-platform fork release",
   "highlights": [
     "The fork install commands now download verified releases from this repository",
-    "GitHub Actions publishes checksum-verified macOS and Linux binaries for one-command installation"
+    "GitHub Actions publishes checksum-verified macOS Apple Silicon and explicitly unsigned Windows x64 binaries"
   ],
   "fixes": [
-    "Installers no longer fall back to upstream release metadata or binaries"
+    "The Windows installer verifies the unsigned Windows x64 asset against SHA256SUMS and warns about SmartScreen"
   ]
 }

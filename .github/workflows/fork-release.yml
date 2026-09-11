@@ -17,33 +17,15 @@ concurrency:
 permissions:
   contents: write
 
+# The fork's initial public binary contract is intentionally narrow: macOS
+# Apple Silicon and Windows x64. Publish them atomically, so an incomplete
+# release never becomes the installer "latest" release.
 jobs:
-  build:
+  build-macos-aarch64:
     if: github.repository == 'kleksar/jcode'
-    name: Build (${{ matrix.target }})
-    runs-on: ${{ matrix.os }}
+    name: Build (aarch64-apple-darwin)
+    runs-on: macos-latest
     timeout-minutes: 90
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - os: ubuntu-22.04
-            target: x86_64-unknown-linux-gnu
-            artifact: jcode-linux-x86_64
-            portable_linux: true
-          - os: ubuntu-24.04-arm
-            target: aarch64-unknown-linux-gnu
-            artifact: jcode-linux-aarch64
-            portable_linux: false
-          - os: macos-latest
-            target: aarch64-apple-darwin
-            artifact: jcode-macos-aarch64
-            portable_linux: false
-          - os: macos-15-intel
-            target: x86_64-apple-darwin
-            artifact: jcode-macos-x86_64
-            portable_linux: false
-
     steps:
       - uses: actions/checkout@v4
         with:
@@ -51,129 +33,138 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
         with:
-          targets: ${{ matrix.target }}
+          targets: aarch64-apple-darwin
 
       - uses: Swatinem/rust-cache@v2
         with:
-          key: fork-release-${{ matrix.target }}
+          key: fork-release-aarch64-apple-darwin
 
       - name: Build release binary
-        if: matrix.portable_linux == false
         shell: bash
         env:
           JCODE_RELEASE_BUILD: "1"
           JCODE_CI_BUILD: "1"
           JCODE_BUILD_SEMVER: ${{ github.ref_name }}
-        run: cargo build --locked --release -p jcode --bin jcode --target "${{ matrix.target }}"
-
-      - name: Build portable Linux x86_64 binary
-        if: matrix.portable_linux == true
-        shell: bash
-        env:
-          JCODE_RELEASE_BUILD: "1"
-          JCODE_BUILD_SEMVER: ${{ github.ref_name }}
-          JCODE_COMPAT_ARTIFACT: ${{ matrix.artifact }}
-        run: scripts/build_linux_compat.sh dist
+        run: cargo build --locked --release -p jcode --bin jcode --target aarch64-apple-darwin
 
       - name: Verify binary
-        if: matrix.portable_linux == false
         shell: bash
-        run: target/${{ matrix.target }}/release/jcode --version
-
-      - name: Verify portable Linux binary
-        if: matrix.portable_linux == true
-        shell: bash
-        run: dist/${{ matrix.artifact }} --version
+        run: target/aarch64-apple-darwin/release/jcode --version
 
       - name: Package binary
-        if: matrix.portable_linux == false
         shell: bash
         run: |
           set -euo pipefail
           mkdir -p dist/package
-          cp "target/${{ matrix.target }}/release/jcode" "dist/package/${{ matrix.artifact }}"
-          chmod +x "dist/package/${{ matrix.artifact }}"
-          tar -C dist/package -czf "dist/${{ matrix.artifact }}.tar.gz" "${{ matrix.artifact }}"
+          cp target/aarch64-apple-darwin/release/jcode dist/package/jcode-macos-aarch64
+          chmod +x dist/package/jcode-macos-aarch64
+          tar -C dist/package -czf dist/jcode-macos-aarch64.tar.gz jcode-macos-aarch64
 
       - uses: actions/upload-artifact@v4
         with:
-          name: ${{ matrix.artifact }}
-          path: dist/${{ matrix.artifact }}.tar.gz
+          name: jcode-macos-aarch64
+          path: dist/jcode-macos-aarch64.tar.gz
+          if-no-files-found: error
+
+  build-windows-x86_64:
+    if: github.repository == 'kleksar/jcode'
+    name: Build (x86_64-pc-windows-msvc)
+    runs-on: windows-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: amd64
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: fork-release-x86_64-pc-windows-msvc
+
+      - name: Build release binary
+        shell: pwsh
+        env:
+          JCODE_RELEASE_BUILD: "1"
+          JCODE_CI_BUILD: "1"
+          JCODE_BUILD_SEMVER: ${{ github.ref_name }}
+        run: cargo build --locked --release -p jcode --bin jcode --target x86_64-pc-windows-msvc
+
+      - name: Verify binary
+        shell: pwsh
+        run: |
+          & target/x86_64-pc-windows-msvc/release/jcode.exe --version
+          if ($LASTEXITCODE -ne 0) { throw 'Built Windows binary failed to run --version' }
+
+      - name: Verify Windows installer with local artifact
+        shell: pwsh
+        run: |
+          & ./.github/scripts/verify_windows_install.ps1 `
+            -ArtifactExePath target/x86_64-pc-windows-msvc/release/jcode.exe `
+            -Version $env:GITHUB_REF_NAME
+
+      - name: Stage binary for signing
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
+          Copy-Item target/x86_64-pc-windows-msvc/release/jcode.exe dist/jcode-windows-x86_64-unsigned.exe
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: jcode-windows-x86_64-unsigned
+          path: dist/jcode-windows-x86_64-unsigned.exe
           if-no-files-found: error
 
   publish:
     if: github.repository == 'kleksar/jcode'
-    name: Publish verified assets
-    needs: build
+    name: Publish the two verified assets
+    needs: [build-macos-aarch64, build-windows-x86_64]
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
       - uses: actions/download-artifact@v4
         with:
-          pattern: jcode-*
-          path: artifacts
+          name: jcode-macos-aarch64
+          path: artifacts/macos
 
-      - name: Require the complete macOS and Linux asset set
-        shell: bash
-        run: |
-          set -euo pipefail
-          expected=(
-            jcode-linux-x86_64
-            jcode-linux-aarch64
-            jcode-macos-aarch64
-            jcode-macos-x86_64
-          )
-          for name in "${expected[@]}"; do
-            test -f "artifacts/$name/$name.tar.gz" || {
-              echo "Missing release asset: $name.tar.gz" >&2
-              exit 1
-            }
-          done
+      - uses: actions/download-artifact@v4
+        with:
+          name: jcode-windows-x86_64-unsigned
+          path: artifacts/windows
 
-      - name: Generate SHA-256 manifest
-        shell: bash
-        run: |
-          set -euo pipefail
-          find artifacts -type f -name '*.tar.gz' -print0 \
-            | sort -z \
-            | xargs -0 sha256sum \
-            | awk '{ path=$2; sub(/^.*\//, "", path); print $1 "  " path }' \
-            > SHA256SUMS
-          test "$(wc -l < SHA256SUMS | tr -d ' ')" = 4
-          cat SHA256SUMS
-
-      - name: Publish GitHub release
+      # This fork asset is deliberately unsigned. Its name, the README, and the
+      # installer communicate that fact. SHA256SUMS is mandatory and verified
+      # by the installer before it is activated.
+      - name: Package, checksum, and publish the unsigned Windows asset
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          mapfile -d '' assets < <(find artifacts -type f -name '*.tar.gz' -print0)
-          test "${#assets[@]}" = 4
+          mkdir -p dist
+          cp artifacts/macos/jcode-macos-aarch64.tar.gz dist/
+          cp artifacts/windows/jcode-windows-x86_64-unsigned.exe dist/
+          tar -C dist -czf dist/jcode-windows-x86_64-unsigned.tar.gz jcode-windows-x86_64-unsigned.exe
+          (
+            cd dist
+            sha256sum \
+              jcode-macos-aarch64.tar.gz \
+              jcode-windows-x86_64-unsigned.exe \
+              jcode-windows-x86_64-unsigned.tar.gz > SHA256SUMS
+          )
           gh release create "${GITHUB_REF_NAME}" \
-            "${assets[@]}" SHA256SUMS \
-            --verify-tag \
-            --latest \
-            --generate-notes \
-            --title "${GITHUB_REF_NAME}"
-
-      - name: Verify public release contract
-        shell: bash
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          set -euo pipefail
-          expected=(
-            SHA256SUMS
-            jcode-linux-x86_64.tar.gz
-            jcode-linux-aarch64.tar.gz
-            jcode-macos-aarch64.tar.gz
-            jcode-macos-x86_64.tar.gz
-          )
+            dist/jcode-macos-aarch64.tar.gz \
+            dist/jcode-windows-x86_64-unsigned.exe \
+            dist/jcode-windows-x86_64-unsigned.tar.gz \
+            dist/SHA256SUMS \
+            --verify-tag --latest --generate-notes --title "${GITHUB_REF_NAME}"
           actual="$(gh release view "${GITHUB_REF_NAME}" --json assets --jq '.assets[].name')"
-          for name in "${expected[@]}"; do
-            grep -qxF "$name" <<<"$actual" || {
-              echo "Published release is missing $name" >&2
-              exit 1
-            }
+          for asset in SHA256SUMS jcode-macos-aarch64.tar.gz jcode-windows-x86_64-unsigned.exe jcode-windows-x86_64-unsigned.tar.gz; do
+            grep -qxF "$asset" <<<"$actual" || { echo "Published release is missing $asset" >&2; exit 1; }
           done
