@@ -3,7 +3,8 @@
   "date": "2026-09-11",
   "title": "Fork release installer",
   "highlights": [
-    "The fork install commands now download verified releases from this repository"
+    "The fork install commands now download verified releases from this repository",
+    "GitHub Actions publishes checksum-verified macOS and Linux binaries for one-command installation"
   ],
   "fixes": [
     "Installers no longer fall back to upstream release metadata or binaries"

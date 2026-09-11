@@ -21,6 +21,9 @@ permissions:
 jobs:
   create-release:
     name: Create release
+    # Forks publish through fork-release.yml. Keep the official signing,
+    # FreeBSD, Homebrew, AUR, and announcement pipeline scoped to upstream.
+    if: github.repository == '1jehuang/jcode'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:

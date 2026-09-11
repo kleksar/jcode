@@ -4,11 +4,12 @@
 .DESCRIPTION
     Downloads the latest jcode release and installs it to %LOCALAPPDATA%\jcode\bin.
 
-    One-liner install:
-      irm https://jcode.sh/install.ps1 | iex
+    Fork source-build install:
+      $script = [scriptblock]::Create((irm https://raw.githubusercontent.com/kleksar/jcode/custom/ui-stable/scripts/install.ps1))
+      & $script -BuildFromSource
 
     Or download and run (allows parameters):
-      & ([scriptblock]::Create((irm https://jcode.sh/install.ps1)))
+      & ([scriptblock]::Create((irm https://raw.githubusercontent.com/kleksar/jcode/custom/ui-stable/scripts/install.ps1)))
 .PARAMETER InstallDir
     Override the installation directory (default: $env:LOCALAPPDATA\jcode\bin)
 .PARAMETER Version

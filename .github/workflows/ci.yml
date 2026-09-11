@@ -617,6 +617,11 @@ jobs:
       - name: Installer conversion telemetry tests
         run: bash scripts/test_install_conversion.sh
 
+      - name: Fork release contract tests
+        run: |
+          bash scripts/test_fork_release_workflow.sh
+          bash scripts/test_fork_installer.sh
+
       - name: Setup friction scorecard
         run: bash scripts/setup_friction_eval.sh
 

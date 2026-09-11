@@ -39,8 +39,12 @@ curl -fsSL https://raw.githubusercontent.com/kleksar/jcode/custom/ui-stable/scri
 
 ```powershell
 # Windows 11 (PowerShell 5.1+)
-irm https://raw.githubusercontent.com/kleksar/jcode/custom/ui-stable/scripts/install.ps1 | iex
+$script = [scriptblock]::Create((irm https://raw.githubusercontent.com/kleksar/jcode/custom/ui-stable/scripts/install.ps1))
+& $script -BuildFromSource
 ```
+
+The fork publishes checksum-verified prebuilt binaries for macOS and Linux.
+Windows currently builds from source until fork-specific code signing is configured.
 
 Need Homebrew, source builds, provider setup, or want an agent to set it up for you?
 [Jump to detailed installation](#detailed-installation).

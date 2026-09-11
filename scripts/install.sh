@@ -152,9 +152,8 @@ else
 fi
 
 # Prefer GitHub's stable redirect when it is reachable so publication changes
-# are visible immediately. jcode.sh keeps a static copy of the latest published
-# tag as an independent fallback for GitHub outages, blocks, and shared-network
-# throttling. Neither path uses the rate-limited unauthenticated GitHub API.
+# are visible immediately. Operators may explicitly configure a trusted metadata
+# mirror as a fallback. Neither path uses the rate-limited GitHub API.
 INSTALL_STAGE="release_lookup"
 VERSION="${JCODE_VERSION:-}"
 if [ -z "$VERSION" ]; then
@@ -173,7 +172,7 @@ if [ -z "$VERSION" ]; then
     VERSION="$GITHUB_VERSION"
   elif valid_release_tag "$METADATA_VERSION"; then
     VERSION="$METADATA_VERSION"
-    info "GitHub release lookup unavailable; using cached jcode.sh metadata ($VERSION)."
+    info "GitHub release lookup unavailable; using configured release metadata ($VERSION)."
   fi
 fi
 valid_release_tag "$VERSION" || err "Failed to determine latest version"
