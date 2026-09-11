@@ -158,6 +158,16 @@ async fn disabled_current_web_model_rejects_before_browser_request() {
     )
     .expect("write disabled route config");
     jcode_base::config::invalidate_config_cache();
+    assert!(
+        jcode_base::provider::ensure_model_route_enabled("gpt-5.6-pro[web]", Some("chatgpt-web"))
+            .is_ok(),
+        "other built-in Web route must remain enabled"
+    );
+    assert!(
+        jcode_base::provider::ensure_model_route_enabled("gpt-6-astra", Some("openai-oauth"))
+            .is_ok(),
+        "API route with the same base model must remain enabled"
+    );
     let _model = EnvVarGuard::set("JCODE_OPENAI_MODEL", "gpt-6-astra[web]");
     let provider = OpenAIProvider::new(CodexCredentials {
         access_token: "test".to_string(),
