@@ -437,6 +437,11 @@ wake_mode = "internal"
 # Defaults for spawned helper agents (swarm workers, subagents, sidecars).
 # All keys are optional; the values below are the built-in defaults.
 #
+# Immediately apply the delegated-swarm repository-read boundary to newly
+# created user root sessions, even before their first worker is spawned. While
+# enabled, `comm_single_agent` cannot remove that boundary. Default: false.
+# enforce_delegated_swarm_root_read_boundary = false
+#
 # Default model for spawned swarm/subagent sessions.
 # Leave unset (or "inherit"/"coordinator") so workers inherit the model of the
 # session that spawned them. Set a concrete model to change the worker default.

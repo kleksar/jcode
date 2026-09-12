@@ -543,6 +543,12 @@ pub struct AuthConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct AgentsConfig {
+    /// Apply the delegated-swarm repository-read boundary to every newly created
+    /// user root session, before it spawns a worker. When enabled, the root
+    /// cannot remove that boundary through the single-agent override.
+    ///
+    /// Defaults to `false` so existing single-agent workflows are unchanged.
+    pub enforce_delegated_swarm_root_read_boundary: bool,
     /// Optional default model override for spawned swarm/subagent sessions.
     ///
     /// Leave unset (or use `"inherit"` / `"coordinator"`) to have spawned swarm
@@ -655,6 +661,7 @@ fn default_memory_rerank_min_agree() -> usize {
 impl Default for AgentsConfig {
     fn default() -> Self {
         Self {
+            enforce_delegated_swarm_root_read_boundary: false,
             swarm_model: None,
             swarm_effort: None,
             swarm_spawn_mode: SwarmSpawnMode::default(),

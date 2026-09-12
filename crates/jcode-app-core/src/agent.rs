@@ -267,6 +267,17 @@ pub struct Agent {
 }
 
 impl Agent {
+    /// Flush the latest live policy after a busy turn releases this agent.
+    /// Read the current value, not a queued request's potentially stale value.
+    pub(crate) fn persist_live_delegated_swarm_read_boundary(&mut self) -> Result<()> {
+        if let Some(enabled) = crate::tool::session_delegated_swarm_read_boundary(&self.session.id)
+        {
+            self.session.delegated_swarm_root_read_boundary = enabled;
+            self.session.save()?;
+        }
+        Ok(())
+    }
+
     #[cfg(test)]
     pub(crate) fn delegated_swarm_root_read_boundary(&self) -> bool {
         self.session.delegated_swarm_root_read_boundary
@@ -464,6 +475,17 @@ impl Agent {
         let mut session = Session::create(parent_id, None);
         if let Some(working_dir) = working_dir {
             session.working_dir = Some(working_dir.to_string());
+        }
+        // Ordinary constructors create user-owned roots. Apply the same
+        // repository-read boundary that spawning later enables, before the
+        // session's registry can execute a tool. Worker constructors use the
+        // origin-aware path above and are deliberately unaffected.
+        if crate::config::config()
+            .agents
+            .enforce_delegated_swarm_root_read_boundary
+            && session.parent_id.is_none()
+        {
+            session.delegated_swarm_root_read_boundary = true;
         }
         Self::initialize_new_session(provider, registry, session, track_concurrency, start)
     }

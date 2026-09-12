@@ -28,6 +28,29 @@ type SessionAgents = Arc<RwLock<HashMap<String, Arc<Mutex<Agent>>>>>;
 type ChannelSubscriptions = Arc<RwLock<HashMap<String, HashMap<String, HashSet<String>>>>>;
 type ClientConnections = Arc<RwLock<HashMap<String, ClientConnectionInfo>>>;
 
+/// A tool RPC must never await its caller's Agent mutex: the caller holds it
+/// throughout the turn while waiting for this response. Enforce the live policy
+/// immediately, then persist under the Agent lock once the turn releases it.
+fn update_root_read_boundary(
+    root: Arc<Mutex<Agent>>,
+    session_id: &str,
+    enabled: bool,
+) -> anyhow::Result<()> {
+    if let Ok(mut agent) = root.try_lock() {
+        return agent.set_delegated_swarm_root_read_boundary(enabled);
+    }
+    crate::tool::set_session_delegated_swarm_read_boundary(session_id, enabled);
+    tokio::spawn(async move {
+        let mut agent = root.lock().await;
+        if let Err(error) = agent.persist_live_delegated_swarm_read_boundary() {
+            crate::logging::warn(&format!(
+                "Failed to persist live delegated swarm read boundary: {error}"
+            ));
+        }
+    });
+    Ok(())
+}
+
 /// Serialize spawn admission through member registration within one swarm.
 /// Without a reservation or lock, many recursive agents can all observe the same
 /// free slot and burst past the configured limit before any child is registered.
@@ -773,9 +796,9 @@ pub(super) async fn spawn_swarm_agent(
 
     // The root, not its workers, now delegates repository inspection. Persist
     // the mode on the root session and install the registry-level boundary.
-    if let Some(root) = sessions.read().await.get(req_session_id).cloned() {
-        let mut root = root.lock().await;
-        if let Err(error) = root.set_delegated_swarm_root_read_boundary(true) {
+    let root = { sessions.read().await.get(req_session_id).cloned() };
+    if let Some(root) = root {
+        if let Err(error) = update_root_read_boundary(root, req_session_id, true) {
             crate::logging::warn(&format!(
                 "Failed to persist delegated swarm read boundary: {error}"
             ));
@@ -1030,8 +1053,18 @@ pub(super) async fn handle_comm_single_agent(
         });
         return;
     }
-    let mut agent = agent.lock().await;
-    if let Err(error) = agent.set_delegated_swarm_root_read_boundary(false) {
+    if crate::config::config()
+        .agents
+        .enforce_delegated_swarm_root_read_boundary
+    {
+        let _ = client_event_tx.send(ServerEvent::Error {
+            id,
+            message: "Single-agent override is disabled while agents.enforce_delegated_swarm_root_read_boundary is enabled.".to_string(),
+            retry_after_secs: None,
+        });
+        return;
+    }
+    if let Err(error) = update_root_read_boundary(agent, &requesting_session_id, false) {
         let _ = client_event_tx.send(ServerEvent::Error {
             id,
             message: format!("Failed to persist single-agent override: {error}"),

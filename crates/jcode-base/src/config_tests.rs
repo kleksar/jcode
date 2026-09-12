@@ -35,14 +35,10 @@ fn test_openai_fast_mode_defaults_to_priority() {
 fn disabled_model_routes_default_empty_and_roundtrip() {
     assert!(ProviderConfig::default().disabled_model_routes.is_empty());
 
-    let cfg: Config = toml::from_str(
-        "[provider]\ndisabled_model_routes = [\"gpt-6-astra[web]\"]\n",
-    )
-    .expect("disabled model routes should parse");
-    assert_eq!(
-        cfg.provider.disabled_model_routes,
-        vec!["gpt-6-astra[web]"]
-    );
+    let cfg: Config =
+        toml::from_str("[provider]\ndisabled_model_routes = [\"gpt-6-astra[web]\"]\n")
+            .expect("disabled model routes should parse");
+    assert_eq!(cfg.provider.disabled_model_routes, vec!["gpt-6-astra[web]"]);
 
     let serialized = toml::to_string(&cfg).expect("config should serialize");
     let reparsed: Config = toml::from_str(&serialized).expect("serialized config should parse");
@@ -222,6 +218,20 @@ fn swarm_max_concurrent_agents_parses_and_allows_zero_for_unbounded() {
     let cfg: Config = toml::from_str("[agents]\nswarm_max_concurrent_agents = 0\n")
         .expect("zero should parse (disables the configurable live-agent guard)");
     assert_eq!(cfg.agents.swarm_max_concurrent_agents, 0);
+}
+
+#[test]
+fn enforced_delegated_root_read_boundary_defaults_false_and_parses() {
+    assert!(
+        !Config::default()
+            .agents
+            .enforce_delegated_swarm_root_read_boundary,
+        "the enforcement opt-in must preserve existing single-agent behavior"
+    );
+    let cfg: Config =
+        toml::from_str("[agents]\nenforce_delegated_swarm_root_read_boundary = true\n")
+            .expect("enforced delegated root boundary should parse");
+    assert!(cfg.agents.enforce_delegated_swarm_root_read_boundary);
 }
 
 #[test]

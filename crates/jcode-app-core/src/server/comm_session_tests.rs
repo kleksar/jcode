@@ -52,6 +52,122 @@ impl Drop for DisabledWebRouteHome {
 
 struct MockProvider;
 
+#[tokio::test]
+async fn busy_spawn_root_boundary_is_enforced_before_turn_release() {
+    let _guard = crate::storage::lock_test_env();
+    let home = DisabledWebRouteHome::new();
+    let id = "busy-spawn-boundary";
+    let agent = test_agent_with_working_dir(id, home.home.path().to_str().unwrap()).await;
+    let held_turn = agent.lock().await;
+    super::update_root_read_boundary(agent.clone(), id, true).unwrap();
+    assert_eq!(
+        crate::tool::session_delegated_swarm_read_boundary(id),
+        Some(true)
+    );
+    assert!(!held_turn.delegated_swarm_root_read_boundary());
+    drop(held_turn);
+    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        loop {
+            if crate::session::Session::load(id)
+                .is_ok_and(|session| session.delegated_swarm_root_read_boundary)
+            {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("spawn boundary must be saved after releasing the caller");
+    assert!(agent.lock().await.delegated_swarm_root_read_boundary());
+}
+
+#[tokio::test]
+async fn busy_root_boundary_updates_do_not_wait_and_persist_latest_policy() {
+    let _guard = crate::storage::lock_test_env();
+    let home = DisabledWebRouteHome::new();
+    let id = "busy-boundary-root";
+    let provider: Arc<dyn Provider> = Arc::new(MockProvider);
+    let registry = Registry::new(provider.clone()).await;
+    let mut session = crate::session::Session::create_with_id(id.to_string(), None, None);
+    // Empty, unsaved roots are deliberately not persisted with boundary=false.
+    // Pin this fixture so the test exercises metadata persistence itself.
+    session.saved = true;
+    session.working_dir = Some(home.home.path().display().to_string());
+    let agent = Arc::new(Mutex::new(Agent::new_with_session(
+        provider, registry, session, None,
+    )));
+    let held_turn = agent.lock().await;
+
+    // Model a spawn RPC followed by single_agent while the caller still owns
+    // the turn lock. Both must return before that lock can be released.
+    super::update_root_read_boundary(agent.clone(), id, true).unwrap();
+    assert_eq!(
+        crate::tool::session_delegated_swarm_read_boundary(id),
+        Some(true)
+    );
+    super::update_root_read_boundary(agent.clone(), id, false).unwrap();
+    assert_eq!(
+        crate::tool::session_delegated_swarm_read_boundary(id),
+        Some(false)
+    );
+    drop(held_turn);
+
+    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        loop {
+            if let Ok(saved) = crate::session::Session::load(id) {
+                assert!(!saved.delegated_swarm_root_read_boundary);
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("busy root policy must eventually persist");
+    // Let both queued writers finish; an older enable must not undo disable.
+    tokio::task::yield_now().await;
+    assert!(!agent.lock().await.delegated_swarm_root_read_boundary());
+    assert_eq!(
+        crate::tool::session_delegated_swarm_read_boundary(id),
+        Some(false)
+    );
+}
+
+#[tokio::test]
+async fn single_agent_override_responds_while_root_turn_is_busy() {
+    let _guard = crate::storage::lock_test_env();
+    let home = DisabledWebRouteHome::new();
+    let id = "busy-single-root";
+    let agent = test_delegated_root_agent(id, home.home.path().to_str().unwrap()).await;
+    let sessions = Arc::new(RwLock::new(HashMap::from([(
+        id.to_string(),
+        agent.clone(),
+    )])));
+    let (root, _rx) = member(id, Some("busy-single-swarm"), "coordinator");
+    let members = Arc::new(RwLock::new(HashMap::from([(id.to_string(), root)])));
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    let held_turn = agent.lock().await;
+    tokio::time::timeout(
+        std::time::Duration::from_secs(1),
+        handle_comm_single_agent(42, id.to_string(), id.to_string(), &tx, &sessions, &members),
+    )
+    .await
+    .expect("single_agent must not await its own caller");
+    assert!(matches!(
+        rx.try_recv(),
+        Ok(ServerEvent::CommSingleAgentResponse {
+            id: 42,
+            enabled: true
+        })
+    ));
+    assert_eq!(
+        crate::tool::session_delegated_swarm_read_boundary(id),
+        Some(false)
+    );
+    drop(held_turn);
+    tokio::task::yield_now().await;
+    assert!(!agent.lock().await.delegated_swarm_root_read_boundary());
+}
+
 #[async_trait]
 impl Provider for MockProvider {
     async fn complete(
@@ -248,6 +364,62 @@ async fn single_agent_override_rejects_requester_that_is_not_the_target_root() {
             .delegated_swarm_root_read_boundary(),
         "a worker must not clear the root's boundary by naming that root"
     );
+}
+
+#[tokio::test]
+async fn single_agent_override_cannot_remove_an_enforced_root_boundary() {
+    let _guard = crate::storage::lock_test_env();
+    let home = tempfile::TempDir::new().expect("create enforced-boundary config home");
+    std::fs::write(
+        home.path().join("config.toml"),
+        "[agents]\nenforce_delegated_swarm_root_read_boundary = true\n",
+    )
+    .expect("write enforced-boundary config");
+    let previous_home = std::env::var_os("JCODE_HOME");
+    crate::env::set_var("JCODE_HOME", home.path());
+    crate::config::invalidate_config_cache();
+
+    let sessions = Arc::new(RwLock::new(HashMap::new()));
+    sessions.write().await.insert(
+        "root".to_string(),
+        test_delegated_root_agent("root", "/tmp/root").await,
+    );
+    let swarm_members = Arc::new(RwLock::new(HashMap::new()));
+    let (root, _root_events) = member("root", Some("swarm-1"), "coordinator");
+    swarm_members.write().await.insert("root".to_string(), root);
+    let (event_tx, mut event_rx) = mpsc::unbounded_channel();
+
+    handle_comm_single_agent(
+        8,
+        "root".to_string(),
+        "root".to_string(),
+        &event_tx,
+        &sessions,
+        &swarm_members,
+    )
+    .await;
+
+    assert!(matches!(
+        event_rx.recv().await,
+        Some(ServerEvent::Error { message, .. }) if message.contains("enforce_delegated_swarm_root_read_boundary")
+    ));
+    assert!(
+        sessions
+            .read()
+            .await
+            .get("root")
+            .expect("root remains live")
+            .lock()
+            .await
+            .delegated_swarm_root_read_boundary(),
+        "the enforced boundary must remain active"
+    );
+
+    match previous_home {
+        Some(value) => crate::env::set_var("JCODE_HOME", value),
+        None => crate::env::remove_var("JCODE_HOME"),
+    }
+    crate::config::invalidate_config_cache();
 }
 
 #[test]

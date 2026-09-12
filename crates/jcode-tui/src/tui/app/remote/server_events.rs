@@ -1244,10 +1244,18 @@ pub(in crate::tui::app) fn handle_server_event(
                 .workspace_client
                 .finish_close_request_for_session(id, &session_id)
             {
+                let closed_current_session = app.session.id == session_id;
                 if let Some(picker) = app.session_picker_overlay.as_ref() {
                     picker.borrow_mut().apply_session_closed(&session_id);
                 }
-                app.set_status_notice("Session closed");
+                if closed_current_session {
+                    // The daemon has authoritatively closed the session attached
+                    // to this client. End this TUI instead of constructing or
+                    // attaching a replacement session.
+                    app.should_quit = true;
+                } else {
+                    app.set_status_notice("Session closed");
+                }
                 return true;
             }
             false

@@ -2797,7 +2797,7 @@ impl Tool for CommunicateTool {
             {
                 Ok(ServerEvent::CommSingleAgentResponse { enabled: true, .. }) => {
                     Ok(ToolOutput::new(
-                        "Single-agent mode enabled for this root session. Repository reads are restored and the override was persisted.",
+                        "Single-agent mode enabled for this root session. Repository reads are restored; persistence completes when the active turn releases the session.",
                     ))
                 }
                 Ok(response) => {

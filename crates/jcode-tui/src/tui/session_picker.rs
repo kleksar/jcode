@@ -1219,11 +1219,6 @@ impl SessionPicker {
             self.close_feedback = Some("External sessions cannot be closed by Jcode".to_string());
             return OverlayAction::Continue;
         }
-        if self.current_session_id.as_deref() == Some(session.id.as_str()) {
-            self.clear_close_confirmation();
-            self.close_feedback = Some("Cannot close the current session".to_string());
-            return OverlayAction::Continue;
-        }
         if matches!(session.status, SessionStatus::Closed) {
             self.clear_close_confirmation();
             self.close_feedback = Some("Session is already closed".to_string());
