@@ -2150,6 +2150,38 @@ pub(super) fn draw_overscroll_status(
     if area.height == 0 || area.width == 0 {
         return;
     }
+    let active_members: Vec<_> = app
+        .overscroll_swarm_members()
+        .into_iter()
+        .filter(|member| jcode_tui_render::swarm_gallery::is_active_status(&member.status))
+        .collect();
+
+    // Draw member rows first so every early return in the legacy metadata and
+    // countdown path still preserves them. Layout reserves the metadata row
+    // plus exactly one row per active member.
+    if !active_members.is_empty() && area.height > 1 {
+        let member_area = Rect {
+            y: area.y.saturating_add(1),
+            height: area.height.saturating_sub(1),
+            ..area
+        };
+        for (index, member) in active_members.iter().enumerate() {
+            if index >= member_area.height as usize {
+                break;
+            }
+            let row = Rect {
+                y: member_area.y.saturating_add(index as u16),
+                height: 1,
+                ..member_area
+            };
+            let line = Line::from(overscroll_truncate_spans(
+                overscroll_member_spans(member),
+                row.width as usize,
+            ));
+            frame.render_widget(Paragraph::new(line), row);
+        }
+    }
+    let area = Rect { height: 1, ..area };
     let data = app.info_widget_data();
 
     let sep = || Span::styled(" · ", Style::default().fg(rgb(100, 100, 110)));
@@ -2315,6 +2347,73 @@ pub(super) fn draw_overscroll_status(
 
     let countdown_line = Line::from(vec![countdown]).alignment(Alignment::Right);
     frame.render_widget(Paragraph::new(countdown_line), right_area);
+}
+
+pub(super) fn overscroll_active_member_count(app: &dyn TuiState) -> u16 {
+    app.overscroll_swarm_members()
+        .iter()
+        .filter(|member| jcode_tui_render::swarm_gallery::is_active_status(&member.status))
+        .count()
+        .min(u16::MAX as usize) as u16
+}
+
+fn overscroll_member_spans(member: &crate::protocol::SwarmMemberStatus) -> Vec<Span<'static>> {
+    let sep = || Span::styled(" · ", Style::default().fg(rgb(100, 100, 110)));
+    let identity = member
+        .friendly_name
+        .as_deref()
+        .filter(|name| !name.trim().is_empty())
+        .unwrap_or(member.session_id.as_str());
+    let model = member
+        .runtime
+        .model
+        .as_deref()
+        .filter(|value| !value.is_empty());
+    let provider = member
+        .runtime
+        .provider
+        .as_deref()
+        .filter(|value| !value.is_empty());
+    let effort = member
+        .runtime
+        .effort
+        .as_deref()
+        .filter(|value| !value.is_empty());
+    let runtime = [model, provider, effort]
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>()
+        .join(" ");
+    let task = member
+        .task_label
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+        .or(member
+            .detail
+            .as_deref()
+            .filter(|value| !value.trim().is_empty()))
+        .unwrap_or(member.status.as_str());
+
+    let mut spans = vec![
+        Span::styled("● ", Style::default().fg(rgb(100, 210, 180))),
+        Span::styled(
+            identity.to_string(),
+            Style::default().fg(rgb(130, 200, 255)).bold(),
+        ),
+    ];
+    if !runtime.is_empty() {
+        spans.push(sep());
+        spans.push(Span::styled(
+            runtime,
+            Style::default().fg(rgb(210, 190, 255)),
+        ));
+    }
+    spans.push(sep());
+    spans.push(Span::styled(
+        task.to_string(),
+        Style::default().fg(rgb(180, 180, 190)),
+    ));
+    spans
 }
 
 /// Truncate a list of spans to at most `max_width` display columns, appending a

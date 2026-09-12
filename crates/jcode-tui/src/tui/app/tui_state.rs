@@ -1785,6 +1785,10 @@ impl crate::tui::TuiState for App {
         }
     }
 
+    fn overscroll_swarm_members(&self) -> Vec<crate::protocol::SwarmMemberStatus> {
+        self.inline_swarm_members()
+    }
+
     fn swarm_members_for_transcript(&self) -> Vec<crate::protocol::SwarmMemberStatus> {
         if !self.swarm_enabled {
             return Vec::new();

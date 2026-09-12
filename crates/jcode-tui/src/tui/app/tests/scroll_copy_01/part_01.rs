@@ -1216,3 +1216,90 @@ fn test_chat_overscroll_reveals_status_line_then_rebounds() {
         "scrolling up should cancel the overscroll line"
     );
 }
+
+#[test]
+fn test_overscroll_lists_every_active_managed_agent_in_one_row() {
+    let _lock = scroll_render_test_lock();
+    let (mut app, mut terminal) = create_scroll_test_app(110, 30, 0, 36);
+    app.swarm_enabled = true;
+    let coordinator = app.session.id.clone();
+    let member = |index: usize, status: &str| crate::protocol::SwarmMemberStatus {
+        session_id: format!("worker-{index}"),
+        friendly_name: Some(format!("agent-{index}")),
+        status: status.to_string(),
+        detail: Some(format!("status-{index}")),
+        task_label: Some(format!("checks issue {index}")),
+        role: None,
+        is_headless: Some(true),
+        live_attachments: None,
+        status_age_secs: Some(0),
+        output_tail: None,
+        report_back_to_session_id: Some(coordinator.clone()),
+        todo_progress: None,
+        todo_items: Vec::new(),
+        working_dir: None,
+        runtime: crate::protocol::SwarmMemberRuntime {
+            model: Some("GPT-5.6".to_string()),
+            provider: Some("Luna".to_string()),
+            auth_method: None,
+            effort: Some("low".to_string()),
+            elapsed_secs: Some(index as u64),
+        },
+    };
+    app.remote_swarm_members = (0..10).map(|index| member(index, "running")).collect();
+
+    app.handle_mouse_event(MouseEvent {
+        kind: MouseEventKind::ScrollDown,
+        column: 10,
+        row: 5,
+        modifiers: KeyModifiers::empty(),
+    });
+    let rendered = render_and_snap(&app, &mut terminal);
+    for index in 0..10 {
+        assert!(
+            rendered.contains(&format!("● agent-{index} · GPT-5.6 Luna low · checks issue {index}")),
+            "missing active agent {index}:\n{rendered}"
+        );
+    }
+    assert!(rendered.contains("(overscroll"), "metadata/countdown was lost: {rendered}");
+
+    // Lifecycle updates use the same canonical predicate as the gallery: a
+    // completed member disappears, while the remaining live rows stay current.
+    app.remote_swarm_members[3].status = "completed".to_string();
+    app.remote_swarm_members[4].task_label = Some("merged PR 4".to_string());
+    let updated = render_and_snap(&app, &mut terminal);
+    assert!(!updated.contains("agent-3"), "completed member remained visible: {updated}");
+    assert!(updated.contains("agent-4 · GPT-5.6 Luna low · merged PR 4"));
+
+    // Snapshot removal is reflected immediately, without a stale cached row.
+    app.remote_swarm_members.retain(|member| member.session_id != "worker-9");
+    let removed = render_and_snap(&app, &mut terminal);
+    assert!(!removed.contains("agent-9"), "removed member remained visible: {removed}");
+
+    // With no active members, preserve the legacy single metadata row. Disable
+    // the independent gallery too, so this frame observes only overscroll chrome.
+    app.swarm_enabled = false;
+    let no_active = render_and_snap(&app, &mut terminal);
+    assert!(!no_active.contains("agent-"), "inactive members should be absent: {no_active}");
+    assert!(no_active.contains("(overscroll"), "legacy countdown should remain: {no_active}");
+
+    // A narrow terminal truncates the task suffix rather than panicking or
+    // losing the member identity.
+    let (mut narrow_app, mut narrow_terminal) = create_scroll_test_app(24, 18, 0, 36);
+    narrow_app.swarm_enabled = true;
+    let narrow_coordinator = narrow_app.session.id.clone();
+    let mut narrow_member = member(0, "running");
+    narrow_member.friendly_name = Some("peacock".to_string());
+    narrow_member.report_back_to_session_id = Some(narrow_coordinator);
+    narrow_member.task_label = Some("checks issues and merged pull requests after pull".to_string());
+    narrow_app.remote_swarm_members = vec![narrow_member];
+    narrow_app.handle_mouse_event(MouseEvent {
+        kind: MouseEventKind::ScrollDown,
+        column: 10,
+        row: 5,
+        modifiers: KeyModifiers::empty(),
+    });
+    let narrow = render_and_snap(&narrow_app, &mut narrow_terminal);
+    assert!(narrow.contains("peacock"), "identity must survive truncation: {narrow}");
+    assert!(narrow.contains('…'), "long task should truncate safely: {narrow}");
+}
