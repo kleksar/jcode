@@ -473,6 +473,7 @@ impl App {
                                 }
                             })
                             .collect(),
+                        working_dir: None,
                         runtime: crate::protocol::SwarmMemberRuntime {
                             model: Some("gpt-5.6".into()),
                             provider: Some("OpenAI".into()),
@@ -518,6 +519,7 @@ impl App {
                         report_back_to_session_id: None,
                         todo_progress: None,
                         todo_items: Vec::new(),
+                        working_dir: None,
                         runtime: crate::protocol::SwarmMemberRuntime::default(),
                     }],
                 })

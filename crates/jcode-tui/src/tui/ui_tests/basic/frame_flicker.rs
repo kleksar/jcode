@@ -180,6 +180,7 @@ fn test_active_swarm_spinner_keeps_redrawing_at_deep_idle() {
             report_back_to_session_id: None,
             todo_progress: None,
             todo_items: Vec::new(),
+            working_dir: None,
             runtime: crate::protocol::SwarmMemberRuntime::default(),
         }
     }

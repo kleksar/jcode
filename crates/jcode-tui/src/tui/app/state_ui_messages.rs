@@ -385,6 +385,7 @@ impl App {
             .iter()
             .filter_map(display_message_from_stored_message)
             .collect();
+        self.reset_worktree_view();
         self.session = latest_session;
         if appended.is_empty() {
             return false;

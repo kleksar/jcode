@@ -1314,6 +1314,7 @@ fn managed_member(id: &str, status: &str, role: Option<&str>) -> SwarmMemberStat
         report_back_to_session_id: Some("parent".to_string()),
         todo_progress: Some((2, 5)),
         todo_items: Vec::new(),
+        working_dir: None,
         runtime: crate::protocol::SwarmMemberRuntime::default(),
     }
 }
@@ -1395,6 +1396,7 @@ fn swarm_widget_renders_member_roles_and_details() {
                     report_back_to_session_id: None,
                     todo_progress: None,
                     todo_items: Vec::new(),
+                    working_dir: None,
                     runtime: crate::protocol::SwarmMemberRuntime::default(),
                 },
                 SwarmMemberStatus {
@@ -1411,6 +1413,7 @@ fn swarm_widget_renders_member_roles_and_details() {
                     report_back_to_session_id: None,
                     todo_progress: None,
                     todo_items: Vec::new(),
+                    working_dir: None,
                     runtime: crate::protocol::SwarmMemberRuntime::default(),
                 },
             ],
@@ -1471,6 +1474,7 @@ fn swarm_widget_handles_empty_swarm_and_zero_area_without_panic() {
         report_back_to_session_id: None,
         todo_progress: None,
         todo_items: Vec::new(),
+        working_dir: None,
         runtime: crate::protocol::SwarmMemberRuntime::default(),
     }];
     let _ = super::render_swarm_widget(&member_data, Rect::new(0, 0, 0, 0));
@@ -1494,6 +1498,7 @@ fn swarm_widget_caps_member_rows_for_large_swarms() {
             report_back_to_session_id: None,
             todo_progress: None,
             todo_items: Vec::new(),
+            working_dir: None,
             runtime: crate::protocol::SwarmMemberRuntime::default(),
         })
         .collect();

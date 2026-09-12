@@ -55,16 +55,26 @@ fn age_marker(age: u64) -> String {
 /// status-age hint.
 fn member_body(member: &SwarmMemberStatus) -> Vec<String> {
     // Live streamed output wins: show the worker's in-progress assistant text.
-    if let Some(tail) = member.output_tail.as_ref().filter(|t| !t.trim().is_empty()) {
-        let mut body: Vec<String> = tail.lines().map(|l| l.to_string()).collect();
-        if let Some(age) = member.status_age_secs {
-            body.push(age_marker(age));
-        }
-        return body;
-    }
-    let mut body: Vec<String> = Vec::new();
-    if let Some(detail) = member.detail.as_ref().filter(|d| !d.trim().is_empty()) {
+    let mut body = member
+        .output_tail
+        .as_ref()
+        .filter(|tail| !tail.trim().is_empty())
+        .map(|tail| tail.lines().map(str::to_string).collect())
+        .unwrap_or_else(Vec::new);
+    if body.is_empty()
+        && let Some(detail) = member
+            .detail
+            .as_ref()
+            .filter(|detail| !detail.trim().is_empty())
+    {
         body.push(detail.clone());
+    }
+    if let Some(working_dir) = member
+        .working_dir
+        .as_ref()
+        .filter(|working_dir| !working_dir.trim().is_empty())
+    {
+        body.push(format!("worktree: {working_dir}"));
     }
     if let Some(age) = member.status_age_secs {
         body.push(age_marker(age));
@@ -651,6 +661,7 @@ mod tests {
             report_back_to_session_id: None,
             todo_progress: None,
             todo_items: Vec::new(),
+            working_dir: None,
             runtime: crate::protocol::SwarmMemberRuntime::default(),
         }
     }
@@ -748,6 +759,19 @@ mod tests {
         assert_eq!(body[0], "line one");
         assert_eq!(body[1], "line two");
         assert!(!body.iter().any(|l| l.contains("the detail line")));
+    }
+
+    #[test]
+    fn worker_worktree_is_visible_alongside_streaming_output() {
+        let mut m = member("worker", "running", None, None);
+        m.output_tail = Some("editing".to_string());
+        m.working_dir = Some("/repo/.worktrees/worker".to_string());
+
+        let body = member_body(&m);
+        assert!(
+            body.iter()
+                .any(|line| line == "worktree: /repo/.worktrees/worker")
+        );
     }
 
     #[test]

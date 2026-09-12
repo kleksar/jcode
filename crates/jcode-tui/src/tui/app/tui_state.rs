@@ -60,6 +60,12 @@ struct WidgetRouteInfo {
 }
 
 impl App {
+    pub(super) fn reset_worktree_view(&mut self) {
+        self.focused_worker_worktree = None;
+        self.worktree_view_mode = super::WorktreeViewMode::Auto;
+        self.auto_worker_worktree.replace(None);
+    }
+
     fn sanitize_remote_model_hint(model: Option<String>) -> Option<String> {
         model
             .map(|model| model.trim().to_string())
@@ -1429,6 +1435,7 @@ impl crate::tui::TuiState for App {
                         report_back_to_session_id: None,
                         todo_progress: None,
                         todo_items: Vec::new(),
+                        working_dir: None,
                         runtime: crate::protocol::SwarmMemberRuntime::default(),
                     });
                 }
@@ -2045,11 +2052,28 @@ impl crate::tui::TuiState for App {
     }
 
     fn working_dir(&self) -> Option<String> {
-        self.session.working_dir.clone()
+        self.view_working_dir()
     }
 
     fn git_branch(&self) -> Option<String> {
-        gather_git_info(self.session.working_dir.as_deref().map(Path::new)).map(|info| info.branch)
+        gather_git_info(self.view_working_dir().as_deref().map(Path::new)).map(|info| info.branch)
+    }
+
+    fn workspace_context_label(&self) -> Option<String> {
+        if self.worktree_view_mode != super::WorktreeViewMode::Worker {
+            return None;
+        }
+        let id = self.focused_worker_worktree.as_deref()?;
+        let members = self.inline_swarm_members();
+        let member = members.iter().find(|m| m.session_id == id)?;
+        // A stale or non-shared worker root resolves to the coordinator root.
+        // Never decorate that coordinator diff with a misleading worker label.
+        (member.working_dir.as_ref() == self.view_working_dir().as_ref()).then(|| {
+            member
+                .friendly_name
+                .clone()
+                .unwrap_or_else(|| member.session_id.chars().take(8).collect())
+        })
     }
 
     fn now_millis(&self) -> u64 {
@@ -2196,6 +2220,81 @@ impl App {
         self.swarm_panel_selected = next as usize;
     }
 
+    pub(super) fn view_working_dir(&self) -> Option<String> {
+        let members = self.inline_swarm_members();
+        let eligible = |id: &str| {
+            members
+                .iter()
+                .find(|member| member.session_id == id)
+                .filter(|member| {
+                    matches!(member.status.as_str(), "running" | "streaming" | "thinking")
+                        && member.working_dir.as_ref().is_some_and(|root| {
+                            let path = Path::new(root);
+                            path.is_dir() && path.join(".git").exists()
+                        })
+                })
+        };
+        if self.worktree_view_mode == super::WorktreeViewMode::Worker
+            && let Some(session_id) = self.focused_worker_worktree.as_deref()
+        {
+            if let Some(root) = members
+                .iter()
+                .find(|member| member.session_id == session_id)
+                .and_then(|member| member.working_dir.clone())
+            {
+                let path = Path::new(&root);
+                if path.is_dir() && path.join(".git").exists() {
+                    return Some(root);
+                }
+            }
+        }
+        if self.worktree_view_mode == super::WorktreeViewMode::Auto {
+            let mut selected = self.auto_worker_worktree.borrow_mut();
+            if selected.as_deref().and_then(eligible).is_none() {
+                *selected = members
+                    .iter()
+                    .filter(|member| eligible(&member.session_id).is_some())
+                    .map(|member| member.session_id.clone())
+                    .min();
+            }
+            if let Some(member) = selected.as_deref().and_then(eligible) {
+                return member.working_dir.clone();
+            }
+        }
+        self.session.working_dir.clone()
+    }
+
+    pub(super) fn focus_selected_swarm_worktree(&mut self) {
+        let members = self.inline_swarm_members();
+        let order = crate::tui::info_widget::swarm_gallery::members_display_order(&members);
+        let Some(session_id) =
+            order.get(self.swarm_panel_selected.min(order.len().saturating_sub(1)))
+        else {
+            self.set_status_notice("No swarm worker selected");
+            return;
+        };
+        let Some(member) = members
+            .iter()
+            .find(|member| &member.session_id == session_id)
+        else {
+            return;
+        };
+        if member.working_dir.as_deref().is_none_or(|root| {
+            let path = Path::new(root);
+            root.trim().is_empty() || !path.is_dir() || !path.join(".git").exists()
+        }) {
+            self.set_status_notice("Selected worker worktree is unavailable to this client");
+            return;
+        }
+        let label = member
+            .friendly_name
+            .clone()
+            .unwrap_or_else(|| member.session_id.chars().take(8).collect());
+        self.focused_worker_worktree = Some(session_id.clone());
+        self.worktree_view_mode = super::WorktreeViewMode::Worker;
+        self.set_status_notice(format!("Viewing {label} worktree"));
+    }
+
     /// Handle a key while the swarm panel is focused. Returns true if the key was
     /// consumed.
     ///
@@ -2221,6 +2320,22 @@ impl App {
             }
             Some(SwarmPanelAction::PopOut) => {
                 self.pop_out_selected_swarm_agent();
+                true
+            }
+            Some(SwarmPanelAction::FocusWorktree) => {
+                self.focus_selected_swarm_worktree();
+                true
+            }
+            Some(SwarmPanelAction::ReturnToCoordinator) => {
+                self.focused_worker_worktree = None;
+                self.worktree_view_mode = super::WorktreeViewMode::Coordinator;
+                self.set_status_notice("Viewing coordinator worktree");
+                true
+            }
+            Some(SwarmPanelAction::ResumeAutoWorktree) => {
+                self.focused_worker_worktree = None;
+                self.worktree_view_mode = super::WorktreeViewMode::Auto;
+                self.set_status_notice("Auto-following eligible worker worktree");
                 true
             }
             Some(SwarmPanelAction::OpenPrompt) => {
@@ -2276,6 +2391,9 @@ pub(crate) enum SwarmPanelAction {
     SelectPrev,
     PopOut,
     OpenPrompt,
+    FocusWorktree,
+    ReturnToCoordinator,
+    ResumeAutoWorktree,
     Exit,
 }
 
@@ -2283,9 +2401,14 @@ pub(crate) enum SwarmPanelAction {
 ///
 /// Deliberately narrow: the focused panel must NOT swallow plain typing (the
 /// user may keep writing into the chat input while glancing at agents), so
-/// only Esc and Alt-chords are claimed:
+/// only panel-local Esc and modifier chords are claimed:
 /// - Alt+↑ / Alt+↓ (also Alt+k / Alt+j): move the selection
 /// - Alt+o / Alt+Enter: pop the selected agent out to a terminal
+/// - Alt+w: pin Files/Diff to the selected worker's worktree
+/// - Alt+c: return Files/Diff to the coordinator worktree (or auto-follow)
+/// - Alt+Shift+c: resume auto-following an eligible worker worktree
+/// - Ctrl+Shift+w: pin the selected worker (macOS-safe alternative)
+/// - Ctrl+Shift+j: view coordinator; Ctrl+Shift+k: resume auto-follow
 /// - Alt+Shift+p: open the active swarm routing prompt in the editor
 /// - Esc: exit the panel
 pub(crate) fn swarm_panel_action_for_key(
@@ -2297,6 +2420,7 @@ pub(crate) fn swarm_panel_action_for_key(
         return Some(SwarmPanelAction::Exit);
     }
     let alt = modifiers.contains(KeyModifiers::ALT);
+    let ctrl_shift = modifiers == (KeyModifiers::CONTROL | KeyModifiers::SHIFT);
     // macOS Option+letter often arrives as a transformed glyph with no ALT
     // modifier; normalize through the shared shortcut helper.
     let macos_letter = crate::tui::keybind::shortcut_char_for_macos_option_key(code, modifiers);
@@ -2306,10 +2430,19 @@ pub(crate) fn swarm_panel_action_for_key(
         return Some(SwarmPanelAction::OpenPrompt);
     }
     match code {
+        KeyCode::Char('w') if ctrl_shift => Some(SwarmPanelAction::FocusWorktree),
+        KeyCode::Char('j') if ctrl_shift => Some(SwarmPanelAction::ReturnToCoordinator),
+        KeyCode::Char('k') if ctrl_shift => Some(SwarmPanelAction::ResumeAutoWorktree),
         KeyCode::Down | KeyCode::Char('j') if alt => Some(SwarmPanelAction::SelectNext),
         KeyCode::Up | KeyCode::Char('k') if alt => Some(SwarmPanelAction::SelectPrev),
         KeyCode::Char('o') | KeyCode::Enter if alt => Some(SwarmPanelAction::PopOut),
         KeyCode::Char('P') if alt => Some(SwarmPanelAction::OpenPrompt),
+        KeyCode::Char('w') if alt => Some(SwarmPanelAction::FocusWorktree),
+        KeyCode::Char('c') if alt && modifiers.contains(KeyModifiers::SHIFT) => {
+            Some(SwarmPanelAction::ResumeAutoWorktree)
+        }
+        KeyCode::Char('c') if alt => Some(SwarmPanelAction::ReturnToCoordinator),
+        KeyCode::Char('C') if alt => Some(SwarmPanelAction::ResumeAutoWorktree),
         KeyCode::Char('p') if alt && modifiers.contains(KeyModifiers::SHIFT) => {
             Some(SwarmPanelAction::OpenPrompt)
         }
@@ -2317,6 +2450,8 @@ pub(crate) fn swarm_panel_action_for_key(
             Some('j') => Some(SwarmPanelAction::SelectNext),
             Some('k') => Some(SwarmPanelAction::SelectPrev),
             Some('o') => Some(SwarmPanelAction::PopOut),
+            Some('w') => Some(SwarmPanelAction::FocusWorktree),
+            Some('c') => Some(SwarmPanelAction::ReturnToCoordinator),
             _ => None,
         },
     }
@@ -2447,6 +2582,27 @@ mod swarm_panel_key_tests {
             Some(SwarmPanelAction::OpenPrompt)
         );
         assert_eq!(
+            swarm_panel_action_for_key(
+                KeyCode::Char('w'),
+                KeyModifiers::CONTROL | KeyModifiers::SHIFT
+            ),
+            Some(SwarmPanelAction::FocusWorktree)
+        );
+        assert_eq!(
+            swarm_panel_action_for_key(
+                KeyCode::Char('j'),
+                KeyModifiers::CONTROL | KeyModifiers::SHIFT
+            ),
+            Some(SwarmPanelAction::ReturnToCoordinator)
+        );
+        assert_eq!(
+            swarm_panel_action_for_key(
+                KeyCode::Char('k'),
+                KeyModifiers::CONTROL | KeyModifiers::SHIFT
+            ),
+            Some(SwarmPanelAction::ResumeAutoWorktree)
+        );
+        assert_eq!(
             swarm_panel_action_for_key(KeyCode::Esc, KeyModifiers::NONE),
             Some(SwarmPanelAction::Exit)
         );
@@ -2454,7 +2610,14 @@ mod swarm_panel_key_tests {
 
     #[test]
     fn ctrl_chords_pass_through() {
-        for code in [KeyCode::Char('j'), KeyCode::Char('o'), KeyCode::Down] {
+        for code in [
+            KeyCode::Char('w'),
+            KeyCode::Char('c'),
+            KeyCode::Char('j'),
+            KeyCode::Char('k'),
+            KeyCode::Char('o'),
+            KeyCode::Down,
+        ] {
             assert_eq!(
                 swarm_panel_action_for_key(code, KeyModifiers::CONTROL),
                 None,
@@ -2484,6 +2647,7 @@ mod inline_swarm_subtree_tests {
             report_back_to_session_id: parent.map(str::to_string),
             todo_progress: None,
             todo_items: Vec::new(),
+            working_dir: None,
             runtime: crate::protocol::SwarmMemberRuntime::default(),
         }
     }

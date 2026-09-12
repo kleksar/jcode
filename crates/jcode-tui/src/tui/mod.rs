@@ -820,6 +820,9 @@ pub trait TuiState {
     fn git_branch(&self) -> Option<String> {
         None
     }
+    fn workspace_context_label(&self) -> Option<String> {
+        None
+    }
     /// Monotonic clock for viewport animations
     fn now_millis(&self) -> u64;
     /// UI state for live copy badge highlighting / feedback

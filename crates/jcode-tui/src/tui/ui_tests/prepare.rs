@@ -41,6 +41,7 @@ fn chat_swarm_member(session_id: &str) -> crate::protocol::SwarmMemberStatus {
                 tool_intents: Vec::new(),
             },
         ],
+        working_dir: None,
         runtime: crate::protocol::SwarmMemberRuntime {
             model: Some("openai:gpt-5.6-sol".to_string()),
             provider: Some("OpenAI".to_string()),

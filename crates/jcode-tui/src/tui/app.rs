@@ -1281,6 +1281,12 @@ pub struct App {
     side_pane_images_signature_cache: std::cell::Cell<Option<(usize, u64)>>,
     // Swarm member status snapshots (remote mode only)
     remote_swarm_members: Vec<crate::protocol::SwarmMemberStatus>,
+    /// Files/Diff context only. Chat remains attached to `session`.
+    focused_worker_worktree: Option<String>,
+    worktree_view_mode: WorktreeViewMode,
+    /// Last eligible auto-follow worker for this coordinator. Interior mutability
+    /// keeps selection stable across render-only reads.
+    auto_worker_worktree: std::cell::RefCell<Option<String>>,
     // Latest swarm plan snapshot (local or remote server event stream)
     swarm_plan_items: Vec<crate::plan::PlanItem>,
     swarm_plan_version: Option<u64>,
@@ -1704,6 +1710,14 @@ pub struct App {
     /// Lazily-loaded persisted cross-session prompt history (oldest first,
     /// deduped). None until first use; see `prompt_history.rs`.
     persisted_prompt_history: Option<Vec<String>>,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum WorktreeViewMode {
+    #[default]
+    Auto,
+    Coordinator,
+    Worker,
 }
 
 /// Inert provider used by runtime modes whose output is supplied by another source.

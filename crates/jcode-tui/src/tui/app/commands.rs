@@ -983,6 +983,26 @@ pub(super) fn handle_diff_command(app: &mut App, trimmed: &str) -> bool {
     };
     let arg = rest.trim();
 
+    match arg.to_ascii_lowercase().as_str() {
+        "worker" => {
+            app.focus_selected_swarm_worktree();
+            return true;
+        }
+        "coordinator" => {
+            app.focused_worker_worktree = None;
+            app.worktree_view_mode = super::WorktreeViewMode::Coordinator;
+            app.set_status_notice("Viewing coordinator worktree");
+            return true;
+        }
+        "auto" => {
+            app.focused_worker_worktree = None;
+            app.worktree_view_mode = super::WorktreeViewMode::Auto;
+            app.set_status_notice("Auto-following eligible worker worktree");
+            return true;
+        }
+        _ => {}
+    }
+
     if arg.is_empty() || arg.eq_ignore_ascii_case("cycle") || arg.eq_ignore_ascii_case("next") {
         let next = app.diff_mode.cycle();
         apply_diff_mode(app, next);
@@ -1000,7 +1020,8 @@ pub(super) fn handle_diff_command(app: &mut App, trimmed: &str) -> bool {
     match parse_diff_mode_name(arg) {
         Some(mode) => apply_diff_mode(app, mode),
         None => app.push_display_message(DisplayMessage::error(
-            "Usage: /diff [off|inline|full|pinned|file|cycle|status]".to_string(),
+            "Usage: /diff [off|inline|full|pinned|file|cycle|status|worker|coordinator|auto]"
+                .to_string(),
         )),
     }
     true

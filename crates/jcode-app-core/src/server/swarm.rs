@@ -701,6 +701,10 @@ async fn broadcast_swarm_status_now(
                 .map(|m| crate::protocol::SwarmMemberStatus {
                     session_id: m.session_id.clone(),
                     friendly_name: m.friendly_name.clone(),
+                    working_dir: m
+                        .working_dir
+                        .as_ref()
+                        .map(|path| path.display().to_string()),
                     status: m.status.clone(),
                     detail: m.detail.clone(),
                     task_label: m.task_label.clone(),
