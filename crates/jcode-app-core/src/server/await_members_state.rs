@@ -4,7 +4,10 @@ use crate::server::durable_state::{
 };
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::{Arc, Mutex as StdMutex, Weak};
+use std::task::{Context, Poll};
 use std::time::Duration;
 use tokio::sync::{Mutex, OwnedMutexGuard, RwLock, mpsc};
 
@@ -95,9 +98,112 @@ pub(crate) struct AwaitMembersRuntime {
     /// only held for a map lookup/update, never across an await.
     transactions: Arc<StdMutex<HashMap<String, Weak<Mutex<()>>>>>,
     #[cfg(test)]
+    transaction_queue_pause: Arc<Mutex<Option<AwaitTransactionQueuePause>>>,
+    #[cfg(test)]
     transaction_pause: Arc<Mutex<Option<AwaitTransactionPause>>>,
     #[cfg(test)]
     reload_orphan_pause: Arc<Mutex<Option<AwaitReloadOrphanPause>>>,
+}
+
+/// Owns the strong lock reference from registration until a transaction either
+/// completes or is cancelled. This is deliberately created before polling
+/// `lock_owned`: cancellation while queued must still clean the matching weak
+/// registry entry once no other operation retains this lock.
+struct AwaitTransactionRegistration {
+    registry: Arc<StdMutex<HashMap<String, Weak<Mutex<()>>>>>,
+    key: String,
+    lock: Arc<Mutex<()>>,
+}
+
+impl AwaitTransactionRegistration {
+    fn install(registry: Arc<StdMutex<HashMap<String, Weak<Mutex<()>>>>>, key: &str) -> Self {
+        let lock = {
+            let mut transactions = registry
+                .lock()
+                .expect("await transaction registry mutex poisoned");
+            match transactions.get(key).and_then(Weak::upgrade) {
+                Some(lock) => lock,
+                None => {
+                    let lock = Arc::new(Mutex::new(()));
+                    transactions.insert(key.to_string(), Arc::downgrade(&lock));
+                    lock
+                }
+            }
+        };
+        Self {
+            registry,
+            key: key.to_string(),
+            lock,
+        }
+    }
+}
+
+impl Drop for AwaitTransactionRegistration {
+    fn drop(&mut self) {
+        let mut registry = self
+            .registry
+            .lock()
+            .expect("await transaction registry mutex poisoned");
+        let matches_this_lock = registry
+            .get(&self.key)
+            .is_some_and(|registered| registered.ptr_eq(&Arc::downgrade(&self.lock)));
+        // The registration itself contributes the final strong reference only
+        // when no queued acquirer, acquired lease, or owned mutex guard remains.
+        // Pointer identity prevents an old lease from removing a newer lock.
+        if matches_this_lock && Arc::strong_count(&self.lock) == 1 {
+            registry.remove(&self.key);
+        }
+    }
+}
+
+/// Couples the pre-acquisition registration with the lock future. Field order
+/// is intentional: cancellation drops `acquire` before `registration`, so the
+/// temporary Arc owned by `lock_owned` cannot leave a dead weak entry behind.
+struct AwaitTransactionAcquisition {
+    acquire: Pin<Box<dyn Future<Output = OwnedMutexGuard<()>> + Send>>,
+    registration: Option<AwaitTransactionRegistration>,
+    #[cfg(test)]
+    queue_pause: Option<AwaitTransactionQueuePause>,
+}
+
+impl AwaitTransactionAcquisition {
+    fn new(
+        registry: Arc<StdMutex<HashMap<String, Weak<Mutex<()>>>>>,
+        key: &str,
+        #[cfg(test)] queue_pause: Option<AwaitTransactionQueuePause>,
+    ) -> Self {
+        let registration = AwaitTransactionRegistration::install(registry, key);
+        let acquire = Box::pin(registration.lock.clone().lock_owned());
+        Self {
+            acquire,
+            registration: Some(registration),
+            #[cfg(test)]
+            queue_pause,
+        }
+    }
+}
+
+impl Future for AwaitTransactionAcquisition {
+    type Output = (AwaitTransactionRegistration, OwnedMutexGuard<()>);
+
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        let this = self.as_mut().get_mut();
+        match this.acquire.as_mut().poll(cx) {
+            Poll::Ready(guard) => Poll::Ready((
+                this.registration
+                    .take()
+                    .expect("await transaction registration present until acquisition"),
+                guard,
+            )),
+            Poll::Pending => {
+                #[cfg(test)]
+                if let Some(pause) = &this.queue_pause {
+                    pause.entered.notify_one();
+                }
+                Poll::Pending
+            }
+        }
+    }
 }
 
 /// A per-key transaction remains registered for every queued/acquired lease.
@@ -105,9 +211,7 @@ pub(crate) struct AwaitMembersRuntime {
 /// mutex guard is gone, so a concurrent acquirer cannot receive a second lock
 /// for the same key.
 pub(super) struct AwaitTransactionLease {
-    registry: Arc<StdMutex<HashMap<String, Weak<Mutex<()>>>>>,
-    key: String,
-    lock: Arc<Mutex<()>>,
+    registration: Option<AwaitTransactionRegistration>,
     guard: Option<OwnedMutexGuard<()>>,
 }
 
@@ -116,16 +220,22 @@ impl Drop for AwaitTransactionLease {
         // `OwnedMutexGuard` retains a strong Arc. Release it before testing
         // whether this lease is the last operation still associated with key.
         self.guard.take();
-        let mut registry = self
-            .registry
-            .lock()
-            .expect("await transaction registry mutex poisoned");
-        let matches_this_lock = registry
-            .get(&self.key)
-            .is_some_and(|registered| registered.ptr_eq(&Arc::downgrade(&self.lock)));
-        if matches_this_lock && Arc::strong_count(&self.lock) == 1 {
-            registry.remove(&self.key);
-        }
+        // Drop the composed registration exactly once after the guard. Its
+        // Drop implementation conditionally removes the matching weak entry.
+        self.registration.take();
+    }
+}
+
+#[cfg(test)]
+impl AwaitTransactionLease {
+    pub(super) fn lock_identity(&self) -> usize {
+        Arc::as_ptr(
+            &self
+                .registration
+                .as_ref()
+                .expect("live transaction lease retains its registration")
+                .lock,
+        ) as usize
     }
 }
 
@@ -147,6 +257,12 @@ struct AwaitTransactionPause {
 
 #[cfg(test)]
 #[derive(Clone)]
+struct AwaitTransactionQueuePause {
+    entered: Arc<tokio::sync::Notify>,
+}
+
+#[cfg(test)]
+#[derive(Clone)]
 struct AwaitReloadOrphanPause {
     entered: Arc<tokio::sync::Notify>,
     release: Arc<tokio::sync::Notify>,
@@ -161,21 +277,22 @@ impl AwaitMembersRuntime {
         key: &str,
         #[cfg(test)] operation: AwaitTransactionOperation,
     ) -> AwaitTransactionLease {
-        let lock = {
-            let mut transactions = self
-                .transactions
-                .lock()
-                .expect("await transaction registry mutex poisoned");
-            match transactions.get(key).and_then(Weak::upgrade) {
-                Some(lock) => lock,
-                None => {
-                    let lock = Arc::new(Mutex::new(()));
-                    transactions.insert(key.to_string(), Arc::downgrade(&lock));
-                    lock
-                }
-            }
+        #[cfg(test)]
+        let queue_pause = self.transaction_queue_pause.lock().await.clone();
+        let (registration, guard) = AwaitTransactionAcquisition::new(
+            self.transactions.clone(),
+            key,
+            #[cfg(test)]
+            queue_pause,
+        )
+        .await;
+        // Compose the pre-acquisition registration and owned guard before any
+        // later await. A cancellation after lock acquisition therefore uses
+        // the normal lease cleanup ordering rather than split local drops.
+        let lease = AwaitTransactionLease {
+            registration: Some(registration),
+            guard: Some(guard),
         };
-        let guard = lock.clone().lock_owned().await;
         #[cfg(test)]
         if let Some(pause) = self.transaction_pause.lock().await.clone()
             && pause.operation == operation
@@ -183,12 +300,7 @@ impl AwaitMembersRuntime {
             pause.entered.notify_one();
             pause.release.notified().await;
         }
-        AwaitTransactionLease {
-            registry: self.transactions.clone(),
-            key: key.to_string(),
-            lock,
-            guard: Some(guard),
-        }
+        lease
     }
 
     pub(super) async fn transaction_for_request(&self, key: &str) -> AwaitTransactionLease {
@@ -233,6 +345,16 @@ impl AwaitMembersRuntime {
     }
 
     #[cfg(test)]
+    pub(super) async fn pause_transaction_while_queued(&self, entered: Arc<tokio::sync::Notify>) {
+        *self.transaction_queue_pause.lock().await = Some(AwaitTransactionQueuePause { entered });
+    }
+
+    #[cfg(test)]
+    pub(super) async fn clear_transaction_queue_pause(&self) {
+        *self.transaction_queue_pause.lock().await = None;
+    }
+
+    #[cfg(test)]
     pub(super) async fn clear_transaction_pause(&self) {
         *self.transaction_pause.lock().await = None;
     }
@@ -263,13 +385,19 @@ impl AwaitMembersRuntime {
     pub(super) async fn wait_after_reload_orphan_snapshot(&self) {}
 
     #[cfg(test)]
-    pub(super) fn transaction_registry_len(&self) -> usize {
-        let mut transactions = self
-            .transactions
+    /// Count all stored entries without retaining or upgrading weak pointers.
+    /// This exposes tombstones directly to lifecycle tests instead of pruning
+    /// them as an observation side effect.
+    pub(super) fn transaction_registry_raw_len(&self) -> usize {
+        self.transactions
             .lock()
-            .expect("await transaction registry mutex poisoned");
-        transactions.retain(|_, lock| lock.strong_count() != 0);
-        transactions.len()
+            .expect("await transaction registry mutex poisoned")
+            .len()
+    }
+
+    #[cfg(test)]
+    pub(super) fn transaction_registry_len(&self) -> usize {
+        self.transaction_registry_raw_len()
     }
 
     pub(super) async fn add_waiter(

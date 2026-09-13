@@ -349,6 +349,7 @@ async fn await_members_transaction_registry_reclaims_terminal_immediate_timeout_
     let first = runtime
         .transaction_for_request("concurrent-registry-key")
         .await;
+    let first_lock_identity = first.lock_identity();
     assert_eq!(runtime.transaction_registry_len(), 1);
     let waiting_runtime = runtime.clone();
     let waiting = tokio::spawn(async move {
@@ -363,7 +364,101 @@ async fn await_members_transaction_registry_reclaims_terminal_immediate_timeout_
         .await
         .expect("queued lease should acquire")
         .expect("queued lease task should not panic");
+    assert_eq!(
+        second.lock_identity(),
+        first_lock_identity,
+        "two concurrent successful leases must use the registered lock identity"
+    );
     assert_eq!(runtime.transaction_registry_len(), 1);
     drop(second);
     assert_eq!(runtime.transaction_registry_len(), 0);
+}
+
+#[tokio::test]
+async fn await_members_transaction_registry_reclaims_cancelled_queued_acquisitions() {
+    // Exercise both cancellation windows repeatedly: while the owner still
+    // holds the mutex, and after it unlocks but before the queued call returns
+    // its normal transaction lease. The queue hook observes a real Pending
+    // `lock_owned` poll, rather than merely yielding to the scheduler.
+    for iteration in 0..20 {
+        for after_owner_unlock in [false, true] {
+            let runtime = AwaitMembersRuntime::default();
+            let key = format!(
+                "cancelled-queued-acquisition-{iteration}-{}",
+                if after_owner_unlock { "after-unlock" } else { "before-unlock" }
+            );
+            let mut owner = Some(runtime.transaction_for_request(&key).await);
+            let queued = Arc::new(tokio::sync::Notify::new());
+            let acquired = Arc::new(tokio::sync::Notify::new());
+            let hold_after_acquire = Arc::new(tokio::sync::Notify::new());
+            runtime
+                .pause_transaction_while_queued(queued.clone())
+                .await;
+            runtime
+                .pause_transaction_after_acquire(
+                    AwaitTransactionOperation::Request,
+                    acquired.clone(),
+                    hold_after_acquire,
+                )
+                .await;
+
+            let queued_wait = queued.notified();
+            let waiter_runtime = runtime.clone();
+            let waiter_key = key.clone();
+            let waiter = tokio::spawn(async move {
+                waiter_runtime.transaction_for_request(&waiter_key).await
+            });
+            tokio::time::timeout(Duration::from_secs(1), queued_wait)
+                .await
+                .expect("second acquisition must register and queue behind its owner");
+            assert_eq!(
+                runtime.transaction_registry_raw_len(),
+                1,
+                "queued operation {iteration} must reuse the owner's sole registry entry"
+            );
+
+            if after_owner_unlock {
+                let acquired_wait = acquired.notified();
+                drop(owner.take().expect("owner lease remains held until unlock"));
+                tokio::time::timeout(Duration::from_secs(1), acquired_wait)
+                    .await
+                    .expect("queued acquisition must reach the controlled post-unlock handoff");
+            } else {
+                assert_eq!(
+                    runtime.transaction_registry_raw_len(),
+                    1,
+                    "owner remains the sole live entry before queued task cancellation"
+                );
+            }
+
+            waiter.abort();
+            let waiter_result = waiter.await;
+            assert!(
+                matches!(waiter_result, Err(error) if error.is_cancelled()),
+                "queued acquisition task must report cancellation"
+            );
+
+            if after_owner_unlock {
+                assert_eq!(
+                    runtime.transaction_registry_raw_len(),
+                    0,
+                    "post-unlock cancellation {iteration} must remove its raw weak entry without pruning"
+                );
+            } else {
+                assert_eq!(
+                    runtime.transaction_registry_raw_len(),
+                    1,
+                    "owner keeps the registered lock alive after queued cancellation"
+                );
+                drop(owner.take().expect("owner lease remains held until cleanup"));
+                assert_eq!(
+                    runtime.transaction_registry_raw_len(),
+                    0,
+                    "owner release after cancellation {iteration} must remove its raw weak entry without lookup"
+                );
+            }
+            runtime.clear_transaction_queue_pause().await;
+            runtime.clear_transaction_pause().await;
+        }
+    }
 }
