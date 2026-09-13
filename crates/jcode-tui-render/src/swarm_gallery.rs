@@ -123,52 +123,30 @@ fn format_elapsed(seconds: u64) -> String {
     }
 }
 
-/// Format a recognized named worker route. Provider state can report a
-/// differently cased base model, so normalize case and provider separators
-/// before deriving the public worker label. Transport qualifiers are internal
-/// routing details, not part of the display label.
-fn short_worker_route(model: &str) -> Option<String> {
+/// Format the canonical worker model ID without its provider/auth qualifier.
+/// The model identifier itself is lowercased for a stable public display.
+fn worker_model_id(model: &str) -> Option<String> {
     let model = model
         .trim()
         .rsplit([':', '/'])
         .next()
         .unwrap_or(model)
-        .to_ascii_lowercase()
-        .replace('_', "-");
-    let model = model.strip_suffix("[web]").unwrap_or(&model);
-    let (_, route) = model.rsplit_once('-')?;
-    if !model.starts_with("gpt-") {
-        return None;
-    }
-    let label = match route {
-        "sol" => "Sol",
-        "terra" => "Terra",
-        "luna" => "Luna",
-        "astra" => "Astra",
-        _ => return None,
-    };
-    Some(label.to_string())
+        .to_ascii_lowercase();
+    (!model.is_empty()).then_some(model)
 }
 
-fn has_model_value(model: Option<&str>) -> bool {
-    model.is_some_and(|model| !model.trim().is_empty())
-}
-
-/// Render worker metadata without exposing resolved base models, providers, or
-/// authentication routes. A recognized selected route wins. If it is absent or
-/// unrecognized, a recognized actual route is still safe to display; otherwise
-/// use a provider-neutral fallback.
-fn format_worker_model(selected: Option<&str>, actual: Option<&str>) -> Option<String> {
+/// Render worker metadata without exposing providers or authentication routes.
+/// The canonical selected model wins, then the actual model, then `unknown`.
+fn format_worker_model(selected: Option<&str>, actual: Option<&str>) -> String {
     selected
-        .and_then(short_worker_route)
-        .or_else(|| actual.and_then(short_worker_route))
-        .or_else(|| {
-            (has_model_value(selected) || has_model_value(actual)).then(|| "Unknown".into())
-        })
+        .and_then(worker_model_id)
+        .or_else(|| actual.and_then(worker_model_id))
+        .unwrap_or_else(|| "unknown".into())
 }
 
 /// Render worker metadata through one shared path so every worker surface uses
-/// the selected short route and the runtime's actual effort consistently.
+/// the canonical model ID and runtime effort consistently. Web uses fixed Pro
+/// thinking, so it never displays a configurable effort.
 fn format_worker_runtime(
     selected: Option<&str>,
     actual: Option<&str>,
@@ -176,11 +154,10 @@ fn format_worker_runtime(
 ) -> Option<String> {
     let route = format_worker_model(selected, actual);
     let effort = effort.map(str::trim).filter(|value| !value.is_empty());
-    match (route, effort) {
-        (Some(route), Some(effort)) => Some(format!("{route} {effort}")),
-        (Some(route), None) => Some(route),
-        (None, Some(effort)) => Some(effort.to_string()),
-        (None, None) => None,
+    match effort {
+        _ if route.ends_with("[web]") => Some(route),
+        Some(effort) => Some(format!("{route} {effort}")),
+        None => Some(route),
     }
 }
 
@@ -2023,62 +2000,78 @@ mod tests {
     }
 
     #[test]
-    fn worker_runtime_uses_recognized_route_and_actual_effort() {
+    fn worker_runtime_uses_canonical_model_and_actual_effort() {
         for (selected, actual, effort, expected) in [
-            (Some("gpt-5.6-sol"), Some("GPT-5.6"), "high", "Sol high"),
+            (
+                Some("gpt-5.6-sol"),
+                Some("GPT-5.6"),
+                Some("high"),
+                "gpt-5.6-sol high",
+            ),
             (
                 Some("openai-api:GPT_5.6_TERRA"),
                 Some("gpt-5.6"),
-                "medium",
-                "Terra medium",
+                Some("medium"),
+                "gpt_5.6_terra medium",
             ),
             (
                 Some("openai/gpt-5.6-luna"),
                 Some("GPT-5.6"),
-                "low",
-                "Luna low",
+                Some("low"),
+                "gpt-5.6-luna low",
             ),
-            (Some("gpt-6-astra"), Some("gpt-6"), "high", "Astra high"),
+            (
+                Some("gpt-6-astra"),
+                Some("gpt-6"),
+                Some("high"),
+                "gpt-6-astra high",
+            ),
             (
                 Some("gpt-6-astra[web]"),
                 Some("gpt-6"),
-                "high",
-                "Astra high",
+                Some("high"),
+                "gpt-6-astra[web]",
             ),
             (
                 Some("openai-api:gpt-6-astra[web]"),
                 Some("gpt-6"),
-                "high",
-                "Astra high",
+                Some("high"),
+                "gpt-6-astra[web]",
             ),
             (
                 Some("openai/oauth:gpt-6-astra"),
                 Some("gpt-6"),
-                "high",
-                "Astra high",
+                Some("high"),
+                "gpt-6-astra high",
             ),
-            (None, Some("gpt-5.6-terra"), "medium", "Terra medium"),
-            (None, Some("gpt-5.6"), "high", "Unknown high"),
+            (
+                None,
+                Some("openai:GPT-5.6-TERRA"),
+                Some("medium"),
+                "gpt-5.6-terra medium",
+            ),
+            (None, None, Some("high"), "unknown high"),
+            (Some("  "), Some("\t"), Some("high"), "unknown high"),
+            (None, None, None, "unknown"),
             (
                 Some("unrecognized-route"),
-                Some("gpt-5.6"),
-                "low",
-                "Unknown low",
+                Some("gpt-5.6-terra"),
+                Some("low"),
+                "unrecognized-route low",
             ),
         ] {
             assert_eq!(
-                format_worker_runtime(selected, actual, Some(effort)).as_deref(),
+                format_worker_runtime(selected, actual, effort).as_deref(),
                 Some(expected),
                 "selected={selected:?}, actual={actual:?}"
             );
         }
 
-        // A selected named route wins even if a provider reports a different
-        // named route. The effort comes from the worker runtime, not its route.
+        // The canonical selected ID wins over a differently reported actual ID.
         assert_eq!(
             format_worker_runtime(Some("gpt-5.6-sol"), Some("gpt-5.6-terra"), Some("low"))
                 .as_deref(),
-            Some("Sol low")
+            Some("gpt-5.6-sol low")
         );
         assert_eq!(
             format_worker_runtime(
@@ -2087,7 +2080,7 @@ mod tests {
                 Some("high")
             )
             .as_deref(),
-            Some("Sol high")
+            Some("gpt-5.6-sol high")
         );
     }
 
@@ -2178,7 +2171,7 @@ mod tests {
     }
 
     #[test]
-    fn full_gallery_uses_short_worker_runtime_without_provider() {
+    fn active_astra_web_gallery_strip_and_card_omit_provider_details() {
         let mut worker = member("astra-worker", "running", None, &[]);
         worker.selected_model = Some("openai:gpt-6-astra[web]".into());
         worker.model = Some("GPT-6".into());
@@ -2186,14 +2179,35 @@ mod tests {
         worker.provider = Some("OpenAI".into());
         worker.auth_method = Some("OAuth".into());
 
-        let text = members_to_tiles(&[worker])[0].body.join("\n");
-        assert_eq!(text, "Astra high");
-        assert!(
-            !text.contains("GPT")
-                && !text.contains("OpenAI")
-                && !text.contains("OAuth")
-                && !text.contains("web")
-        );
+        let gallery = members_to_tiles(&[worker.clone()])[0].body.join("\n");
+        let strip = render_swarm_strip_vertical(
+            std::slice::from_ref(&worker),
+            0,
+            false,
+            &[],
+            None,
+            0,
+            100,
+            1,
+            2,
+        )
+        .iter()
+        .map(plain_line)
+        .collect::<Vec<_>>()
+        .join("\n");
+        let card = render_swarm_chat_cards(std::slice::from_ref(&worker), 100)
+            .iter()
+            .map(plain_line)
+            .collect::<Vec<_>>()
+            .join("\n");
+        for text in [&gallery, &strip, &card] {
+            assert_eq!(text.matches("gpt-6-astra[web]").count(), 1, "{text}");
+            assert!(
+                !text.contains("GPT") && !text.contains("OpenAI") && !text.contains("OAuth"),
+                "leaked provider detail: {text}"
+            );
+            assert!(!text.contains("high"), "Web must not show effort: {text}");
+        }
     }
 
     #[test]
@@ -2431,7 +2445,11 @@ mod tests {
                 .map(plain_line)
                 .collect::<Vec<_>>()
                 .join("\n");
-        for expected in ["Sol high", "Terra medium", "Luna low"] {
+        for expected in [
+            "gpt-5.6-sol high",
+            "gpt-5.6-terra medium",
+            "gpt-5.6-luna low",
+        ] {
             assert!(text.contains(expected), "missing {expected}: {text}");
         }
         for hidden in ["GPT-5.6", "OpenAI", "OAuth"] {
@@ -2461,7 +2479,9 @@ mod tests {
                 .collect::<Vec<_>>()
                 .join("\n");
         assert!(
-            text.contains("Sol high") && text.contains("Terra medium") && text.contains("Luna low"),
+            text.contains("gpt-5.6-sol high")
+                && text.contains("gpt-5.6-terra medium")
+                && text.contains("gpt-5.6-luna low"),
             "{text}"
         );
         assert!(
@@ -2584,7 +2604,7 @@ mod tests {
             "assigned agent emoji missing: {all}"
         );
         assert!(
-            all.contains("reviewer · Working · Sol high"),
+            all.contains("reviewer · Working · gpt-5.6-sol high"),
             "stable status/worker-route metadata missing: {all}"
         );
         assert!(
@@ -2608,7 +2628,7 @@ mod tests {
             .collect::<Vec<_>>()
             .join("\n");
         assert!(
-            live.contains("reviewer · 00:18 · Sol high"),
+            live.contains("reviewer · 00:18 · gpt-5.6-sol high"),
             "live header metadata missing: {live}"
         );
         assert!(
