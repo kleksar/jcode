@@ -10,6 +10,9 @@ async fn await_members_background_already_expired_answers_tool_call() {
         &[],
         &["completed".to_string()],
         None,
+        true,
+        false,
+        false,
     );
     let now_ms = SystemTime::now()
         .duration_since(UNIX_EPOCH)

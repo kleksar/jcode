@@ -1,6 +1,7 @@
 use super::await_members_state::{
     PersistedAwaitMembersState, all_pending_await_members_including_expired, ensure_pending_state,
-    load_state, persist_final_response, request_key, save_state,
+    load_state, persist_final_response, persist_non_replayable_final_response, request_key,
+    save_state,
 };
 use super::{AwaitMembersRuntime, SwarmEvent, SwarmMember};
 use crate::bus::{Bus, BusEvent, SwarmAwaitCompleted, UiActivity};
@@ -51,11 +52,15 @@ pub(super) async fn awaited_member_statuses(
                         member.latest_completion_report.clone(),
                     )
                 })
-                .unwrap_or((None, "unknown".to_string(), None));
+                // Terminal members are eventually garbage-collected. An
+                // explicitly requested member disappearing therefore means it
+                // was stopped, rather than an unhelpful `unknown` that can
+                // make a coordinator time out after its worker has gone away.
+                .unwrap_or((None, "stopped".to_string(), None));
             let done = target_status.contains(&status)
-                || (status == "unknown"
-                    && (target_status.contains(&"stopped".to_string())
-                        || target_status.contains(&"completed".to_string())));
+                || (status == "stopped"
+                    && (target_status.contains(&"completed".to_string())
+                        || target_status.contains(&"failed".to_string())));
             AwaitedMemberStatus {
                 session_id: session_id.clone(),
                 friendly_name: name,
@@ -340,6 +345,9 @@ pub(super) async fn handle_comm_await_members(
             &requested_ids,
             &target_status,
             mode.as_deref(),
+            background,
+            notify,
+            wake,
         );
         let mut persisted = load_state(&key);
 
@@ -359,7 +367,7 @@ pub(super) async fn handle_comm_await_members(
         {
             let current_still_satisfies =
                 initial_statuses.is_empty() || mode_satisfied(&initial_statuses, mode.as_deref());
-            if current_still_satisfies {
+            if final_response.replayable && current_still_satisfies {
                 let _ = ctx
                     .client_event_tx
                     .send(ServerEvent::CommAwaitMembersResponse {
@@ -372,6 +380,9 @@ pub(super) async fn handle_comm_await_members(
                 return;
             }
 
+            // Orphan cancellation records are durable for audit only. A retry
+            // must create a pending state from current member status instead of
+            // inheriting the cancellation until the final-response TTL expires.
             persisted = None;
         }
 
@@ -611,10 +622,7 @@ pub(super) async fn resume_background_awaits(
     swarm_event_tx: &broadcast::Sender<SwarmEvent>,
     await_members_runtime: &AwaitMembersRuntime,
 ) {
-    let pending: Vec<PersistedAwaitMembersState> = all_pending_await_members_including_expired()
-        .into_iter()
-        .filter(|state| state.background)
-        .collect();
+    let pending = all_pending_await_members_including_expired();
     let now_ms = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
@@ -622,7 +630,44 @@ pub(super) async fn resume_background_awaits(
 
     let mut resumed = 0usize;
     let mut expired = 0usize;
+    let mut cancelled_orphans = 0usize;
     for state in pending {
+        // A blocking tool call was attached to the pre-restart socket. Its
+        // runtime waiter cannot survive a restart, so close out the durable
+        // state instead of allowing a later retry to inherit a ghost waiter.
+        // It deliberately emits no notify/wake because no live call remains.
+        if !state.background {
+            let _ = persist_non_replayable_final_response(
+                &state,
+                false,
+                Vec::new(),
+                "Await cancelled because its requesting connection restarted. Rerun the await if it is still needed."
+                    .to_string(),
+            );
+            cancelled_orphans += 1;
+            continue;
+        }
+
+        // Do not wake or notify an absent coordinator after restoration. This
+        // is an orphaned background watcher, not evidence that an unknown
+        // target should receive model work.
+        let requester_is_live = swarm_members
+            .read()
+            .await
+            .get(&state.session_id)
+            .is_some_and(|member| member.swarm_id.as_deref() == Some(state.swarm_id.as_str()));
+        if !requester_is_live {
+            let _ = persist_non_replayable_final_response(
+                &state,
+                false,
+                Vec::new(),
+                "Await cancelled because its requesting coordinator is no longer in this swarm."
+                    .to_string(),
+            );
+            cancelled_orphans += 1;
+            continue;
+        }
+
         // Deadline passed while the server was down: the wait can never
         // resolve, so finalize it as a timeout now so the promised
         // notify/wake still fires instead of the await silently vanishing.
@@ -671,10 +716,10 @@ pub(super) async fn resume_background_awaits(
         }
     }
 
-    if resumed > 0 || expired > 0 {
+    if resumed > 0 || expired > 0 || cancelled_orphans > 0 {
         crate::logging::info(&format!(
-            "Resumed {} background swarm await watcher(s) after startup ({} finalized as expired)",
-            resumed, expired
+            "Resumed {} background swarm await watcher(s) after startup ({} finalized as expired, {} orphaned wait(s) cancelled)",
+            resumed, expired, cancelled_orphans
         ));
     }
 }

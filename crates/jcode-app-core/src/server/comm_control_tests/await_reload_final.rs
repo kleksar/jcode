@@ -9,6 +9,9 @@ async fn await_members_returns_persisted_final_response_after_reload_retry() {
         &[],
         &["completed".to_string()],
         None,
+        false,
+        false,
+        false,
     );
     let now_ms = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -39,6 +42,7 @@ async fn await_members_returns_persisted_final_response_after_reload_retry() {
                     }],
                     summary: "All 1 members are done: peer-1".to_string(),
                     resolved_at_unix_ms: now_ms,
+                    replayable: true,
                 },
             ),
         },
@@ -106,6 +110,9 @@ async fn await_members_ignores_persisted_final_when_requested_member_is_queued_a
         &requested_ids,
         &target_status,
         None,
+        false,
+        false,
+        false,
     );
     let now_ms = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -136,6 +143,7 @@ async fn await_members_ignores_persisted_final_when_requested_member_is_queued_a
                     }],
                     summary: "All 1 members are done: peer-1".to_string(),
                     resolved_at_unix_ms: now_ms,
+                    replayable: true,
                 },
             ),
         },
