@@ -717,6 +717,7 @@ async fn broadcast_swarm_status_now(
                     todo_progress: m.todo_progress,
                     todo_items: m.todo_items.clone(),
                     runtime: crate::protocol::SwarmMemberRuntime {
+                        selected_model: m.runtime.selected_model.clone(),
                         model: m.runtime.model.clone(),
                         provider: m.runtime.provider.clone(),
                         auth_method: m.runtime.auth_method.clone(),

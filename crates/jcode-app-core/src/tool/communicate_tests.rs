@@ -1940,4 +1940,5 @@ fn run_plan_terminal_summary_includes_recorded_failure_reasons() {
 
 include!("communicate_tests/input_format.rs");
 include!("communicate_tests/end_to_end.rs");
+include!("communicate_tests/await_public_boundary.rs");
 include!("communicate_tests/assignment.rs");

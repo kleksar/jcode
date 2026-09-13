@@ -119,6 +119,7 @@ pub(super) async fn create_headless_session(
     }
     let client_session_id = new_agent.session_id().to_string();
 
+    let selected_model = model_override.clone();
     if let Some(model) = model_override {
         // Build a model-switch request that preserves the coordinator's auth
         // route (e.g. claude-api vs claude-oauth, or an openai-compatible
@@ -269,6 +270,7 @@ pub(super) async fn create_headless_session(
                 todo_progress: None,
                 todo_items: Vec::new(),
                 runtime: crate::protocol::SwarmMemberRuntime {
+                    selected_model,
                     model: Some(provider_model),
                     provider: Some(provider_name),
                     auth_method,

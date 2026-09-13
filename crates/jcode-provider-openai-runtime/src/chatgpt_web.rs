@@ -2,6 +2,10 @@ use anyhow::{Context, Result};
 use jcode_message_types::{ContentBlock, Message, Role, StreamEvent, ToolDefinition};
 use jcode_provider_core::{ChatGptWebModelDescriptor, EventStream, chatgpt_web_model_descriptor};
 use serde_json::{Value, json};
+use std::fs::{self, OpenOptions};
+use std::future::Future;
+use std::io::Write;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -15,6 +19,10 @@ const EDITOR_QUERY_SELECTOR: &str = "#prompt-textarea[contenteditable=true], [co
 const TOOL_CALL_START: &str = "<jcode_tool_call>";
 const TOOL_CALL_END: &str = "</jcode_tool_call>";
 const PROMPT_CHUNK_BYTES: usize = 24_000;
+const ATTACHMENT_SEND_BUTTON_SELECTOR: &str =
+    "button#composer-submit-button,button[data-testid=\"send-button\"]";
+/// One initial write plus one complete rebuild in the owned, unsubmitted composer.
+const MAX_PROMPT_WRITE_ATTEMPTS: usize = 2;
 const POLL_INTERVAL: Duration = Duration::from_millis(750);
 const REQUIRED_STABLE_POLLS: usize = 8;
 const MODEL_SELECTION_TIMEOUT: Duration = Duration::from_secs(15);
@@ -118,9 +126,13 @@ impl ChatGptWebState {
         let result = async {
             send_phase(tx, jcode_message_types::ConnectionPhase::Authenticating).await?;
 
-            wait_for_editor(tab_id).await?;
-            prepare_chatgpt_page(tab_id, descriptor).await?;
-            insert_prompt(tab_id, prompt).await?;
+            wait_for_editor(tab_id).await.context("phase=wait_editor")?;
+            prepare_chatgpt_page(tab_id, descriptor)
+                .await
+                .context("phase=prepare_page")?;
+            let _attachment = prepare_prompt(tab_id, prompt)
+                .await
+                .context("phase=prepare_prompt")?;
             if tx.is_closed() {
                 anyhow::bail!("ChatGPT web response consumer was closed before submission");
             }
@@ -395,12 +407,230 @@ fn response_model_matches(slug: &str, descriptor: &ChatGptWebModelDescriptor) ->
 }
 
 async fn insert_prompt(tab_id: u64, prompt: &str) -> Result<()> {
+    let mut bridge = |action, params| bridge_command(action, params);
+    insert_prompt_with_bridge(tab_id, prompt, &mut bridge).await
+}
+
+struct PromptAttachment {
+    path: PathBuf,
+    filename: String,
+}
+
+async fn prepare_prompt(tab_id: u64, prompt: &str) -> Result<Option<PromptAttachment>> {
+    let mut upload = |attachment: PromptAttachment| async move {
+        upload_prompt_attachment(tab_id, &attachment).await?;
+        Ok(attachment)
+    };
+    let mut insert = |text: String| async move { insert_prompt(tab_id, &text).await };
+    let attachment = prepare_prompt_with_bridge(prompt, &mut upload, &mut insert).await?;
+    if let Some(attachment) = &attachment {
+        wait_for_attachment_send_enabled(tab_id, &attachment.filename).await?;
+    }
+    Ok(attachment)
+}
+
+async fn wait_for_attachment_send_enabled(tab_id: u64, filename: &str) -> Result<()> {
+    let output = evaluate(
+        tab_id,
+        &format!(
+            r#"
+const name = {name:?};
+const started = performance.now();
+return new Promise(resolve => {{
+  const inspect = () => {{
+    const messages = document.querySelectorAll('[data-message-author-role],article[data-testid*="conversation-turn" i]').length;
+    const chip = document.querySelector(`[role="group"][aria-label="${{CSS.escape(name)}}"]`);
+    const send = document.querySelector({send_selector});
+    const enabled = !!send && !send.disabled && send.getAttribute('aria-disabled') !== 'true';
+    return {{ enabled, messageCount: messages, hasChip: !!chip }};
+  }};
+  const isReady = value => value.enabled && value.hasChip && value.messageCount === 0;
+  const initial = inspect();
+  if (isReady(initial)) return resolve({{ ...initial, initialEnabled: initial.enabled, elapsedMs: 0 }});
+  let observer;
+  const finish = value => {{ observer.disconnect(); clearTimeout(timer); resolve(value); }};
+  observer = new MutationObserver(() => {{ const value = inspect(); if (isReady(value)) finish({{ ...value, initialEnabled: initial.enabled, elapsedMs: Math.round(performance.now() - started) }}); }});
+  observer.observe(document.body, {{ childList: true, subtree: true, characterData: true, attributes: true }});
+  const timer = setTimeout(() => {{ const value = inspect(); finish({{ ...value, initialEnabled: initial.enabled, timeout: true, elapsedMs: Math.round(performance.now() - started) }}); }}, 30000);
+}});
+"#,
+            name = filename,
+            send_selector = serde_json::to_string(ATTACHMENT_SEND_BUTTON_SELECTOR)?
+        ),
+    )
+    .await
+    .context("phase=attachment_send_readiness: browser evaluation failed")?;
+    let result = &output;
+    if result.get("timeout").and_then(Value::as_bool) == Some(true) {
+        anyhow::bail!("Timed out waiting for ChatGPT attachment send readiness");
+    }
+    if !attachment_send_ready(result) {
+        anyhow::bail!("ChatGPT attachment did not reach a safe send-ready state");
+    }
+    Ok(())
+}
+
+fn attachment_send_ready(result: &Value) -> bool {
+    result.get("enabled").and_then(Value::as_bool) == Some(true)
+        && result.get("hasChip").and_then(Value::as_bool) == Some(true)
+        && result.get("messageCount").and_then(Value::as_u64) == Some(0)
+}
+
+async fn prepare_prompt_with_bridge<Upload, UploadFuture, Insert, InsertFuture>(
+    prompt: &str,
+    upload: &mut Upload,
+    insert: &mut Insert,
+) -> Result<Option<PromptAttachment>>
+where
+    Upload: FnMut(PromptAttachment) -> UploadFuture,
+    UploadFuture: Future<Output = Result<PromptAttachment>>,
+    Insert: FnMut(String) -> InsertFuture,
+    InsertFuture: Future<Output = Result<()>>,
+{
+    if prompt.len() <= PROMPT_CHUNK_BYTES {
+        insert(prompt.to_owned()).await?;
+        return Ok(None);
+    }
+    let attachment = PromptAttachment::create(prompt)?;
+    let attachment = upload(attachment).await?;
+    insert(attachment_instruction(&attachment.filename)).await?;
+    Ok(Some(attachment))
+}
+
+impl PromptAttachment {
+    fn create(prompt: &str) -> Result<Self> {
+        let filename = format!(
+            "jcode-web-task-{}-{}.txt",
+            std::process::id(),
+            TOOL_CALL_SEQUENCE.fetch_add(1, Ordering::Relaxed)
+        );
+        let path = std::env::temp_dir().join(&filename);
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)
+            .context("Failed to create private ChatGPT web prompt attachment")?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o600))?;
+        }
+        file.write_all(prompt.as_bytes())
+            .context("Failed to write ChatGPT web prompt attachment")?;
+        file.sync_all()
+            .context("Failed to finalize ChatGPT web prompt attachment")?;
+        Ok(Self { path, filename })
+    }
+}
+
+impl Drop for PromptAttachment {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.path);
+    }
+}
+
+fn attachment_instruction(filename: &str) -> String {
+    format!(
+        "Read and follow the complete task in the attached file `{filename}`. Apply the existing response protocol."
+    )
+}
+
+async fn upload_prompt_attachment(tab_id: u64, attachment: &PromptAttachment) -> Result<()> {
+    bridge_command(
+        "uploadFile",
+        upload_prompt_attachment_params(tab_id, attachment),
+    )
+    .await
+    .context("phase=upload_file: failed to upload ChatGPT web prompt attachment")?;
+    let output = bridge_command(
+        "evaluate",
+        json!({ "tabId": tab_id, "script": format!(r#"
+const name = {name:?};
+return new Promise(resolve => {{
+  const inspect = () => {{
+    const text = document.body.innerText || '';
+    const failed = /upload failed|couldn't upload|error uploading/i.test(text);
+    return {{ ready: !failed && text.includes(name), failed }};
+  }};
+  const initial = inspect();
+  if (initial.ready || initial.failed) return resolve(initial);
+  let observer;
+  const finish = value => {{ observer.disconnect(); clearTimeout(timer); resolve(value); }};
+  observer = new MutationObserver(() => {{ const value = inspect(); if (value.ready || value.failed) finish(value); }});
+  observer.observe(document.body, {{ childList: true, subtree: true, characterData: true }});
+  const timer = setTimeout(() => finish({{ ready: false, failed: false, timeout: true }}), 30000);
+}});
+"#, name = attachment.filename) }),
+    )
+    .await
+    .context("phase=attachment_readiness: browser evaluation failed")?;
+    let result = output
+        .get("result")
+        .ok_or_else(|| anyhow::anyhow!("ChatGPT attachment readiness evaluation was malformed"))?;
+    if result.get("failed").and_then(Value::as_bool) == Some(true) {
+        anyhow::bail!("ChatGPT rejected the prompt attachment");
+    }
+    if result.get("timeout").and_then(Value::as_bool) == Some(true) {
+        anyhow::bail!("Timed out waiting for ChatGPT prompt attachment readiness");
+    }
+    if result.get("ready").and_then(Value::as_bool) != Some(true) {
+        anyhow::bail!("ChatGPT prompt attachment was not ready");
+    }
+    Ok(())
+}
+
+fn upload_prompt_attachment_params(tab_id: u64, attachment: &PromptAttachment) -> Value {
+    // The installed browser host reads `path` and base64-encodes the local file.
+    // Keep prompt bytes out of the bridge command argv.
+    json!({
+        "tabId": tab_id,
+        "selector": "#upload-files",
+        "path": attachment.path,
+    })
+}
+
+async fn insert_prompt_with_bridge<F, Fut>(tab_id: u64, prompt: &str, bridge: &mut F) -> Result<()>
+where
+    F: FnMut(&'static str, Value) -> Fut,
+    Fut: Future<Output = Result<Value>>,
+{
+    for attempt in 1..=MAX_PROMPT_WRITE_ATTEMPTS {
+        write_prompt_chunks_with_bridge(tab_id, prompt, bridge).await?;
+        match verify_composer_prompt_with_bridge(tab_id, prompt, bridge).await? {
+            ComposerPromptVerification::Matches => return Ok(()),
+            ComposerPromptVerification::Mismatch { .. } if prompt_recovery_allowed(attempt) => {
+                // `write_prompt_chunks` starts with fillForm, which replaces the complete
+                // contents of this owned, unsubmitted composer before rebuilding it.
+            }
+            ComposerPromptVerification::Mismatch {
+                actual_len,
+                actual_hash,
+            } => {
+                let (expected_len, expected_hash) = utf16_fingerprint(prompt);
+                anyhow::bail!(
+                    "ChatGPT composer received an incomplete prompt after bounded recovery (expected UTF-16 length/hash {expected_len}/{expected_hash}, got {actual_len}/{actual_hash})"
+                );
+            }
+        }
+    }
+    unreachable!("prompt recovery attempts are bounded and nonzero")
+}
+
+async fn write_prompt_chunks_with_bridge<F, Fut>(
+    tab_id: u64,
+    prompt: &str,
+    bridge: &mut F,
+) -> Result<()>
+where
+    F: FnMut(&'static str, Value) -> Fut,
+    Fut: Future<Output = Result<Value>>,
+{
     let chunks = split_utf8_chunks(prompt, PROMPT_CHUNK_BYTES);
     let Some((first, rest)) = chunks.split_first() else {
         anyhow::bail!("Refusing to submit an empty ChatGPT web prompt");
     };
 
-    bridge_command(
+    bridge(
         "fillForm",
         json!({
             "tabId": tab_id,
@@ -411,7 +641,7 @@ async fn insert_prompt(tab_id: u64, prompt: &str) -> Result<()> {
     .context("Failed to initialize the ChatGPT rich-text composer")?;
 
     for chunk in rest {
-        bridge_command(
+        bridge(
             "type",
             json!({
                 "tabId": tab_id,
@@ -424,10 +654,31 @@ async fn insert_prompt(tab_id: u64, prompt: &str) -> Result<()> {
         .await
         .context("Failed while appending a chunk to the ChatGPT composer")?;
     }
+    Ok(())
+}
 
-    let verification = evaluate(
-        tab_id,
-        r#"
+#[derive(Debug, PartialEq, Eq)]
+enum ComposerPromptVerification {
+    Matches,
+    Mismatch { actual_len: u64, actual_hash: u32 },
+}
+
+fn prompt_recovery_allowed(attempt: usize) -> bool {
+    attempt < MAX_PROMPT_WRITE_ATTEMPTS
+}
+
+async fn verify_composer_prompt_with_bridge<F, Fut>(
+    tab_id: u64,
+    prompt: &str,
+    bridge: &mut F,
+) -> Result<ComposerPromptVerification>
+where
+    F: FnMut(&'static str, Value) -> Fut,
+    Fut: Future<Output = Result<Value>>,
+{
+    let output = bridge(
+        "evaluate",
+        json!({ "tabId": tab_id, "script": r#"
 const editor = document.querySelector('#prompt-textarea[contenteditable=true]')
   || document.querySelector('[contenteditable=true][aria-label="Chat with ChatGPT"]');
 const submit = document.querySelector('#composer-submit-button');
@@ -441,27 +692,52 @@ for (let index = 0; index < text.length; index++) {
   hash = Math.imul(hash ^ text.charCodeAt(index), 16777619);
 }
 return { length: text.length, hash: hash >>> 0, submitDisabled: !submit || submit.disabled };
-"#,
+"# }),
     )
     .await?;
+    let verification = output
+        .get("result")
+        .cloned()
+        .ok_or_else(|| anyhow::anyhow!("Browser evaluate response did not contain a result"))?;
+    parse_composer_verification(&verification, prompt)
+}
+
+fn parse_composer_verification(
+    verification: &Value,
+    prompt: &str,
+) -> Result<ComposerPromptVerification> {
     let actual_len = verification
         .get("length")
         .and_then(Value::as_u64)
-        .unwrap_or_default();
+        .ok_or_else(|| {
+            anyhow::anyhow!("ChatGPT composer verification was malformed: missing numeric length")
+        })?;
     let actual_hash = verification
         .get("hash")
         .and_then(Value::as_u64)
-        .unwrap_or_default() as u32;
+        .and_then(|hash| u32::try_from(hash).ok())
+        .ok_or_else(|| {
+            anyhow::anyhow!("ChatGPT composer verification was malformed: missing u32 hash")
+        })?;
+    let submit_disabled = verification
+        .get("submitDisabled")
+        .and_then(Value::as_bool)
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "ChatGPT composer verification was malformed: missing boolean submitDisabled"
+            )
+        })?;
     let (expected_len, expected_hash) = utf16_fingerprint(prompt);
     if actual_len != expected_len as u64 || actual_hash != expected_hash {
-        anyhow::bail!(
-            "ChatGPT composer received an incomplete prompt (expected UTF-16 length/hash {expected_len}/{expected_hash}, got {actual_len}/{actual_hash})"
-        );
+        return Ok(ComposerPromptVerification::Mismatch {
+            actual_len,
+            actual_hash,
+        });
     }
-    if verification.get("submitDisabled").and_then(Value::as_bool) == Some(true) {
+    if submit_disabled {
         anyhow::bail!("ChatGPT composer accepted the prompt but did not enable submission");
     }
-    Ok(())
+    Ok(ComposerPromptVerification::Matches)
 }
 
 async fn poll_for_response(
@@ -833,6 +1109,10 @@ async fn bridge_command(action: &str, params: Value) -> Result<Value> {
         .stderr(std::process::Stdio::piped())
         .kill_on_drop(true);
 
+    #[cfg(test)]
+    if let Ok(tmpdir) = std::env::var("JCODE_CHATGPT_WEB_TEST_BROWSER_TMPDIR") {
+        command.env("TMPDIR", tmpdir);
+    }
     let output = tokio::time::timeout(Duration::from_secs(45), command.output())
         .await
         .with_context(|| format!("Browser bridge action '{action}' timed out"))?
@@ -858,6 +1138,55 @@ async fn bridge_command(action: &str, params: Value) -> Result<Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::VecDeque;
+    use std::future::{Ready, ready};
+
+    struct PromptBridgeScript {
+        responses: VecDeque<Result<Value>>,
+        actions: Vec<&'static str>,
+    }
+
+    impl PromptBridgeScript {
+        fn new(responses: Vec<Result<Value>>) -> Self {
+            Self {
+                responses: responses.into(),
+                actions: Vec::new(),
+            }
+        }
+
+        fn call(&mut self, action: &'static str, _params: Value) -> Ready<Result<Value>> {
+            self.actions.push(action);
+            ready(
+                self.responses
+                    .pop_front()
+                    .unwrap_or_else(|| Err(anyhow::anyhow!("unexpected prompt bridge command"))),
+            )
+        }
+    }
+
+    fn matching_composer_evaluation(prompt: &str) -> Value {
+        let (length, hash) = utf16_fingerprint(prompt);
+        json!({
+            "result": { "length": length, "hash": hash, "submitDisabled": false }
+        })
+    }
+
+    async fn assert_prompt_insertion_fails(
+        prompt: &str,
+        responses: Vec<Result<Value>>,
+        expected_actions: &[&'static str],
+    ) {
+        let mut script = PromptBridgeScript::new(responses);
+        let mut bridge = |action, params| script.call(action, params);
+
+        assert!(
+            insert_prompt_with_bridge(7, prompt, &mut bridge)
+                .await
+                .is_err()
+        );
+        assert_eq!(script.actions, expected_actions);
+        assert!(!script.actions.contains(&"click"));
+    }
 
     #[test]
     fn web_submit_disables_duplicate_synthetic_click_and_targets_owned_tab() {
@@ -981,6 +1310,463 @@ mod tests {
         let (len, hash) = utf16_fingerprint("a😀b");
         assert_eq!(len, 4);
         assert_eq!(hash, 2_412_414_209);
+    }
+
+    #[test]
+    fn composer_verification_accepts_matching_unicode_fingerprint() {
+        let prompt = "a😀b";
+        let (length, hash) = utf16_fingerprint(prompt);
+        assert_eq!(
+            parse_composer_verification(
+                &json!({ "length": length, "hash": hash, "submitDisabled": false }),
+                prompt,
+            )
+            .unwrap(),
+            ComposerPromptVerification::Matches
+        );
+    }
+
+    #[test]
+    fn composer_verification_reports_mismatch_and_recovery_is_bounded() {
+        let prompt = "prompt";
+        assert_eq!(
+            parse_composer_verification(
+                &json!({ "length": 1, "hash": 2, "submitDisabled": false }),
+                prompt,
+            )
+            .unwrap(),
+            ComposerPromptVerification::Mismatch {
+                actual_len: 1,
+                actual_hash: 2,
+            }
+        );
+        assert!(prompt_recovery_allowed(1));
+        assert!(!prompt_recovery_allowed(MAX_PROMPT_WRITE_ATTEMPTS));
+    }
+
+    #[test]
+    fn composer_verification_rejects_malformed_or_unready_results() {
+        let missing_hash =
+            parse_composer_verification(&json!({ "length": 1, "submitDisabled": false }), "prompt")
+                .unwrap_err();
+        assert!(missing_hash.to_string().contains("missing u32 hash"));
+
+        let missing_submit =
+            parse_composer_verification(&json!({ "length": 1, "hash": 2 }), "prompt").unwrap_err();
+        assert!(
+            missing_submit
+                .to_string()
+                .contains("missing boolean submitDisabled")
+        );
+
+        let (length, hash) = utf16_fingerprint("prompt");
+        let disabled = parse_composer_verification(
+            &json!({ "length": length, "hash": hash, "submitDisabled": true }),
+            "prompt",
+        )
+        .unwrap_err();
+        assert!(disabled.to_string().contains("did not enable submission"));
+    }
+
+    #[tokio::test]
+    async fn prompt_insertion_happy_path_writes_once_then_verifies_before_submission() {
+        let prompt = "prompt";
+        let mut script = PromptBridgeScript::new(vec![
+            Ok(json!({})),
+            Ok(matching_composer_evaluation(prompt)),
+        ]);
+        let mut bridge = |action, params| script.call(action, params);
+
+        insert_prompt_with_bridge(7, prompt, &mut bridge)
+            .await
+            .unwrap();
+
+        assert_eq!(script.actions, ["fillForm", "evaluate"]);
+        assert!(!script.actions.contains(&"click"));
+    }
+
+    #[tokio::test]
+    async fn prompt_insertion_rebuilds_once_after_first_mismatch() {
+        let prompt = "prompt";
+        let mut script = PromptBridgeScript::new(vec![
+            Ok(json!({})),
+            Ok(json!({
+                "result": { "length": 1, "hash": 2, "submitDisabled": false }
+            })),
+            Ok(json!({})),
+            Ok(matching_composer_evaluation(prompt)),
+        ]);
+        let mut bridge = |action, params| script.call(action, params);
+
+        insert_prompt_with_bridge(7, prompt, &mut bridge)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            script.actions,
+            ["fillForm", "evaluate", "fillForm", "evaluate"]
+        );
+        assert!(!script.actions.contains(&"click"));
+    }
+
+    #[tokio::test]
+    async fn prompt_insertion_stops_after_second_mismatch_without_submission() {
+        let mut script = PromptBridgeScript::new(vec![
+            Ok(json!({})),
+            Ok(json!({
+                "result": { "length": 1, "hash": 2, "submitDisabled": false }
+            })),
+            Ok(json!({})),
+            Ok(json!({
+                "result": { "length": 1, "hash": 2, "submitDisabled": false }
+            })),
+        ]);
+        let mut bridge = |action, params| script.call(action, params);
+
+        let error = insert_prompt_with_bridge(7, "prompt", &mut bridge)
+            .await
+            .unwrap_err();
+
+        assert!(error.to_string().contains("after bounded recovery"));
+        assert_eq!(
+            script.actions,
+            ["fillForm", "evaluate", "fillForm", "evaluate"]
+        );
+        assert!(!script.actions.contains(&"click"));
+    }
+
+    #[tokio::test]
+    async fn prompt_insertion_does_not_retry_unknown_bridge_or_malformed_results() {
+        assert_prompt_insertion_fails(
+            "prompt",
+            vec![Err(anyhow::anyhow!("fill failed"))],
+            &["fillForm"],
+        )
+        .await;
+
+        let multi_chunk = "x".repeat(PROMPT_CHUNK_BYTES + 1);
+        assert_prompt_insertion_fails(
+            &multi_chunk,
+            vec![Ok(json!({})), Err(anyhow::anyhow!("type failed"))],
+            &["fillForm", "type"],
+        )
+        .await;
+
+        assert_prompt_insertion_fails(
+            "prompt",
+            vec![Ok(json!({})), Err(anyhow::anyhow!("evaluate failed"))],
+            &["fillForm", "evaluate"],
+        )
+        .await;
+
+        assert_prompt_insertion_fails(
+            "prompt",
+            vec![
+                Ok(json!({})),
+                Ok(json!({ "result": { "length": 1, "hash": 2 } })),
+            ],
+            &["fillForm", "evaluate"],
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn prompt_insertion_preserves_unicode_multi_chunk_order_and_count() {
+        let prompt = "😀".repeat(6_001);
+        let mut script = PromptBridgeScript::new(vec![
+            Ok(json!({})),
+            Ok(json!({})),
+            Ok(matching_composer_evaluation(&prompt)),
+        ]);
+        let mut bridge = |action, params| script.call(action, params);
+
+        insert_prompt_with_bridge(7, &prompt, &mut bridge)
+            .await
+            .unwrap();
+
+        assert_eq!(script.actions, ["fillForm", "type", "evaluate"]);
+        assert!(!script.actions.contains(&"click"));
+    }
+
+    #[tokio::test]
+    async fn attachment_orchestration_is_bounded_ordered_and_cleans_up() {
+        for (label, prompt, expect_attachment) in [
+            ("boundary", "x".repeat(PROMPT_CHUNK_BYTES), false),
+            (
+                "long-unicode",
+                format!("{}😀tail", "é".repeat(PROMPT_CHUNK_BYTES)),
+                true,
+            ),
+        ] {
+            let events = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+            let upload_events = Arc::clone(&events);
+            let insert_events = Arc::clone(&events);
+            let original = prompt.as_bytes().to_vec();
+            let mut upload = move |attachment: PromptAttachment| {
+                let events = Arc::clone(&upload_events);
+                let original = original.clone();
+                ready(
+                    if attachment.path.exists()
+                        && fs::read(&attachment.path).ok().as_deref() == Some(original.as_slice())
+                    {
+                        events.lock().unwrap().push(format!("{label}:upload"));
+                        Ok(attachment)
+                    } else {
+                        Err(anyhow::anyhow!("attachment bytes/path mismatch"))
+                    },
+                )
+            };
+            let mut insert = move |text: String| {
+                let events = Arc::clone(&insert_events);
+                ready({
+                    events
+                        .lock()
+                        .unwrap()
+                        .push(format!("{label}:insert:{text}"));
+                    Ok(())
+                })
+            };
+            let attachment = prepare_prompt_with_bridge(&prompt, &mut upload, &mut insert)
+                .await
+                .unwrap();
+            assert_eq!(attachment.is_some(), expect_attachment, "{label}");
+            let events = events.lock().unwrap().clone();
+            if expect_attachment {
+                assert_eq!(events.len(), 2, "{label}");
+                assert!(events[0].ends_with(":upload"));
+                assert!(events[1].contains("Read and follow"));
+                assert!(!events.iter().any(|event| event.contains("submit")));
+                let path = attachment.as_ref().unwrap().path.clone();
+                drop(attachment);
+                assert!(!path.exists(), "{label} temp file cleanup");
+            } else {
+                assert_eq!(events.len(), 1, "{label}");
+                assert!(events[0].ends_with(&prompt));
+            }
+        }
+    }
+
+    #[test]
+    fn attachment_send_ready_requires_chip_enabled_send_and_no_messages() {
+        let ready = serde_json::json!({"enabled": true, "hasChip": true, "messageCount": 0});
+        assert!(attachment_send_ready(&ready));
+        for state in [
+            serde_json::json!({"enabled": true, "hasChip": false, "messageCount": 0}),
+            serde_json::json!({"enabled": false, "hasChip": true, "messageCount": 0}),
+            serde_json::json!({"enabled": true, "hasChip": true, "messageCount": 1}),
+            serde_json::json!({"enabled": false, "hasChip": true, "messageCount": 0, "ariaDisabled": true}),
+        ] {
+            assert!(!attachment_send_ready(&state));
+        }
+    }
+
+    #[test]
+    fn attachment_send_readiness_uses_exact_button_targets() {
+        assert_eq!(
+            ATTACHMENT_SEND_BUTTON_SELECTOR,
+            "button#composer-submit-button,button[data-testid=\"send-button\"]"
+        );
+    }
+
+    #[tokio::test]
+    async fn attachment_upload_errors_fail_closed_without_insert_and_drop_cleanup() {
+        for message in ["upload error", "readiness timeout", "malformed readiness"] {
+            let mut upload = move |attachment: PromptAttachment| {
+                let path = attachment.path.clone();
+                assert!(path.exists());
+                ready(Err(anyhow::anyhow!(message)))
+            };
+            let mut inserted = false;
+            let mut insert = |_text: String| {
+                inserted = true;
+                ready(Ok(()))
+            };
+            assert!(
+                prepare_prompt_with_bridge(
+                    "x".repeat(PROMPT_CHUNK_BYTES + 1).as_str(),
+                    &mut upload,
+                    &mut insert
+                )
+                .await
+                .is_err()
+            );
+            assert!(!inserted);
+        }
+    }
+
+    #[test]
+    fn attachment_upload_params_use_owned_path_transport_without_payload() {
+        let attachment = PromptAttachment::create("exact bytes: 😀\n").unwrap();
+        let path = attachment.path.clone();
+        let params = upload_prompt_attachment_params(42, &attachment);
+        assert_eq!(params["tabId"], 42);
+        assert_eq!(params["selector"], "#upload-files");
+        assert_eq!(params["path"], path.to_string_lossy().as_ref());
+        assert!(params.get("filePath").is_none());
+        assert!(params.get("fileName").is_none());
+        assert!(params.get("data").is_none());
+        drop(attachment);
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn attachment_drop_cleans_up_when_future_or_response_is_dropped() {
+        let attachment = PromptAttachment::create("secret 😀 bytes").unwrap();
+        let path = attachment.path.clone();
+        drop(attachment);
+        assert!(!path.exists());
+    }
+
+    async fn wait_for_test_attachment_send_enabled(tab_id: u64, filename: &str) -> Result<Value> {
+        evaluate(
+            tab_id,
+            &format!(
+                r#"
+const name = {name:?};
+const started = performance.now();
+return new Promise(resolve => {{
+  const inspect = () => {{
+    const messages = document.querySelectorAll('[data-message-author-role],article[data-testid*="conversation-turn" i]').length;
+    const chip = document.querySelector(`[role="group"][aria-label="${{CSS.escape(name)}}"]`);
+    const send = document.querySelector({send_selector});
+    const enabled = !!send && !send.disabled && send.getAttribute('aria-disabled') !== 'true';
+    return {{ enabled, messageCount: messages, hasChip: !!chip }};
+  }};
+  const isReady = value => value.enabled && value.hasChip && value.messageCount === 0;
+  const initial = inspect();
+  if (isReady(initial)) return resolve({{ ...initial, initialEnabled: initial.enabled, elapsedMs: 0 }});
+  let observer;
+  const finish = value => {{ observer.disconnect(); clearTimeout(timer); resolve(value); }};
+  observer = new MutationObserver(() => {{ const value = inspect(); if (isReady(value)) finish({{ ...value, initialEnabled: initial.enabled, elapsedMs: Math.round(performance.now() - started) }}); }});
+  observer.observe(document.body, {{ childList: true, subtree: true, characterData: true, attributes: true }});
+  const timer = setTimeout(() => {{ const value = inspect(); finish({{ ...value, initialEnabled: initial.enabled, timeout: true, elapsedMs: Math.round(performance.now() - started) }}); }}, 30000);
+}});
+"#,
+                name = filename,
+            send_selector = serde_json::to_string(ATTACHMENT_SEND_BUTTON_SELECTOR)?
+            ),
+        )
+        .await
+        .context("phase=test_attachment_send_readiness: browser evaluation failed")
+    }
+
+    async fn open_test_chatgpt_tab_from_explicit_source(
+        descriptor: &ChatGptWebModelDescriptor,
+    ) -> Result<(u64, String)> {
+        let source_tab_id = std::env::var("JCODE_CHATGPT_WEB_TEST_SOURCE_TAB_ID")
+            .context("JCODE_CHATGPT_WEB_TEST_SOURCE_TAB_ID is required")?
+            .parse::<u64>()
+            .context("JCODE_CHATGPT_WEB_TEST_SOURCE_TAB_ID must be numeric")?;
+        let fork_name = next_owned_tab_name();
+        let fork = bridge_command(
+            "fork",
+            json!({ "tabId": source_tab_id, "paths": [{ "name": fork_name }] }),
+        )
+        .await
+        .context("Failed to create a temporary Firefox tab from explicit test source")?;
+        let fork_entry = fork
+            .get("forks")
+            .and_then(Value::as_array)
+            .and_then(|forks| forks.first())
+            .ok_or_else(|| anyhow::anyhow!("Browser bridge returned no explicit test fork"))?;
+        eprintln!(
+            "txt-live fork-source={} fork={} active={}",
+            source_tab_id,
+            fork_entry
+                .get("tabId")
+                .and_then(Value::as_u64)
+                .unwrap_or_default(),
+            fork_entry
+                .get("active")
+                .and_then(Value::as_bool)
+                .unwrap_or(false)
+        );
+        let tab_id = fork_entry
+            .get("tabId")
+            .and_then(Value::as_u64)
+            .ok_or_else(|| {
+                anyhow::anyhow!("Browser bridge did not return explicit test fork id")
+            })?;
+        if fork_entry.get("active").and_then(Value::as_bool) == Some(true) {
+            let _ = bridge_command("killFork", json!({ "fork": fork_name })).await;
+            anyhow::bail!("Explicit test fork unexpectedly became active");
+        }
+        if let Err(err) = bridge_command(
+            "navigate",
+            json!({ "tabId": tab_id, "url": chatgpt_web_url(descriptor), "wait": true }),
+        )
+        .await
+        {
+            let _ = bridge_command("killFork", json!({ "fork": fork_name })).await;
+            return Err(err).context("Failed to open ChatGPT in explicit background test fork");
+        }
+        Ok((tab_id, fork_name))
+    }
+
+    #[tokio::test]
+    #[ignore = "requires an explicitly authorized logged-in Firefox Temporary Chat session"]
+    async fn live_candidate_inserts_large_synthetic_prompt_without_submission() -> Result<()> {
+        let descriptor = chatgpt_web_model_descriptor(jcode_provider_core::CHATGPT_WEB_ASTRA_MODEL)
+            .expect("registered Astra web descriptor");
+        let (tab_id, fork_name) = open_test_chatgpt_tab_from_explicit_source(descriptor).await?;
+        let result = async {
+            // Intentionally synthetic and never submitted. The insertion path's full
+            // fingerprint check may perform its one bounded rebuild on a mismatch.
+            let prompt = format!(
+                "# Synthetic multiline transport fixture\n{}\n{}\n```text\n{}\n```\n",
+                "ASCII markdown segment with boundary padding. ".repeat(800),
+                "- Кириллица 😀 **unicode markdown**\n".repeat(800),
+                "final ASCII tail ".repeat(200),
+            );
+            eprintln!("txt-live phase=wait_editor tab_id={tab_id}");
+            wait_for_editor(tab_id).await.context("phase=wait_editor")?;
+            eprintln!("txt-live phase=prepare_page tab_id={tab_id}");
+            prepare_chatgpt_page(tab_id, descriptor)
+                .await
+                .context("phase=prepare_page")?;
+            eprintln!("txt-live phase=prepare_prompt tab_id={tab_id}");
+            let attachment = prepare_prompt(tab_id, &prompt)
+                .await
+                .context("phase=prepare_prompt")?
+                .expect("synthetic prompt must use an attachment");
+            assert!(
+                attachment.path.exists(),
+                "attachment guard must remain live"
+            );
+            let readiness = wait_for_test_attachment_send_enabled(tab_id, &attachment.filename)
+                .await
+                .context("phase=test_attachment_send_readiness")?;
+            eprintln!(
+                "txt-live attachment-send-readiness={}",
+                serde_json::to_string(&readiness).context("serialize send readiness")?
+            );
+            assert_eq!(
+                readiness["messageCount"], 0,
+                "synthetic tab has no user messages"
+            );
+            assert_eq!(
+                readiness["hasChip"], true,
+                "synthetic attachment chip is present"
+            );
+            if readiness["enabled"] != true {
+                anyhow::bail!("send button did not enable within bounded test wait");
+            }
+            let path = attachment.path.clone();
+            drop(attachment);
+            assert!(!path.exists(), "attachment temp file must be cleaned up");
+            Ok(())
+        }
+        .await;
+        eprintln!("txt-live phase=cleanup tab_id={tab_id}");
+        let cleanup = close_chatgpt_tab(tab_id, &fork_name).await;
+        match (result, cleanup) {
+            (Ok(()), Ok(())) => Ok(()),
+            (Err(error), Ok(())) => Err(error),
+            (Ok(()), Err(cleanup_error)) => Err(cleanup_error),
+            (Err(error), Err(cleanup_error)) => Err(error.context(format!(
+                "Browser tab cleanup also failed: {cleanup_error:#}"
+            ))),
+        }
     }
 
     #[test]

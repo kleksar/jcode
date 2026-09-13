@@ -156,6 +156,7 @@ pub(super) fn dispatch_local_command(app: &mut App, trimmed: &str) -> bool {
         if super::commands::handle_cancel_command(app, trimmed)
             || super::commands::handle_help_command(app, trimmed)
             || super::commands::handle_diff_command(app, trimmed)
+            || super::commands::handle_pwd_command(app, trimmed)
         {
             return true;
         }
@@ -325,6 +326,7 @@ mod tests {
             "/fast on",
             "/help",
             "/diff",
+            "/pwd",
             "/login-custom-skill",
             "/configurable-skill",
         ] {

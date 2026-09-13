@@ -1484,8 +1484,7 @@ impl crate::tui::TuiState for App {
                     selected: if managed_members.is_empty() {
                         0
                     } else {
-                        self.swarm_panel_selected
-                            .min(managed_members.len().saturating_sub(1))
+                        self.swarm_panel_selected_for_members(&managed_members)
                     },
                     focused: self.swarm_panel_focused,
                     plan_progress,
@@ -1749,12 +1748,7 @@ impl crate::tui::TuiState for App {
         if self.debug_force_inline_gallery {
             return !self.inline_swarm_members().is_empty();
         }
-        self.swarm_enabled
-            && matches!(
-                crate::config::config().agents.swarm_spawn_mode,
-                crate::config::SwarmSpawnMode::Inline
-            )
-            && !self.inline_swarm_members().is_empty()
+        self.swarm_enabled && !self.inline_swarm_members().is_empty()
     }
 
     fn inline_swarm_members(&self) -> Vec<crate::protocol::SwarmMemberStatus> {
@@ -1826,7 +1820,7 @@ impl crate::tui::TuiState for App {
     }
 
     fn swarm_panel_selected(&self) -> usize {
-        let count = self.inline_swarm_members().len();
+        let count = self.swarm_panel_members().len();
         if count == 0 {
             0
         } else {
@@ -2180,6 +2174,7 @@ impl App {
             return SwarmPanelView::Chat;
         }
 
+        let selected_id = self.selected_swarm_panel_session_id();
         let next = match (self.swarm_panel_focused, self.swarm_panel_full_page) {
             (false, _) => SwarmPanelView::Controls,
             (true, false) => SwarmPanelView::FullPage,
@@ -2199,23 +2194,22 @@ impl App {
                 self.swarm_panel_full_page = true;
             }
         }
-        if next != SwarmPanelView::Chat {
-            let count = self.inline_swarm_members().len();
-            self.swarm_panel_selected = self.swarm_panel_selected.min(count.saturating_sub(1));
-        }
+        self.select_swarm_panel_session(selected_id.as_deref());
         next
     }
 
     #[allow(dead_code)]
     pub(crate) fn set_swarm_panel_focus(&mut self, focused: bool) {
+        let selected_id = self.selected_swarm_panel_session_id();
         self.swarm_panel_focused = focused && self.inline_swarm_gallery_active();
         self.swarm_panel_full_page = false;
+        self.select_swarm_panel_session(selected_id.as_deref());
     }
 
     /// Move the swarm panel selection by `delta` (e.g. +1 for next, -1 for
     /// previous), saturating at the ends.
     pub(crate) fn move_swarm_panel_selection(&mut self, delta: isize) {
-        let count = self.inline_swarm_members().len();
+        let count = self.swarm_panel_members().len();
         if count == 0 {
             return;
         }
@@ -2358,14 +2352,12 @@ impl App {
     /// Open the currently selected swarm agent's session in a new terminal
     /// window (pop-out), reusing the resume-in-new-terminal launcher.
     pub(crate) fn pop_out_selected_swarm_agent(&mut self) {
-        let members = self.inline_swarm_members();
+        let members = self.swarm_panel_members();
         if members.is_empty() {
             self.set_status_notice("No swarm agents to open");
             return;
         }
-        let order = crate::tui::info_widget::swarm_gallery::members_display_order(&members);
-        let idx = self.swarm_panel_selected.min(order.len().saturating_sub(1));
-        let Some(session_id) = order.get(idx).cloned() else {
+        let Some(session_id) = self.selected_swarm_panel_session_id() else {
             self.set_status_notice("No swarm agent selected");
             return;
         };
@@ -2385,6 +2377,55 @@ impl App {
             )),
             Err(e) => self.set_status_notice(format!("Failed to open {label}: {e}")),
         }
+    }
+}
+
+impl App {
+    /// The inline strip renders only active members, while the full page keeps
+    /// terminal members visible. All selection, movement, and pop-out paths
+    /// use this exact view-specific list.
+    fn swarm_panel_members(&self) -> Vec<crate::protocol::SwarmMemberStatus> {
+        if self.swarm_panel_full_page {
+            self.inline_swarm_members()
+        } else {
+            self.active_inline_swarm_members()
+        }
+    }
+
+    fn active_inline_swarm_members(&self) -> Vec<crate::protocol::SwarmMemberStatus> {
+        self.inline_swarm_members()
+            .into_iter()
+            .filter(|member| jcode_tui_render::swarm_gallery::is_active_status(&member.status))
+            .collect()
+    }
+
+    fn selected_swarm_panel_session_id(&self) -> Option<String> {
+        let members = self.swarm_panel_members();
+        let order = crate::tui::info_widget::swarm_gallery::members_display_order(&members);
+        order
+            .get(self.swarm_panel_selected.min(order.len().saturating_sub(1)))
+            .cloned()
+    }
+
+    fn select_swarm_panel_session(&mut self, session_id: Option<&str>) {
+        let members = self.swarm_panel_members();
+        let order = crate::tui::info_widget::swarm_gallery::members_display_order(&members);
+        self.swarm_panel_selected = session_id
+            .and_then(|id| order.iter().position(|candidate| candidate == id))
+            .unwrap_or_else(|| self.swarm_panel_selected.min(order.len().saturating_sub(1)));
+    }
+
+    fn swarm_panel_selected_for_members(
+        &self,
+        members: &[crate::protocol::SwarmMemberStatus],
+    ) -> usize {
+        let Some(selected_id) = self.selected_swarm_panel_session_id() else {
+            return 0;
+        };
+        crate::tui::info_widget::swarm_gallery::members_display_order(members)
+            .iter()
+            .position(|candidate| candidate == &selected_id)
+            .unwrap_or(0)
     }
 }
 
@@ -2518,6 +2559,77 @@ pub(crate) fn filter_inline_swarm_subtree(
 mod swarm_panel_key_tests {
     use super::{SwarmPanelAction, swarm_panel_action_for_key};
     use crossterm::event::{KeyCode, KeyModifiers};
+
+    #[test]
+    fn selection_preserves_the_visible_worker_across_inline_and_full_page() {
+        use crate::tui::TuiState;
+        use crate::tui::app::tests::create_test_app;
+
+        let mut app = create_test_app();
+        app.swarm_enabled = true;
+        let parent = app.session.id.clone();
+        let member = |id: &str, status: &str| crate::protocol::SwarmMemberStatus {
+            session_id: id.to_string(),
+            working_dir: None,
+            friendly_name: Some(id.to_string()),
+            status: status.to_string(),
+            detail: None,
+            task_label: None,
+            role: None,
+            is_headless: Some(true),
+            live_attachments: None,
+            status_age_secs: None,
+            output_tail: None,
+            report_back_to_session_id: Some(parent.clone()),
+            todo_progress: None,
+            todo_items: Vec::new(),
+            runtime: crate::protocol::SwarmMemberRuntime::default(),
+        };
+        app.remote_swarm_members = vec![
+            member("terminal-first", "completed"),
+            member("active-second", "running"),
+        ];
+        // A previously selected terminal index resolves to the first visible
+        // inline row, not a hidden terminal worker.
+        app.swarm_panel_selected = 1;
+        assert_eq!(
+            app.cycle_swarm_panel_view(),
+            super::SwarmPanelView::Controls
+        );
+        assert_eq!(app.swarm_panel_selected(), 0);
+        let selected = app.active_inline_swarm_members();
+        assert_eq!(
+            selected[app.swarm_panel_selected()].session_id,
+            "active-second"
+        );
+
+        // The full page deliberately restores the terminal row, but remaps
+        // selection by session id so its detail and Alt+O still target the
+        // worker selected in the inline strip.
+        assert_eq!(
+            app.cycle_swarm_panel_view(),
+            super::SwarmPanelView::FullPage
+        );
+        assert!(
+            app.swarm_panel_members()
+                .iter()
+                .any(|m| m.session_id == "terminal-first")
+        );
+        assert_eq!(
+            app.selected_swarm_panel_session_id().as_deref(),
+            Some("active-second")
+        );
+
+        assert_eq!(app.cycle_swarm_panel_view(), super::SwarmPanelView::Chat);
+        assert_eq!(
+            app.cycle_swarm_panel_view(),
+            super::SwarmPanelView::Controls
+        );
+        assert_eq!(
+            app.selected_swarm_panel_session_id().as_deref(),
+            Some("active-second")
+        );
+    }
 
     /// Plain typing (letters, space, enter, arrows without alt) must pass
     /// through so the user can keep writing into the chat input while the

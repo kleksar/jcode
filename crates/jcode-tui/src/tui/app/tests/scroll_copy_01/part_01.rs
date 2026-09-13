@@ -1220,7 +1220,11 @@ fn test_chat_overscroll_reveals_status_line_then_rebounds() {
 #[test]
 fn test_overscroll_lists_every_active_managed_agent_in_one_row() {
     let _lock = scroll_render_test_lock();
-    let (mut app, mut terminal) = create_scroll_test_app(110, 30, 0, 36);
+    // This regression exercises the optional elastic surface, while the user
+    // configuration may keep it Off. Opt in at the fixture instead of relying
+    // on the process-global default.
+    let (mut app, mut terminal) = create_scroll_test_app(110, 48, 0, 36);
+    app.overscroll_status_mode = crate::config::OverscrollStatusMode::Overscroll;
     app.swarm_enabled = true;
     let coordinator = app.session.id.clone();
     let member = |index: usize, status: &str| crate::protocol::SwarmMemberStatus {
@@ -1239,6 +1243,7 @@ fn test_overscroll_lists_every_active_managed_agent_in_one_row() {
         todo_items: Vec::new(),
         working_dir: None,
         runtime: crate::protocol::SwarmMemberRuntime {
+            selected_model: None,
             model: Some("GPT-5.6".to_string()),
             provider: Some("Luna".to_string()),
             auth_method: None,
@@ -1257,7 +1262,7 @@ fn test_overscroll_lists_every_active_managed_agent_in_one_row() {
     let rendered = render_and_snap(&app, &mut terminal);
     for index in 0..10 {
         assert!(
-            rendered.contains(&format!("● agent-{index} · GPT-5.6 Luna low · checks issue {index}")),
+            rendered.contains(&format!("● agent-{index} · GPT-5.6 low · checks issue {index}")),
             "missing active agent {index}:\n{rendered}"
         );
     }
@@ -1269,7 +1274,7 @@ fn test_overscroll_lists_every_active_managed_agent_in_one_row() {
     app.remote_swarm_members[4].task_label = Some("merged PR 4".to_string());
     let updated = render_and_snap(&app, &mut terminal);
     assert!(!updated.contains("agent-3"), "completed member remained visible: {updated}");
-    assert!(updated.contains("agent-4 · GPT-5.6 Luna low · merged PR 4"));
+    assert!(updated.contains("agent-4 · GPT-5.6 low · merged PR 4"));
 
     // Snapshot removal is reflected immediately, without a stale cached row.
     app.remote_swarm_members.retain(|member| member.session_id != "worker-9");

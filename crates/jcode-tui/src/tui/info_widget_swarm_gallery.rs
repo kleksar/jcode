@@ -96,6 +96,7 @@ pub(crate) fn members_to_gallery(members: &[SwarmMemberStatus]) -> Vec<GalleryMe
             sort_key: member.session_id.clone(),
             todo: member.todo_progress,
             model: member.runtime.model.clone(),
+            selected_model: member.runtime.selected_model.clone(),
             provider: member.runtime.provider.clone(),
             auth_method: member.runtime.auth_method.clone(),
             effort: member.runtime.effort.clone(),

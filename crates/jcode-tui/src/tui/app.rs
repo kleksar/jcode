@@ -1770,6 +1770,12 @@ impl Provider for InertRuntimeProvider {
 }
 
 impl App {
+    #[cfg(test)]
+    pub(crate) fn set_session_footer_test_data(&mut self, working_dir: &str, short_name: &str) {
+        self.session.working_dir = Some(working_dir.to_string());
+        self.session.short_name = Some(short_name.to_string());
+    }
+
     const AUTO_RETRY_BASE_DELAY_SECS: u64 = 2;
     const AUTO_RETRY_MAX_ATTEMPTS: u8 = 3;
     /// Budget for completion-confidence gate nudges per auto-poke cycle.
@@ -2620,4 +2626,4 @@ fn ratio_pct(numerator: u64, denominator: u64) -> u8 {
 }
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;

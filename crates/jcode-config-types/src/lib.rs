@@ -136,11 +136,11 @@ impl DiffDisplayMode {
 #[serde(rename_all = "lowercase")]
 pub enum OverscrollStatusMode {
     /// Never show the status line.
+    #[default]
     Off,
     /// Always show the status line below the input.
     On,
-    /// Elastic reveal: show it briefly when scrolling past the bottom (default).
-    #[default]
+    /// Elastic reveal: show it briefly when scrolling past the bottom.
     Overscroll,
 }
 

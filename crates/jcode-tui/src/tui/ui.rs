@@ -3061,36 +3061,38 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
     // the bottom chrome and shoves the transcript up: reacting to raw
     // frame-by-frame dock visibility made the strip pop in and out and the
     // whole screen bounce (flicker).
-    let swarm_strip_lines: Vec<Line<'static>> = if !swarm_page_active
-        && app.inline_swarm_gallery_active()
-        && (app.swarm_panel_focused() || !super::info_widget::swarm_strip_stands_down_for_dock())
-    {
-        let members = app.inline_swarm_members();
-        if chat_area.width >= 24 {
-            let focus_key = crate::tui::keybind::swarm_panel_focus_key_label();
-            // Use the same smooth cadence as the primary status spinner.
-            let spinner_frame = (app.animation_elapsed()
-                * jcode_tui_render::swarm_gallery::STRIP_SPINNER_FPS)
-                as usize;
-            // Focused budget: chips + hints + a ~14-line detail viewport, but
-            // never more than a third of the chat column so the transcript
-            // stays usable on short terminals.
-            let focused_budget = ((chat_area.height as usize) / 3).clamp(3, 16);
-            super::info_widget::swarm_gallery::render_swarm_strip_lines(
-                &members,
-                app.swarm_panel_selected(),
-                app.swarm_panel_focused(),
-                &focus_key,
-                spinner_frame,
-                chat_area.width as usize,
-                focused_budget,
-            )
+    let swarm_strip_lines: Vec<Line<'static>> =
+        if !swarm_page_active && app.inline_swarm_gallery_active() {
+            let members: Vec<_> = app
+                .inline_swarm_members()
+                .into_iter()
+                .filter(|member| jcode_tui_render::swarm_gallery::is_active_status(&member.status))
+                .collect();
+            if chat_area.width >= 24 {
+                let focus_key = crate::tui::keybind::swarm_panel_focus_key_label();
+                // Use the same smooth cadence as the primary status spinner.
+                let spinner_frame = (app.animation_elapsed()
+                    * jcode_tui_render::swarm_gallery::STRIP_SPINNER_FPS)
+                    as usize;
+                // Focused budget: chips + hints + a ~14-line detail viewport, but
+                // never more than a third of the chat column so the transcript
+                // stays usable on short terminals.
+                let focused_budget = ((chat_area.height as usize) / 3).clamp(3, 16);
+                super::info_widget::swarm_gallery::render_swarm_strip_lines(
+                    &members,
+                    app.swarm_panel_selected(),
+                    app.swarm_panel_focused(),
+                    &focus_key,
+                    spinner_frame,
+                    chat_area.width as usize,
+                    focused_budget,
+                )
+            } else {
+                Vec::new()
+            }
         } else {
             Vec::new()
-        }
-    } else {
-        Vec::new()
-    };
+        };
     let swarm_strip_height = swarm_strip_lines.len() as u16;
 
     // Calculate pending messages (queued + interleave) for numbering and layout

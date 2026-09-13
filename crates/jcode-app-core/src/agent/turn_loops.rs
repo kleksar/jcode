@@ -159,6 +159,7 @@ impl Agent {
                 session_id: self.session.id.clone(),
                 status: "calling API".to_string(),
                 model: Some(self.provider.model()),
+                effort: self.provider_reasoning_effort(),
             }));
 
             let stamped = crate::config::config()
@@ -225,6 +226,7 @@ impl Agent {
                 session_id: self.session.id.clone(),
                 status: "streaming".to_string(),
                 model: Some(self.provider.model()),
+                effort: self.provider_reasoning_effort(),
             }));
 
             let mut text_content = String::new();
@@ -1064,6 +1066,7 @@ impl Agent {
                     session_id: self.session.id.clone(),
                     status: format!("running {}", tc.name),
                     model: Some(self.provider.model()),
+                    effort: self.provider_reasoning_effort(),
                 }));
 
                 let result = self.registry.execute(&tc.name, tc.input.clone(), ctx).await;

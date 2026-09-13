@@ -17,6 +17,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
+use super::filter::is_swarm_worker;
 use super::{
     DEFAULT_SESSION_SCAN_LIMIT, MAX_SESSION_SCAN_LIMIT, MIN_SESSION_SCAN_LIMIT, PreviewMessage,
     SEARCH_CONTENT_BUDGET_BYTES, ServerGroup, SessionInfo,
@@ -1644,6 +1645,7 @@ pub(super) fn crashed_sessions_from_all_sessions(
 
     let mut crashed: Vec<&SessionInfo> = sessions
         .iter()
+        .filter(|s| !is_swarm_worker(s))
         .filter(|s| matches!(s.status, SessionStatus::Crashed { .. }))
         .filter(|s| !recovered_parents.contains(s.id.as_str()))
         .collect();
@@ -1852,7 +1854,7 @@ pub fn load_sessions() -> Result<Vec<SessionInfo>> {
             });
             for (offset, parsed_session) in parsed.into_iter().enumerate() {
                 if let Some(info) = parsed_session {
-                    if info.is_debug || info.origin == SessionOrigin::SwarmWorker {
+                    if info.is_debug || is_swarm_worker(&info) {
                         if debug_session_count < scan_limit {
                             debug_session_count += 1;
                             sessions.push(info);

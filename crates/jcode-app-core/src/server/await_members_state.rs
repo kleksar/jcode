@@ -18,6 +18,10 @@ pub struct PersistedAwaitMembersResult {
     pub members: Vec<AwaitedMemberStatus>,
     pub summary: String,
     pub resolved_at_unix_ms: u64,
+    /// Cancellation records created while restoring an orphaned await are kept
+    /// for audit, but a later requester retry must evaluate live member state.
+    #[serde(default = "default_true")]
+    pub replayable: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -81,13 +85,21 @@ impl AwaitMembersRuntime {
         client_event_tx: &mpsc::UnboundedSender<ServerEvent>,
     ) {
         let mut waiters = self.waiters.write().await;
-        waiters
-            .entry(key.to_string())
-            .or_default()
-            .push(AwaitMembersWaiter {
+        let entries = waiters.entry(key.to_string()).or_default();
+        // A transport retry can reach the server before the original blocking
+        // call resolves. It is the same waiter, not another completion that
+        // should re-enter the coordinator, so replace it in place.
+        if let Some(waiter) = entries
+            .iter_mut()
+            .find(|waiter| waiter.request_id == request_id)
+        {
+            waiter.client_event_tx = client_event_tx.clone();
+        } else {
+            entries.push(AwaitMembersWaiter {
                 request_id,
                 client_event_tx: client_event_tx.clone(),
             });
+        }
     }
 
     pub(super) async fn mark_active_if_new(&self, key: &str) -> bool {
@@ -110,6 +122,32 @@ impl AwaitMembersRuntime {
             waiters.remove(key);
         }
         remaining
+    }
+
+    /// Resolve as soon as one currently registered blocking requester loses its
+    /// receiving half. The watcher always follows this with
+    /// `retain_open_waiters`, which is the authoritative cleanup/ownership
+    /// operation and handles a concurrent replacement or another live waiter.
+    pub(super) async fn waiter_disconnects(&self, key: &str) {
+        let waiters = self
+            .waiters
+            .read()
+            .await
+            .get(key)
+            .cloned()
+            .unwrap_or_default();
+
+        if waiters.is_empty() {
+            return;
+        }
+
+        futures::future::select_all(
+            waiters
+                .iter()
+                .map(|waiter| Box::pin(waiter.client_event_tx.closed()))
+                .collect::<Vec<_>>(),
+        )
+        .await;
     }
 
     pub(super) async fn take_waiters(
@@ -142,6 +180,9 @@ pub(super) fn request_key(
     requested_ids: &[String],
     target_status: &[String],
     mode: Option<&str>,
+    background: bool,
+    notify: bool,
+    wake: bool,
 ) -> String {
     let mut requested = requested_ids.to_vec();
     requested.sort();
@@ -157,6 +198,9 @@ pub(super) fn request_key(
             requested.join("\u{1f}"),
             target.join("\u{1f}"),
             mode.unwrap_or("all").to_string(),
+            background.to_string(),
+            notify.to_string(),
+            wake.to_string(),
         ],
     )
 }
@@ -219,7 +263,23 @@ pub(super) fn persist_final_response(
         members,
         summary,
         resolved_at_unix_ms: now_unix_ms(),
+        replayable: true,
     });
+    save_state(&next);
+    next
+}
+
+pub(super) fn persist_non_replayable_final_response(
+    state: &PersistedAwaitMembersState,
+    completed: bool,
+    members: Vec<AwaitedMemberStatus>,
+    summary: String,
+) -> PersistedAwaitMembersState {
+    let mut next = persist_final_response(state, completed, members, summary);
+    next.final_response
+        .as_mut()
+        .expect("persisted final response exists")
+        .replayable = false;
     save_state(&next);
     next
 }

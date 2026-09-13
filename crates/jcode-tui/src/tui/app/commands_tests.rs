@@ -3,6 +3,30 @@ use super::parse_diff_mode_name;
 use super::parse_manual_subagent_spec;
 
 #[test]
+fn pwd_command_prints_the_exact_session_directory_without_clipping() {
+    use crate::tui::app::commands_dispatch::dispatch_local_command;
+    use crate::tui::app::tests::create_test_app;
+
+    let mut app = create_test_app();
+    app.session.working_dir = Some("/a/b/c/issue24-rss24-implement1".to_string());
+    assert!(dispatch_local_command(&mut app, "/pwd"));
+    assert_eq!(
+        app.display_messages
+            .last()
+            .map(|message| message.content.as_str()),
+        Some("/a/b/c/issue24-rss24-implement1")
+    );
+
+    assert!(dispatch_local_command(&mut app, "/pwd extra"));
+    assert_eq!(
+        app.display_messages
+            .last()
+            .map(|message| message.content.as_str()),
+        Some("Usage: /pwd")
+    );
+}
+
+#[test]
 fn parse_diff_mode_name_maps_known_aliases() {
     use crate::config::DiffDisplayMode;
     assert_eq!(parse_diff_mode_name("off"), Some(DiffDisplayMode::Off));

@@ -21,6 +21,7 @@ fn member(id: &str, status: &str, role: Option<&str>, body: &[&str]) -> GalleryM
         todo: None,
         todo_items: Vec::new(),
         model: None,
+        selected_model: None,
         provider: None,
         auth_method: None,
         effort: None,

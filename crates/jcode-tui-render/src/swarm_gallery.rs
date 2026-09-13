@@ -125,28 +125,37 @@ fn format_elapsed(seconds: u64) -> String {
 
 fn format_model(model: &str) -> String {
     let routed = model.rsplit([':', '/']).next().unwrap_or(model);
-    let model = routed
-        .strip_suffix("-sol")
-        .or_else(|| routed.strip_suffix("-luna"))
-        .unwrap_or(routed);
-    if let Some(rest) = model.strip_prefix("gpt-") {
+    if let Some(rest) = routed.strip_prefix("gpt-") {
         format!("GPT-{rest}")
     } else {
         model.to_string()
     }
 }
 
-/// Combine provider display name and credential route into one metadata piece,
-/// e.g. "OpenAI oauth". Returns `None` when both are blank.
-fn format_route(provider: Option<&str>, auth_method: Option<&str>) -> Option<String> {
-    let provider = provider.map(str::trim).filter(|p| !p.is_empty());
-    let auth_method = auth_method.map(str::trim).filter(|m| !m.is_empty());
-    match (provider, auth_method) {
-        (Some(provider), Some(method)) => Some(format!("{provider} {method}")),
-        (Some(provider), None) => Some(provider.to_string()),
-        (None, Some(method)) => Some(method.to_string()),
-        (None, None) => None,
+/// Render a canonical worker selection without losing a named route after the
+/// provider reports its resolved base model. This uses the structural
+/// `base-route` relation, not a list of worker names.
+fn format_worker_model(selected: Option<&str>, actual: Option<&str>) -> Option<String> {
+    let selected = selected.map(str::trim).filter(|value| !value.is_empty());
+    let actual = actual.map(str::trim).filter(|value| !value.is_empty());
+    if let (Some(selected), Some(actual)) = (selected, actual) {
+        let selected = selected.rsplit([':', '/']).next().unwrap_or(selected);
+        let actual = actual.rsplit([':', '/']).next().unwrap_or(actual);
+        if let Some(route) = selected.strip_prefix(&format!("{actual}-"))
+            && route
+                .chars()
+                .all(|character| character.is_ascii_alphabetic())
+            && !route.is_empty()
+        {
+            let mut chars = route.chars();
+            let first = chars
+                .next()
+                .expect("nonempty checked route")
+                .to_ascii_uppercase();
+            return Some(format!("{first}{}", chars.as_str().to_ascii_lowercase()));
+        }
     }
+    selected.or(actual).map(format_model)
 }
 
 /// Sort rank for stable placement: coordinator first, then everything else.
@@ -223,6 +232,8 @@ pub struct GalleryMember {
     pub todo_items: Vec<GalleryTodo>,
     /// Provider model currently running this member, when known.
     pub model: Option<String>,
+    /// Canonical model/route selected for this worker at spawn time.
+    pub selected_model: Option<String>,
     /// Provider display name and credential route used by this member.
     pub provider: Option<String>,
     pub auth_method: Option<String>,
@@ -328,16 +339,10 @@ pub fn render_swarm_chat_cards(members: &[GalleryMember], width: usize) -> Vec<L
         // spawn time, so it can live on the transcript card without making old
         // chat rows churn. Drop trailing pieces first when width is tight.
         let mut metadata = vec![card_status_label(&member.status).to_string()];
-        if let Some(model) = member
-            .model
-            .as_deref()
-            .filter(|model| !model.trim().is_empty())
+        if let Some(model) =
+            format_worker_model(member.selected_model.as_deref(), member.model.as_deref())
         {
-            metadata.push(format_model(model));
-        }
-        if let Some(route) = format_route(member.provider.as_deref(), member.auth_method.as_deref())
-        {
-            metadata.push(route);
+            metadata.push(model);
         }
         let mut tail = format!(" · {}", metadata.join(" · "));
         while metadata.len() > 1 && disp_w(&lead) + disp_w(&label) + disp_w(&tail) > width {
@@ -383,15 +388,10 @@ pub fn render_swarm_live_card(
     if let Some(elapsed) = member.elapsed_secs {
         metadata.push(format_elapsed(elapsed));
     }
-    if let Some(model) = member
-        .model
-        .as_deref()
-        .filter(|model| !model.trim().is_empty())
+    if let Some(model) =
+        format_worker_model(member.selected_model.as_deref(), member.model.as_deref())
     {
-        metadata.push(format_model(model));
-    }
-    if let Some(route) = format_route(member.provider.as_deref(), member.auth_method.as_deref()) {
-        metadata.push(route);
+        metadata.push(model);
     }
     if let Some(effort) = member
         .effort
@@ -868,8 +868,9 @@ pub fn render_swarm_strip(
 /// agent per row, capped to `max_rows` agent lines with a `+N more` overflow
 /// marker on the last row.
 ///
-/// Each row is `<status glyph> <icon> · <task>` with a right-aligned todo
-/// counter when present. The first row carries the leading "🐝" swarm marker;
+/// Each row is `<status glyph> <icon> · <model> <effort> · <task>` with a
+/// right-aligned todo counter when present. Provider labels intentionally stay
+/// out of this compact persistent surface. The first row carries the leading "🐝" swarm marker;
 /// the header tally (`M/N active`) and the enter hint live on the first row's
 /// right side, mirroring the horizontal strip.
 ///
@@ -993,8 +994,10 @@ pub fn render_swarm_strip_vertical(
             if let Some(elapsed) = m.elapsed_secs {
                 metadata.push(format_elapsed(elapsed));
             }
-            if let Some(model) = m.model.as_deref().filter(|model| !model.trim().is_empty()) {
-                metadata.push(format_model(model));
+            if let Some(model) =
+                format_worker_model(m.selected_model.as_deref(), m.model.as_deref())
+            {
+                metadata.push(model);
             }
 
             let mut tail = metadata.join(" · ");
@@ -1014,16 +1017,16 @@ pub fn render_swarm_strip_vertical(
             continue;
         }
 
-        // <glyph> [icon ]<name>[ · task][ done/total]
+        // <glyph> [icon ]<name>[ · model effort][ · task][ done/total]
         let mut style = Style::default().fg(color);
         if is_sel && focused {
             style = style.add_modifier(Modifier::BOLD);
         }
-        // The assigned animal icon already identifies the worker. Keep compact
-        // strip rows emoji-only so names such as "sauropod" do not consume the
-        // task-label space; the expanded chat card carries the full identity.
+        // The animal icon is a useful scan cue, but it is not a substitute for
+        // the worker name. This persistent panel must keep the human-readable
+        // identity visible even when a session has a known animal icon.
         let ident = match m.icon.as_deref().filter(|i| !i.is_empty()) {
-            Some(icon) => icon.to_string(),
+            Some(icon) => format!("{icon} {}", m.label),
             None => m.label.clone(),
         };
         let marker = if focused {
@@ -1036,6 +1039,35 @@ pub fn render_swarm_strip_vertical(
         let todo_w = todo.as_ref().map(|t| disp_w(t) + 1).unwrap_or(0);
         let mut used = head_w;
         spans.push(Span::styled(head, style));
+
+        // The persistent panel must identify the actual runtime choice, but
+        // not repeat the provider route. Model and effort take precedence over
+        // the task label when a narrow row needs to shed optional detail.
+        let runtime = [
+            m.model
+                .as_deref()
+                .filter(|model| !model.trim().is_empty())
+                .map(format_model),
+            m.effort
+                .as_deref()
+                .filter(|effort| !effort.trim().is_empty())
+                .map(str::to_string),
+        ]
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>()
+        .join(" ");
+        if !runtime.is_empty() {
+            let avail = body_budget.saturating_sub(used + todo_w + disp_w(" · "));
+            if avail >= 4 {
+                let runtime = truncate_label(&runtime, avail);
+                used += disp_w(" · ") + disp_w(&runtime);
+                spans.push(Span::styled(
+                    format!(" · {runtime}"),
+                    Style::default().fg(rgb(170, 180, 205)),
+                ));
+            }
+        }
 
         if let Some(task) = m.task.as_deref().filter(|t| !t.trim().is_empty()) {
             let avail = body_budget.saturating_sub(used + todo_w + disp_w(" · "));
@@ -1956,11 +1988,43 @@ mod tests {
             todo: None,
             todo_items: Vec::new(),
             model: None,
+            selected_model: None,
             provider: None,
             auth_method: None,
             effort: None,
             elapsed_secs: None,
         }
+    }
+
+    #[test]
+    fn selected_worker_route_label_beats_resolved_base_model_without_provider() {
+        for (selected, expected) in [
+            ("gpt-5.6-sol", "Sol"),
+            ("gpt-5.6-terra", "Terra"),
+            ("gpt-5.6-luna", "Luna"),
+            ("gpt-6-astra", "Astra"),
+        ] {
+            assert_eq!(
+                format_worker_model(
+                    Some(selected),
+                    Some(
+                        selected
+                            .trim_end_matches(|c: char| c.is_ascii_alphabetic())
+                            .trim_end_matches('-')
+                    )
+                )
+                .as_deref(),
+                Some(expected)
+            );
+        }
+        assert_eq!(
+            format_worker_model(None, Some("gpt-5.6")).as_deref(),
+            Some("GPT-5.6")
+        );
+        assert_eq!(
+            format_worker_model(Some("gpt-5.6-sol"), Some("gpt-5.6")).as_deref(),
+            Some("Sol")
+        );
     }
 
     #[test]
@@ -2213,10 +2277,10 @@ mod tests {
             row0.contains("🐝"),
             "first row carries the swarm marker: {row0:?}"
         );
-        assert!(row0.contains("🦊"), "icon replaces the name: {row0:?}");
+        assert!(row0.contains("🦊"), "icon remains visible: {row0:?}");
         assert!(
-            !row0.contains("fox"),
-            "name hidden when icon present: {row0:?}"
+            row0.contains("fox"),
+            "name remains visible when icon is present: {row0:?}"
         );
         assert!(row0.contains("wire the auth flow"), "task shown: {row0:?}");
         assert!(row0.contains("3/9"), "todo counter shown: {row0:?}");
@@ -2276,15 +2340,14 @@ mod tests {
         let texts: Vec<String> = lines.iter().map(plain_line).collect();
         let all = texts.join("\n");
         // Selected agent (bee, sorted second: fox is active and sorts first)
-        // shows marker + icon without repeating the animal name; its detail
-        // slides in directly beneath.
+        // shows marker + icon + name; its detail slides in directly beneath.
         let bee_row = texts
             .iter()
             .position(|l| l.contains("▸") && l.contains("🐝"))
             .expect("selected row shows marker and icon: {texts:?}");
         assert!(
-            !texts[bee_row].contains("bee"),
-            "selected compact row should stay emoji-only: {texts:?}"
+            texts[bee_row].contains("bee"),
+            "selected row shows name: {texts:?}"
         );
         assert!(
             texts[bee_row + 1].contains("waiting for work"),

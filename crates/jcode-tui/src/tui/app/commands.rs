@@ -1652,6 +1652,32 @@ fn handle_git_command(app: &mut App, trimmed: &str) -> bool {
     true
 }
 
+pub(super) fn handle_pwd_command(app: &mut App, trimmed: &str) -> bool {
+    if trimmed != "/pwd" {
+        if trimmed.starts_with("/pwd ") {
+            app.push_display_message(DisplayMessage::error("Usage: /pwd".to_string()));
+            return true;
+        }
+        return false;
+    }
+
+    match active_working_dir(app) {
+        Some(path) => app.push_display_message(DisplayMessage::system(path.display().to_string())),
+        None if app.is_remote => app.push_display_message(DisplayMessage::error(
+            "Unable to determine the remote session working directory.".to_string(),
+        )),
+        None => match std::env::current_dir() {
+            Ok(path) => {
+                app.push_display_message(DisplayMessage::system(path.display().to_string()))
+            }
+            Err(_) => app.push_display_message(DisplayMessage::error(
+                "Unable to determine the current working directory.".to_string(),
+            )),
+        },
+    }
+    true
+}
+
 fn transcript_opened_message(path: &std::path::Path) -> String {
     format!("Opened transcript file:\n\n  {}", path.display())
 }
@@ -1735,6 +1761,7 @@ pub(super) fn handle_session_command(app: &mut App, trimmed: &str) -> bool {
         || handle_fork_command(app, trimmed)
         || handle_transcript_command(app, trimmed)
         || handle_git_command(app, trimmed)
+        || handle_pwd_command(app, trimmed)
         || handle_catchup_command(app, trimmed)
         || handle_back_command(app, trimmed)
         || handle_autoreview_command_local(app, trimmed)

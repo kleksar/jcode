@@ -39,6 +39,19 @@ async fn await_members_stops_when_requesting_client_disconnects() {
     )
     .await;
 
+    // Do not race task scheduling: establish that the event-driven watcher and
+    // its broadcast receiver are registered before dropping the requester.
+    tokio::time::timeout(std::time::Duration::from_secs(1), async {
+        loop {
+            if swarm_event_tx.receiver_count() == baseline_receivers + 1 {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("await watcher should register before requester disconnects");
+
     drop(client_rx);
 
     tokio::time::timeout(std::time::Duration::from_secs(1), async {
@@ -51,4 +64,35 @@ async fn await_members_stops_when_requesting_client_disconnects() {
     })
     .await
     .expect("await task should unsubscribe promptly after client disconnect");
+
+    let key = crate::server::await_members_state::request_key(
+        requester,
+        swarm_id,
+        &[],
+        &["completed".to_string()],
+        None,
+        false,
+        false,
+        false,
+    );
+    assert!(
+        await_runtime.mark_active_if_new(&key).await,
+        "disconnect must clear the active watcher key"
+    );
+    assert_eq!(
+        await_runtime.retain_open_waiters(&key).await,
+        0,
+        "disconnect must remove the closed sender and waiter entry"
+    );
+    let state = crate::server::await_members_state::load_state(&key)
+        .expect("disconnect cancellation should be durable for audit");
+    assert_eq!(
+        state
+            .final_response
+            .as_ref()
+            .expect("cancellation final response")
+            .replayable,
+        false,
+        "disconnect cancellation must not replay on a later await"
+    );
 }

@@ -179,7 +179,7 @@ pub(in crate::tui::app) async fn submit_remote_slash_input(
         }
         if matches!(
             trimmed.split_whitespace().next(),
-            Some("/cancel" | "/stop" | "/help" | "/?" | "/commands" | "/diff")
+            Some("/cancel" | "/stop" | "/help" | "/?" | "/commands" | "/diff" | "/pwd")
         ) {
             app_mod::commands_dispatch::dispatch_local_command(app, trimmed);
             return Ok(());

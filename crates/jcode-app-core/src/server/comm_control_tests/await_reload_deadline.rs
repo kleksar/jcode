@@ -10,6 +10,9 @@ async fn await_members_reuses_persisted_deadline_after_reload_retry() {
         &[],
         &["completed".to_string()],
         None,
+        false,
+        false,
+        false,
     );
     let now_ms = SystemTime::now()
         .duration_since(UNIX_EPOCH)

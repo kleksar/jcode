@@ -1,14 +1,26 @@
 use super::loading::session_matches_picker_query;
 use super::*;
 
-/// The debug toggle is the only opt-in for positively identified workers.
-/// Unknown debug roots retain the legacy Active exception.
+/// A durable origin is authoritative. Before origins were persisted, workers
+/// were debug children, so retain that narrow legacy signature. A parent alone
+/// is deliberately insufficient: user-created forks must remain selectable.
+pub(super) fn is_swarm_worker(session: &SessionInfo) -> bool {
+    session.origin == SessionOrigin::SwarmWorker
+        || (session.origin == SessionOrigin::Unknown
+            && session.is_debug
+            && session.parent_id.is_some())
+}
+
+/// Debug visibility is opt-in for debug roots. Workers are never debug rows:
+/// keeping them out of this count prevents the toggle from promising to show
+/// sessions that are intentionally unavailable in every picker mode.
 pub(super) fn session_hidden_by_debug_toggle(
     session: &SessionInfo,
     mode: SessionFilterMode,
 ) -> bool {
-    session.origin == SessionOrigin::SwarmWorker
-        || (session.is_debug && !(mode == SessionFilterMode::Active && session.parent_id.is_none()))
+    !is_swarm_worker(session)
+        && session.is_debug
+        && !(mode == SessionFilterMode::Active && session.parent_id.is_none())
 }
 
 impl SessionPicker {
@@ -82,33 +94,27 @@ impl SessionPicker {
             .copied()
             .filter(|session_ref| {
                 self.session_by_ref(*session_ref).is_some_and(|session| {
-                    (show_test || !session_hidden_by_debug_toggle(session, filter_mode))
+                    !is_swarm_worker(session)
+                        && (show_test || !session_hidden_by_debug_toggle(session, filter_mode))
                         && self.session_matches_filter_mode(session, filter_mode)
                 })
             })
             .collect::<Vec<_>>();
 
         filtered.sort_by(|a, b| {
-            let a = self
-                .session_by_ref(*a)
-                .map(|session| session.last_message_time)
-                .unwrap_or_default();
-            let b = self
-                .session_by_ref(*b)
-                .map(|session| session.last_message_time)
-                .unwrap_or_default();
-            b.cmp(&a)
+            let display_key = |session_ref: SessionRef| {
+                self.session_by_ref(session_ref).map(|session| {
+                    let title = session.title.trim();
+                    let name = if title.is_empty() {
+                        session.short_name.trim()
+                    } else {
+                        title
+                    };
+                    (name.to_lowercase(), session.id.as_str())
+                })
+            };
+            display_key(*a).cmp(&display_key(*b))
         });
-        if filter_mode == SessionFilterMode::Active {
-            // Triage order for the active sessions manager: sessions that are
-            // ready for input (done streaming) float above ones still working,
-            // each group keeping the recency order from the sort above.
-            filtered.sort_by_key(|session_ref| {
-                self.session_by_ref(*session_ref)
-                    .map(|session| self.session_is_streaming(session))
-                    .unwrap_or(false)
-            });
-        }
         filtered
     }
 
@@ -238,17 +244,7 @@ impl SessionPicker {
             }
         }
 
-        saved_sessions.sort_by(|a, b| {
-            let a = self
-                .session_by_ref(*a)
-                .map(|session| session.last_message_time)
-                .unwrap_or_default();
-            let b = self
-                .session_by_ref(*b)
-                .map(|session| session.last_message_time)
-                .unwrap_or_default();
-            b.cmp(&a)
-        });
+        // `filtered_session_refs` already applies the displayed-name ordering.
 
         if !saved_sessions.is_empty() {
             self.items.push(PickerItem::SavedHeader {

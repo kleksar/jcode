@@ -369,6 +369,116 @@ fn swarm_strip_full_draw_writes_chips_row_above_status_line() {
     );
 }
 
+/// The persistent worker strip is part of the stable composer chrome, not the
+/// optional elastic overscroll surface. A long, paused transcript therefore
+/// cannot scroll the active worker out of view when overscroll is Off.
+#[test]
+fn swarm_strip_stays_above_input_with_overscroll_off_and_scrolled_history() {
+    let _lock = viewport_snapshot_test_lock();
+    clear_flicker_frame_history_for_tests();
+    crate::tui::info_widget::clear_widget_placements_for_tests();
+
+    let mut active = strip_member("owned-child", "owned-worker", "running");
+    active.runtime.model = Some("GPT-5.6".to_string());
+    active.runtime.effort = Some("medium".to_string());
+    active.runtime.provider = Some("Luna".to_string());
+    let state = TestState {
+        // This fixture deliberately models the retained Off setting: there is
+        // no elastic status row, even while history is longer than the viewport.
+        chat_overscroll_active: false,
+        display_messages: vec![DisplayMessage::assistant(
+            (1..=48)
+                .map(|line| format!("history line {line}"))
+                .collect::<Vec<_>>()
+                .join("\n"),
+        )],
+        messages_version: 1,
+        swarm_members: vec![
+            active,
+            strip_member("terminal-child", "terminal-worker", "completed"),
+        ],
+        ..Default::default()
+    };
+
+    let backend = TestBackend::new(96, 24);
+    let mut terminal = Terminal::new(backend).expect("test terminal");
+    terminal
+        .draw(|frame| crate::tui::ui::draw(frame, &state))
+        .expect("scrolled-history worker-strip draw should not panic");
+
+    let rows = buffer_rows(&terminal);
+    let worker_y = row_containing(&rows, "owned-worker");
+    let status = crate::tui::ui::last_status_area().expect("status area recorded");
+    let layout = crate::tui::ui::last_layout_snapshot().expect("layout snapshot");
+    let input = layout.input_area.expect("input area recorded");
+    assert!(
+        rows[worker_y].contains("GPT-5.6") && rows[worker_y].contains("medium"),
+        "worker row must show model and effort without a provider label: {}",
+        rows[worker_y]
+    );
+    assert!(
+        !rows[worker_y].contains("Luna"),
+        "worker row must not repeat its provider label: {}",
+        rows[worker_y]
+    );
+    assert!(
+        !rows.iter().any(|row| row.contains("terminal-worker")),
+        "terminal worker must stay out of the persistent active strip:\n{}",
+        rows.join("\n")
+    );
+    assert_eq!(
+        worker_y as u16 + 1,
+        status.y,
+        "strip must be immediately above status"
+    );
+    assert!(
+        status.bottom() <= input.y,
+        "strip/status chrome must remain above input"
+    );
+    assert!(
+        rows.iter().any(|row| row.contains("history line")),
+        "fixture must exercise a rendered history viewport"
+    );
+}
+
+/// When vertical strip capacity is exhausted, the visible `+N more` indicator
+/// is honest about hidden workers and still leaves the composer addressable.
+#[test]
+fn swarm_strip_narrow_overflow_indicates_hidden_workers_without_covering_input() {
+    let _lock = viewport_snapshot_test_lock();
+    clear_flicker_frame_history_for_tests();
+    crate::tui::info_widget::clear_widget_placements_for_tests();
+    let state = TestState {
+        display_messages: vec![DisplayMessage::assistant("narrow overflow")],
+        messages_version: 1,
+        swarm_members: (0..7)
+            .map(|index| strip_member(&format!("s{index}"), &format!("worker-{index}"), "running"))
+            .collect(),
+        ..Default::default()
+    };
+
+    let backend = TestBackend::new(80, 24);
+    let mut terminal = Terminal::new(backend).expect("test terminal");
+    terminal
+        .draw(|frame| crate::tui::ui::draw(frame, &state))
+        .expect("narrow overflow worker-strip draw should not panic");
+
+    let rows = buffer_rows(&terminal);
+    let status = crate::tui::ui::last_status_area().expect("status area recorded");
+    let layout = crate::tui::ui::last_layout_snapshot().expect("layout snapshot");
+    let input = layout.input_area.expect("input area recorded");
+    let strip_rows = &rows[..status.y as usize];
+    assert!(
+        strip_rows.iter().any(|row| row.contains("+4 more")),
+        "overflow must disclose hidden workers instead of implying all are visible:\n{}",
+        rows.join("\n")
+    );
+    assert!(
+        input.height > 0 && status.bottom() <= input.y,
+        "bounded strip must not consume or overlap the input area: status={status:?}, input={input:?}"
+    );
+}
+
 #[test]
 fn swarm_strip_full_draw_survives_narrow_width_sweep() {
     let _lock = viewport_snapshot_test_lock();
@@ -520,17 +630,14 @@ fn notification_full_draw_survives_overwide_swarm_plan_notice() {
     }
 }
 
-/// Regression: the inline swarm strip must not oscillate against the dock.
+/// Regression: active inline workers must remain visible through dock blinks.
 ///
-/// The strip row grows the bottom chrome, so every appearance shoves the
-/// transcript up one row. When the strip keyed off raw last-frame dock
-/// visibility, the dock's natural placement churn (hidden-in-place blinks
-/// while content scrolls under it) made the strip pop in and out every few
-/// frames: visible up/down flicker. Now the stand-down is sticky: an anchored
-/// (hidden-in-place) dock still counts as engaged, and disengagement is
-/// debounced by a linger.
+/// The dock may still report an engaged or hidden-in-place placement, but the
+/// main-chat strip is owned by the active worker view and must not disappear
+/// because of those placement blinks. The full swarm page remains the separate
+/// replacement for the strip.
 #[test]
-fn swarm_strip_stands_down_through_dock_blinks() {
+fn swarm_strip_keeps_active_workers_through_dock_blinks() {
     let _lock = viewport_snapshot_test_lock();
     use crate::tui::info_widget::{
         WidgetKind, calculate_placements, swarm_strip_stands_down_for_dock,
@@ -574,10 +681,9 @@ fn swarm_strip_stands_down_through_dock_blinks() {
         "strip must stand down while the dock shows"
     );
 
-    // Full-draw integration: with the dock engaged, ui::draw omits the strip
-    // row above the status line (TestState's empty widget data means this
-    // draw's own widget pass will clear the engagement afterwards, so this
-    // must be checked before continuing the state-machine sequence).
+    // Full-draw integration: even with the dock engaged, ui::draw keeps the
+    // active worker in the main-chat strip. The completed worker is filtered
+    // from this strip, while the full swarm page can still show it.
     {
         let state = TestState {
             display_messages: vec![DisplayMessage::assistant("coordinating agents")],
@@ -604,14 +710,18 @@ fn swarm_strip_stands_down_through_dock_blinks() {
             .collect::<Vec<_>>()
             .join("\n");
         assert!(
-            !above_status.contains("🐝") && !above_status.contains("researcher"),
-            "strip must not render while the dock stands it down, got: {above_status:?}"
+            above_status.contains("🐝") && above_status.contains("researcher"),
+            "active worker must remain in the strip while the dock is engaged, got: {above_status:?}"
+        );
+        assert!(
+            !above_status.contains("reviewer"),
+            "completed worker must stay out of the active strip, got: {above_status:?}"
         );
     }
 
     // Re-engage (the integration draw above cleared state via its own empty
     // widget pass), then blink the dock hidden-in-place: anchor retained,
-    // nothing placed. The strip must NOT pop back for the blink.
+    // nothing placed. Render again to prove the active strip does not pop out.
     crate::tui::info_widget::clear_widget_placements_for_tests();
     calculate_placements(messages_area, &wide_margins, &data);
     let blink = calculate_placements(messages_area, &covered_margins, &data);
@@ -621,20 +731,51 @@ fn swarm_strip_stands_down_through_dock_blinks() {
     );
     assert!(
         swarm_strip_stands_down_for_dock(),
-        "strip must keep standing down through a hidden-in-place dock blink"
+        "dock engagement should remain observable through a hidden-in-place blink"
     );
 
-    // Even after the anchor is abandoned (hidden too long), the linger keeps
-    // the strip down so a re-homing dock does not race a strip pop-in.
+    let state = TestState {
+        display_messages: vec![DisplayMessage::assistant("coordinating agents")],
+        messages_version: 1,
+        swarm_members: vec![
+            strip_member("s0", "researcher", "running"),
+            strip_member("s1", "reviewer", "completed"),
+        ],
+        ..Default::default()
+    };
+    clear_flicker_frame_history_for_tests();
+    let backend = TestBackend::new(120, 30);
+    let mut terminal = Terminal::new(backend).expect("test terminal");
+    terminal
+        .draw(|frame| crate::tui::ui::draw(frame, &state))
+        .expect("draw through hidden-in-place dock blink should not panic");
+    let status_area = crate::tui::ui::last_status_area().expect("status area recorded");
+    let rows = buffer_rows(&terminal);
+    let above_status = rows[..status_area.y as usize]
+        .iter()
+        .rev()
+        .take(2)
+        .cloned()
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        above_status.contains("🐝") && above_status.contains("researcher"),
+        "active worker must remain visible through the dock blink, got: {above_status:?}"
+    );
+
+    // Once the anchor is abandoned for long enough, the dock's own
+    // engagement state may release. This must not affect the strip's active
+    // worker rendering, which is asserted above while the blink is engaged.
     for _ in 0..32 {
         calculate_placements(messages_area, &covered_margins, &data);
     }
     assert!(
-        swarm_strip_stands_down_for_dock(),
-        "strip must keep standing down through the post-disengage linger"
+        !swarm_strip_stands_down_for_dock(),
+        "dock engagement should eventually release after the anchor is abandoned"
     );
 
-    // A real teardown (widget pass skipped entirely) releases the stand-down.
+    // A real teardown (widget pass skipped entirely) also leaves the strip
+    // free to remain visible.
     crate::tui::info_widget::note_widget_pass_skipped();
     assert!(
         !swarm_strip_stands_down_for_dock(),

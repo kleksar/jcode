@@ -363,12 +363,45 @@ pub(super) fn draw_messages(
     // the sticky previous-prompt preview, including at the top of the transcript.
     let (pinned_todo_band, pinned_todo_more_line) =
         pinned_todo_band_lines(app, text_render_area.width, render_area.height);
+    // An elastic overscroll reveal takes bottom rows temporarily. Decide whether
+    // the sticky previous-prompt band is present from the corresponding stable
+    // viewport, then hold that decision through the dwell. Otherwise a one-row
+    // pull can newly activate the preview and its boundary rows, turning into a
+    // multi-row jump; disabling it unconditionally would instead make an
+    // already-visible preview disappear and pull the viewport downward. Pinned
+    // `on` is stable, so it continues to use the current viewport directly.
+    let prompt_preview_enabled =
+        if crate::config::config().display.prompt_preview && app.chat_overscroll_active() {
+            let transient_height =
+                1u16.saturating_add(super::input_ui::overscroll_active_member_count(app));
+            let stable_area = Rect {
+                height: text_render_area.height.saturating_add(transient_height),
+                ..text_render_area
+            };
+            let stable_max_scroll = compute_max_scroll_with_prompt_preview(
+                total_lines,
+                wrapped_user_prompt_starts,
+                user_prompt_texts,
+                stable_area,
+                pinned_todo_band.len() as u16,
+                true,
+            );
+            compute_prompt_preview_line_count(
+                wrapped_user_prompt_starts,
+                user_prompt_texts,
+                stable_max_scroll,
+                text_render_area.width,
+            ) > 0
+        } else {
+            crate::config::config().display.prompt_preview
+        };
     let max_scroll = compute_max_scroll_with_prompt_preview(
         total_lines,
         wrapped_user_prompt_starts,
         user_prompt_texts,
         text_render_area,
         pinned_todo_band.len() as u16,
+        prompt_preview_enabled,
     );
 
     super::set_last_max_scroll(max_scroll);
@@ -403,7 +436,7 @@ pub(super) fn draw_messages(
     super::set_last_resolved_chat_scroll(scroll);
     super::set_last_chat_viewport_height(viewport_height);
 
-    let prompt_preview_lines = if crate::config::config().display.prompt_preview && scroll > 0 {
+    let prompt_preview_lines = if prompt_preview_enabled && scroll > 0 {
         compute_prompt_preview_line_count(
             wrapped_user_prompt_starts,
             user_prompt_texts,
@@ -1573,15 +1606,15 @@ fn compute_max_scroll_with_prompt_preview(
     user_prompt_texts: &[String],
     area: Rect,
     pinned_todo_lines: u16,
+    prompt_preview_enabled: bool,
 ) -> usize {
     let mut max_scroll = total_lines.saturating_sub(area.height as usize);
-    let preview_enabled = crate::config::config().display.prompt_preview;
-    if pinned_todo_lines == 0 && (max_scroll == 0 || !preview_enabled) {
+    if pinned_todo_lines == 0 && (max_scroll == 0 || !prompt_preview_enabled) {
         return max_scroll;
     }
 
     for _ in 0..4 {
-        let prompt_preview_lines = if preview_enabled {
+        let prompt_preview_lines = if prompt_preview_enabled {
             compute_prompt_preview_line_count(
                 wrapped_user_prompt_starts,
                 user_prompt_texts,

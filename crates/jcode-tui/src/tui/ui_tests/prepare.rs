@@ -43,6 +43,7 @@ fn chat_swarm_member(session_id: &str) -> crate::protocol::SwarmMemberStatus {
         ],
         working_dir: None,
         runtime: crate::protocol::SwarmMemberRuntime {
+            selected_model: None,
             model: Some("openai:gpt-5.6-sol".to_string()),
             provider: Some("OpenAI".to_string()),
             auth_method: Some("OAuth".to_string()),
