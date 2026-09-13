@@ -58,11 +58,12 @@ directory identity checks and a dead or PID-start-mismatched regular owner
 record. Every waiting state observes `JCODE_FAST_BUILD_LOCK_TIMEOUT` (default
 1800 seconds). A live owner is never killed.
 
-The outer lane exports `JCODE_DEV_CARGO_GATE_HELD=1` only while it owns the
-verified per-key lock. This is the single documented nested-lock protocol:
-dev_cargo skips its global gate for that invocation. Direct dev_cargo calls keep
-their existing global gate behavior. Different fast-build keys remain
-independent.
+The verified fast-build outer-lock path exports `JCODE_CARGO_GATE_HELD=1` only
+while it owns the verified per-key lock. This is the single documented
+nested-lock protocol: its nested dev_cargo invocation skips the broader global
+gate. Direct callers **MUST NOT** set `JCODE_CARGO_GATE_HELD`; direct dev_cargo
+calls retain the global gate, and `JCODE_CARGO_GATE=off` is the documented
+intentional concurrency override. Different fast-build keys remain independent.
 
 ## Retention
 

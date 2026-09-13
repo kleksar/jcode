@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::{RwLock, mpsc};
+use tokio::sync::{Mutex, OwnedMutexGuard, RwLock, mpsc};
 
 const AWAIT_MEMBERS_DIR: &str = "jcode-await-members";
 const FINAL_STATE_TTL: Duration = Duration::from_secs(6 * 60 * 60);
@@ -75,9 +75,120 @@ struct AwaitMembersWaiter {
 pub(crate) struct AwaitMembersRuntime {
     active_keys: Arc<RwLock<HashSet<String>>>,
     waiters: Arc<RwLock<HashMap<String, Vec<AwaitMembersWaiter>>>>,
+    /// Every in-process operation that can change the durable state or waiter
+    /// set for one semantic wait uses this lock. The state file is then written
+    /// while that operation still owns the lock, so a preference retry cannot
+    /// race a terminal claim with independent read-modify-write snapshots.
+    transactions: Arc<Mutex<HashMap<String, Arc<Mutex<()>>>>>,
+    #[cfg(test)]
+    transaction_pause: Arc<Mutex<Option<AwaitTransactionPause>>>,
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum AwaitTransactionOperation {
+    Request,
+    Finalize,
+    Cancel,
+}
+
+#[cfg(test)]
+#[derive(Clone)]
+struct AwaitTransactionPause {
+    operation: AwaitTransactionOperation,
+    entered: Arc<tokio::sync::Notify>,
+    release: Arc<tokio::sync::Notify>,
 }
 
 impl AwaitMembersRuntime {
+    /// Acquire the sole in-process transaction for `key`. Server lifecycle owns
+    /// one live server for a runtime directory: reload cancels persisted awaits
+    /// instead of resuming their old watcher, so a separate process never
+    /// concurrently continues this state machine. If that lifecycle premise is
+    /// relaxed, the durable format must gain a cross-process fencing token.
+    async fn transaction(
+        &self,
+        key: &str,
+        #[cfg(test)] operation: AwaitTransactionOperation,
+    ) -> OwnedMutexGuard<()> {
+        let lock = {
+            let mut transactions = self.transactions.lock().await;
+            transactions
+                .entry(key.to_string())
+                .or_insert_with(|| Arc::new(Mutex::new(())))
+                .clone()
+        };
+        let guard = lock.lock_owned().await;
+        #[cfg(test)]
+        if let Some(pause) = self.transaction_pause.lock().await.clone()
+            && pause.operation == operation
+        {
+            pause.entered.notify_one();
+            pause.release.notified().await;
+        }
+        guard
+    }
+
+    pub(super) async fn transaction_for_request(&self, key: &str) -> OwnedMutexGuard<()> {
+        self.transaction(
+            key,
+            #[cfg(test)]
+            AwaitTransactionOperation::Request,
+        )
+        .await
+    }
+
+    pub(super) async fn transaction_for_finalize(&self, key: &str) -> OwnedMutexGuard<()> {
+        self.transaction(
+            key,
+            #[cfg(test)]
+            AwaitTransactionOperation::Finalize,
+        )
+        .await
+    }
+
+    pub(super) async fn transaction_for_cancel(&self, key: &str) -> OwnedMutexGuard<()> {
+        self.transaction(
+            key,
+            #[cfg(test)]
+            AwaitTransactionOperation::Cancel,
+        )
+        .await
+    }
+
+    /// Terminal/cancelled states cannot be mutated again. Forget the map entry
+    /// only when this owner is the last holder besides the map: queued callers
+    /// retain the old Arc, serialize, and observe the committed terminal state
+    /// before the last one can clean it up.
+    pub(super) async fn forget_transaction(&self, key: &str) {
+        let mut transactions = self.transactions.lock().await;
+        if transactions
+            .get(key)
+            .is_some_and(|lock| Arc::strong_count(lock) <= 2)
+        {
+            transactions.remove(key);
+        }
+    }
+
+    #[cfg(test)]
+    pub(super) async fn pause_transaction_after_acquire(
+        &self,
+        operation: AwaitTransactionOperation,
+        entered: Arc<tokio::sync::Notify>,
+        release: Arc<tokio::sync::Notify>,
+    ) {
+        *self.transaction_pause.lock().await = Some(AwaitTransactionPause {
+            operation,
+            entered,
+            release,
+        });
+    }
+
+    #[cfg(test)]
+    pub(super) async fn clear_transaction_pause(&self) {
+        *self.transaction_pause.lock().await = None;
+    }
+
     pub(super) async fn add_waiter(
         &self,
         key: &str,
@@ -225,8 +336,9 @@ pub(super) fn ensure_pending_state(
 ) -> PersistedAwaitMembersState {
     if let Some(mut existing) = load_state(key).filter(PersistedAwaitMembersState::is_pending) {
         // Delivery flags are active mutable policy, not wait identity. The
-        // atomic durable replacement performed by save_state makes the latest
-        // duplicate request authoritative for the sole existing watcher.
+        // caller holds AwaitMembersRuntime's semantic-key transaction while
+        // replacing this durable record, so the latest duplicate request is
+        // authoritative for the sole existing watcher.
         if existing.background != background || existing.notify != notify || existing.wake != wake {
             existing.background = background;
             existing.notify = notify;

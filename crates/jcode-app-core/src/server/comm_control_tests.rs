@@ -2,9 +2,14 @@ use super::{handle_comm_assign_next, handle_comm_assign_task, handle_comm_task_c
 use crate::agent::Agent;
 use crate::message::{Message, StreamEvent, ToolDefinition};
 use crate::plan::PlanItem;
-use crate::protocol::ServerEvent;
+use crate::protocol::{AwaitedMemberStatus, ServerEvent};
 use crate::provider::{EventStream, Provider};
-use crate::server::comm_await::{CommAwaitMembersContext, handle_comm_await_members};
+use crate::server::await_members_state::{
+    AwaitTransactionOperation, ensure_pending_state, load_state, request_key,
+};
+use crate::server::comm_await::{
+    CommAwaitMembersContext, finalize_await, handle_comm_await_members,
+};
 use crate::server::{
     AwaitMembersRuntime, SwarmEvent, SwarmEventType, SwarmMember, SwarmMutationRuntime,
     VersionedPlan,
@@ -162,6 +167,7 @@ include!("comm_control_tests/await_lagged.rs");
 include!("comm_control_tests/await_resume_expired.rs");
 include!("comm_control_tests/await_background_expired.rs");
 include!("comm_control_tests/await_upgrade_background.rs");
+include!("comm_control_tests/await_linearization.rs");
 include!("comm_control_tests/dag_e2e.rs");
 include!("comm_control_tests/auto_worker_filter.rs");
 include!("comm_control_tests/client_attached_dispatch.rs");

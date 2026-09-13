@@ -171,29 +171,75 @@ fn background_completion_notification(
     format!("🐝 **Swarm await finished**\n\n{}", body)
 }
 
-/// Reload the latest persisted pending state for `state.key`, if any. Delivery
-/// prefs (background/notify/wake) can be updated by duplicate requests after a
-/// watcher captured its own copy at spawn, so re-reading before exit/finalize
-/// keeps the watcher in sync with what the requesting tool was last told.
-fn refresh_pending_state(state: &PersistedAwaitMembersState) -> Option<PersistedAwaitMembersState> {
-    load_state(&state.key).filter(PersistedAwaitMembersState::is_pending)
+/// Claim terminal ownership while holding the transaction shared with request
+/// preference updates, waiter replacement, and disconnect cancellation. The
+/// returned state is the exact durable final record, not a snapshot reloaded
+/// before the claim, and is the only state a terminal publisher may use.
+async fn claim_terminal_response(
+    runtime: &AwaitMembersRuntime,
+    state: &PersistedAwaitMembersState,
+    completed: bool,
+    members: Vec<AwaitedMemberStatus>,
+    summary: String,
+) -> Option<PersistedAwaitMembersState> {
+    let _transaction = runtime.transaction_for_finalize(&state.key).await;
+    let pending = load_state(&state.key).filter(PersistedAwaitMembersState::is_pending)?;
+    let committed = persist_final_response(&pending, completed, members, summary);
+    runtime.forget_transaction(&state.key).await;
+    Some(committed)
+}
+
+/// Atomically cancel a blocking watcher only if it still has no live waiter and
+/// has not been promoted to background delivery. A terminal claim that won
+/// first is left untouched for its sole publisher to deliver.
+async fn cancel_disconnected_blocking_await(
+    runtime: &AwaitMembersRuntime,
+    state: &PersistedAwaitMembersState,
+    members: Vec<AwaitedMemberStatus>,
+) -> bool {
+    let _transaction = runtime.transaction_for_cancel(&state.key).await;
+    let Some(current) = load_state(&state.key) else {
+        runtime.clear_active(&state.key).await;
+        runtime.forget_transaction(&state.key).await;
+        return true;
+    };
+    if !current.is_pending() {
+        return true;
+    }
+    if current.background || runtime.retain_open_waiters(&state.key).await != 0 {
+        return false;
+    }
+
+    let _ = persist_non_replayable_final_response(
+        &current,
+        false,
+        members,
+        "Await cancelled because requesting client disconnected.".to_string(),
+    );
+    let _ = runtime.take_waiters(&state.key).await;
+    runtime.clear_active(&state.key).await;
+    runtime.forget_transaction(&state.key).await;
+    true
 }
 
 /// Persist the terminal result, reply to any blocking socket waiters, and, when
 /// the await was started in background mode, publish a `SwarmAwaitCompleted`
 /// bus event so the server's bus monitor can wake/notify the requesting agent
 /// the same way background tasks do.
-async fn finalize_await(
+pub(super) async fn finalize_await(
     runtime: &AwaitMembersRuntime,
     state: &PersistedAwaitMembersState,
     completed: bool,
     members: Vec<AwaitedMemberStatus>,
     summary: String,
 ) {
-    // Deliver with the latest persisted prefs: a duplicate request may have
-    // changed background/notify/wake after the caller captured this copy.
-    let state = refresh_pending_state(state).unwrap_or_else(|| state.clone());
-    let _ = persist_final_response(&state, completed, members.clone(), summary.clone());
+    let Some(state) =
+        claim_terminal_response(runtime, state, completed, members.clone(), summary.clone()).await
+    else {
+        // Another watcher/cancellation already claimed this semantic wait. It
+        // owns all final delivery, so never publish a duplicate bus event.
+        return;
+    };
 
     if state.background && (state.notify || state.wake) {
         let notification = background_completion_notification(completed, &summary, &members);
@@ -261,14 +307,21 @@ pub(super) async fn spawn_or_resume_await_members(
             // Blocking waits stop watching once every socket waiter has
             // disconnected. Background watchers have no socket waiter, so they
             // keep running until they resolve or hit the deadline, delivering
-            // the result via notify/wake. Re-read the persisted prefs here: a
-            // duplicate request may have upgraded this wait to background mode
-            // after this watcher was spawned with a blocking-state copy.
-            let is_background = refresh_pending_state(&state)
+            // the result via notify/wake. This read is advisory only: the
+            // cancel path below rechecks the same policy under the per-key
+            // transaction before it can persist a cancellation.
+            let is_background = load_state(&state.key)
+                .filter(PersistedAwaitMembersState::is_pending)
                 .map(|latest| latest.background)
                 .unwrap_or(state.background);
-            if !is_background && await_members_runtime.retain_open_waiters(&key).await == 0 {
-                await_members_runtime.clear_active(&key).await;
+            if !is_background
+                && cancel_disconnected_blocking_await(
+                    &await_members_runtime,
+                    &state,
+                    member_statuses.clone(),
+                )
+                .await
+            {
                 return;
             }
 
@@ -279,26 +332,13 @@ pub(super) async fn spawn_or_resume_await_members(
                 // completion delivery after the requester has gone away.
                 biased;
                 _ = await_members_runtime.waiter_disconnects(&key), if !is_background => {
-                    // Re-check persisted delivery mode before cancelling: a
-                    // duplicate can promote this blocking wait to background
-                    // while this watcher is asleep on the old socket waiter.
-                    let is_background = refresh_pending_state(&state)
-                        .map(|latest| latest.background)
-                        .unwrap_or(state.background);
-                    if !is_background
-                        && await_members_runtime.retain_open_waiters(&key).await == 0
+                    if cancel_disconnected_blocking_await(
+                        &await_members_runtime,
+                        &state,
+                        member_statuses,
+                    )
+                    .await
                     {
-                        // Keep a durable audit record but deliberately do not
-                        // replay it or publish a wake/notification. A later
-                        // request must evaluate live status as a fresh await.
-                        let _ = persist_non_replayable_final_response(
-                            &state,
-                            false,
-                            member_statuses,
-                            "Await cancelled because requesting client disconnected.".to_string(),
-                        );
-                        let _ = await_members_runtime.take_waiters(&key).await;
-                        await_members_runtime.clear_active(&key).await;
                         return;
                     }
                 }
@@ -325,7 +365,9 @@ pub(super) async fn spawn_or_resume_await_members(
                             continue;
                         }
                         Err(broadcast::error::RecvError::Closed) => {
+                            let _transaction = await_members_runtime.transaction_for_cancel(&key).await;
                             await_members_runtime.clear_active(&key).await;
+                            await_members_runtime.forget_transaction(&key).await;
                             return;
                         }
                     }
@@ -374,6 +416,14 @@ pub(super) async fn handle_comm_await_members(
             &target_status,
             mode.as_deref(),
         );
+        // This covers final-state replay, preference upsert, waiter
+        // replacement, active ownership, and any immediate expiration claim.
+        // A retry queued behind a terminal claimant observes that committed
+        // result instead of writing its preferences over the final record.
+        let transaction = ctx
+            .await_members_runtime
+            .transaction_for_request(&key)
+            .await;
         let mut persisted = load_state(&key);
 
         let initial_statuses = awaited_member_statuses(
@@ -402,6 +452,7 @@ pub(super) async fn handle_comm_await_members(
                         summary: final_response.summary,
                         background_started: false,
                     });
+                ctx.await_members_runtime.forget_transaction(&key).await;
                 return;
             }
 
@@ -494,6 +545,7 @@ pub(super) async fn handle_comm_await_members(
             }
             if already_expired {
                 let summary = timeout_summary(&initial_statuses);
+                drop(transaction);
                 finalize_await(
                     ctx.await_members_runtime,
                     &state,
@@ -551,11 +603,10 @@ pub(super) async fn handle_comm_await_members(
 
         if already_expired {
             let summary = timeout_summary(&initial_statuses);
-            let _ =
-                persist_final_response(&state, false, initial_statuses.clone(), summary.clone());
-            respond_to_waiters(
+            drop(transaction);
+            finalize_await(
                 ctx.await_members_runtime,
-                &key,
+                &state,
                 false,
                 initial_statuses,
                 summary,
@@ -658,22 +709,24 @@ pub(super) async fn resume_background_awaits(
     await_members_runtime: &AwaitMembersRuntime,
 ) {
     let pending = all_pending_await_members_including_expired();
-    let _ = (
-        swarm_members,
-        swarms_by_id,
-        swarm_event_tx,
-        await_members_runtime,
-    );
+    let _ = (swarm_members, swarms_by_id, swarm_event_tx);
     let mut cancelled_orphans = 0usize;
     for state in pending {
-        let _ = persist_non_replayable_final_response(
-            &state,
-            false,
-            Vec::new(),
-            "Await cancelled because reload orphaned its watcher. Rerun the await if it is still needed; the retry uses current member state and a fresh timeout."
-                .to_string(),
-        );
-        cancelled_orphans += 1;
+        let _transaction = await_members_runtime
+            .transaction_for_cancel(&state.key)
+            .await;
+        if let Some(pending) = load_state(&state.key).filter(PersistedAwaitMembersState::is_pending)
+        {
+            let _ = persist_non_replayable_final_response(
+                &pending,
+                false,
+                Vec::new(),
+                "Await cancelled because reload orphaned its watcher. Rerun the await if it is still needed; the retry uses current member state and a fresh timeout."
+                    .to_string(),
+            );
+            await_members_runtime.forget_transaction(&state.key).await;
+            cancelled_orphans += 1;
+        }
     }
 
     if cancelled_orphans > 0 {
