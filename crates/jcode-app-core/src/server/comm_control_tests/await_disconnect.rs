@@ -71,9 +71,6 @@ async fn await_members_stops_when_requesting_client_disconnects() {
         &[],
         &["completed".to_string()],
         None,
-        false,
-        false,
-        false,
     );
     assert!(
         await_runtime.mark_active_if_new(&key).await,

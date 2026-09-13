@@ -19,7 +19,7 @@ async fn await_members_blocking_to_background_upgrade_survives_waiter_disconnect
     let mut bus_rx = crate::bus::Bus::global().subscribe();
 
     // First request: blocking. Spawns the watcher with a blocking-state copy.
-    let (blocking_tx, blocking_rx) = mpsc::unbounded_channel();
+    let (blocking_tx, mut blocking_rx) = mpsc::unbounded_channel();
     handle_comm_await_members(
         1,
         requester.to_string(),
@@ -80,6 +80,49 @@ async fn await_members_blocking_to_background_upgrade_survives_waiter_disconnect
         other => panic!("expected CommAwaitMembersResponse, got {other:?}"),
     }
 
+    // The original blocking request is atomically promoted rather than left
+    // behind as a second terminal waiter.
+    match tokio::time::timeout(Duration::from_secs(1), blocking_rx.recv())
+        .await
+        .expect("promoted blocking request should be released")
+        .expect("promoted blocking channel should stay open")
+    {
+        ServerEvent::CommAwaitMembersResponse {
+            background_started, ..
+        } => assert!(background_started),
+        other => panic!("expected promotion response, got {other:?}"),
+    }
+
+    // A same-semantic retry changes only active delivery policy. The key and
+    // watcher remain the same, and the latest false wake preference must win.
+    let (latest_tx, mut latest_rx) = mpsc::unbounded_channel();
+    handle_comm_await_members(
+        3,
+        requester.to_string(),
+        vec!["completed".to_string()],
+        vec![],
+        None,
+        Some(60),
+        true,
+        true,
+        false,
+        CommAwaitMembersContext {
+            client_event_tx: &latest_tx,
+            swarm_members: &swarm_members,
+            swarms_by_id: &swarms_by_id,
+            swarm_event_tx: &swarm_event_tx,
+            await_members_runtime: &await_runtime,
+        },
+    )
+    .await;
+    assert!(matches!(
+        latest_rx.recv().await,
+        Some(ServerEvent::CommAwaitMembersResponse {
+            background_started: true,
+            ..
+        })
+    ));
+
     // The original blocking waiter disconnects. The upgraded watcher must keep
     // running instead of exiting on waiter disconnect without finalizing.
     drop(blocking_rx);
@@ -128,9 +171,34 @@ async fn await_members_blocking_to_background_upgrade_survives_waiter_disconnect
         }
     })
     .await
-    .expect("upgraded background await should deliver SwarmAwaitCompleted despite waiter disconnect");
+    .expect(
+        "upgraded background await should deliver SwarmAwaitCompleted despite waiter disconnect",
+    );
 
     assert!(event.completed, "await should complete once peer is done");
     assert!(event.notify);
-    assert!(event.wake);
+    assert!(
+        !event.wake,
+        "latest retry must replace the earlier wake=true"
+    );
+
+    let second_terminal = tokio::time::timeout(Duration::from_millis(50), async {
+        loop {
+            match bus_rx.recv().await {
+                Ok(crate::bus::BusEvent::SwarmAwaitCompleted(event))
+                    if event.session_id == requester =>
+                {
+                    return true;
+                }
+                Ok(_) | Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => return false,
+            }
+        }
+    })
+    .await
+    .unwrap_or(false);
+    assert!(
+        !second_terminal,
+        "semantic retries must not create a second terminal event"
+    );
 }

@@ -35,9 +35,9 @@ pub struct PersistedAwaitMembersState {
     pub mode: Option<String>,
     pub created_at_unix_ms: u64,
     pub deadline_unix_ms: u64,
-    /// When true, the wait runs as a detached background watcher that delivers
-    /// its result via notify/wake instead of blocking the requesting turn.
-    /// Background watchers are auto-resumed at server startup after a reload.
+    /// Active delivery policy for the semantic wait. It is deliberately not
+    /// part of `request_key`: a retry updates this policy in place while the
+    /// same watcher continues to own the target and deadline.
     #[serde(default)]
     pub background: bool,
     /// Surface a completion notification card to attached clients.
@@ -180,9 +180,6 @@ pub(super) fn request_key(
     requested_ids: &[String],
     target_status: &[String],
     mode: Option<&str>,
-    background: bool,
-    notify: bool,
-    wake: bool,
 ) -> String {
     let mut requested = requested_ids.to_vec();
     requested.sort();
@@ -198,9 +195,6 @@ pub(super) fn request_key(
             requested.join("\u{1f}"),
             target.join("\u{1f}"),
             mode.unwrap_or("all").to_string(),
-            background.to_string(),
-            notify.to_string(),
-            wake.to_string(),
         ],
     )
 }
@@ -229,7 +223,16 @@ pub(super) fn ensure_pending_state(
     notify: bool,
     wake: bool,
 ) -> PersistedAwaitMembersState {
-    if let Some(existing) = load_state(key).filter(PersistedAwaitMembersState::is_pending) {
+    if let Some(mut existing) = load_state(key).filter(PersistedAwaitMembersState::is_pending) {
+        // Delivery flags are active mutable policy, not wait identity. The
+        // atomic durable replacement performed by save_state makes the latest
+        // duplicate request authoritative for the sole existing watcher.
+        if existing.background != background || existing.notify != notify || existing.wake != wake {
+            existing.background = background;
+            existing.notify = notify;
+            existing.wake = wake;
+            save_state(&existing);
+        }
         return existing;
     }
 

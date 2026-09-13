@@ -12,7 +12,7 @@ if [[ "${1:-}" == --print-fast-build-fingerprint ]]; then
   { printf 'fake-runner-v1\nflags=%s\ntoolchain=%s\nwrapper=%s\n' "${RUSTFLAGS:-}" "${TEST_TOOLCHAIN:-}" "${RUSTC_WRAPPER:-}"; } | shasum -a 256 | awk '{print "fast_build_runner_fingerprint=" $1}'
   exit 0
 fi
-printf 'gate=%s target=%s args=' "${JCODE_DEV_CARGO_GATE_HELD:-0}" "${CARGO_TARGET_DIR:-}" >>"${TEST_CARGO_LOG:?}"
+printf 'gate=%s target=%s args=' "${JCODE_CARGO_GATE_HELD:-0}" "${CARGO_TARGET_DIR:-}" >>"${TEST_CARGO_LOG:?}"
 printf '%q ' "$@" >>"$TEST_CARGO_LOG"; printf '\n' >>"$TEST_CARGO_LOG"
 [[ "${TEST_CARGO_SLEEP:-0}" == 0 ]] || sleep "$TEST_CARGO_SLEEP"
 EOF
@@ -77,4 +77,53 @@ sleep 1
 RUSTFLAGS=-Cb JCODE_FAST_CARGO="$tmp/bin/cargo-runner" JCODE_CACHE_DIR="$tmp/cache" TEST_CARGO_LOG="$tmp/cargo.log" "$tmp/two/scripts/fast_build.sh" cargo check
 wait "$first"
 [[ $(grep -c 'gate=1' "$tmp/cargo.log") -eq 2 ]] || fail 'wrapper did not receive nested gate bypass'
+
+# Exercise the actual fast_build -> dev_cargo handoff with fake cargo/flock.
+# Each outer compatibility lock suppresses the inner host-wide acquisition;
+# direct dev_cargo retains exactly one acquisition. Different compatibility
+# keys must also overlap rather than serializing behind each other.
+dev_cargo="$repo_root/scripts/dev_cargo.sh"
+cat >"$tmp/bin/cargo" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+printf 'cargo-start %s\n' "$(date +%s%N)" >>"${TEST_DEV_CARGO_LOG:?}"
+sleep "${TEST_DEV_CARGO_SLEEP:-0}"
+printf 'cargo-end %s\n' "$(date +%s%N)" >>"${TEST_DEV_CARGO_LOG:?}"
+EOF
+cat >"$tmp/bin/rustc" <<'EOF'
+#!/usr/bin/env bash
+if [[ "${1:-}" == "-vV" ]]; then
+  printf 'rustc 1.98.1 (fake fast-build regression)\n'
+  exit 0
+fi
+exit 0
+EOF
+cat >"$tmp/bin/flock" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+printf 'flock %s\n' "$*" >>"${TEST_DEV_CARGO_LOG:?}"
+exit 0
+EOF
+chmod +x "$tmp/bin/cargo" "$tmp/bin/rustc" "$tmp/bin/flock"
+: >"$tmp/dev-cargo.log"
+PATH="$tmp/bin:$PATH" JCODE_RUST_ACTION_LOG=off JCODE_SCCACHE=off \
+  JCODE_FAST_CARGO="$dev_cargo" JCODE_CACHE_DIR="$tmp/cache" \
+  TEST_DEV_CARGO_LOG="$tmp/dev-cargo.log" TEST_DEV_CARGO_SLEEP=1 \
+  RUSTFLAGS=-Ca "$tmp/one/scripts/fast_build.sh" cargo check >/dev/null & first=$!
+PATH="$tmp/bin:$PATH" JCODE_RUST_ACTION_LOG=off JCODE_SCCACHE=off \
+  JCODE_FAST_CARGO="$dev_cargo" JCODE_CACHE_DIR="$tmp/cache" \
+  TEST_DEV_CARGO_LOG="$tmp/dev-cargo.log" TEST_DEV_CARGO_SLEEP=1 \
+  RUSTFLAGS=-Cb "$tmp/two/scripts/fast_build.sh" cargo check >/dev/null & second=$!
+wait "$first"; wait "$second"
+[[ $(grep -c '^flock ' "$tmp/dev-cargo.log") -eq 0 ]] || fail 'nested fast-build invocation acquired global Cargo gate'
+first_start=$(sed -n 's/^cargo-start //p' "$tmp/dev-cargo.log" | sed -n '1p')
+second_start=$(sed -n 's/^cargo-start //p' "$tmp/dev-cargo.log" | sed -n '2p')
+first_end=$(sed -n 's/^cargo-end //p' "$tmp/dev-cargo.log" | sed -n '1p')
+second_end=$(sed -n 's/^cargo-end //p' "$tmp/dev-cargo.log" | sed -n '2p')
+[[ -n "$first_start" && -n "$second_start" && "$first_start" -lt "$second_end" && "$second_start" -lt "$first_end" ]] || fail 'distinct compatibility keys did not overlap'
+: >"$tmp/dev-cargo.log"
+PATH="$tmp/bin:$PATH" JCODE_RUST_ACTION_LOG=off JCODE_SCCACHE=off \
+  JCODE_CARGO_GATE_PATH="$tmp/direct-cargo.lock" \
+  TEST_DEV_CARGO_LOG="$tmp/dev-cargo.log" "$dev_cargo" check >/dev/null
+[[ $(grep -c '^flock ' "$tmp/dev-cargo.log") -eq 1 ]] || fail 'direct dev_cargo did not acquire exactly one global Cargo gate'
 echo 'fast build lane tests passed'

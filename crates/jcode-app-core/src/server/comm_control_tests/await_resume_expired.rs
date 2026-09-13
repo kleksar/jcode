@@ -1,5 +1,5 @@
 #[tokio::test]
-async fn resume_background_awaits_finalizes_states_expired_while_down() {
+async fn resume_background_awaits_cancels_expired_background_state_without_delivery() {
     let (_env, _runtime_dir) = RuntimeEnvGuard::new();
     let swarm_id = "swarm-resume-expired";
     let requester = "req-resume-expired";
@@ -10,9 +10,6 @@ async fn resume_background_awaits_finalizes_states_expired_while_down() {
         &[],
         &["completed".to_string()],
         None,
-        true,
-        true,
-        true,
     );
     let now_ms = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -57,43 +54,39 @@ async fn resume_background_awaits_finalizes_states_expired_while_down() {
     )
     .await;
 
-    // The expired state must be finalized as a timeout so the promised
-    // notify/wake fires.
-    let event = tokio::time::timeout(Duration::from_secs(2), async {
+    // Reload orphaning is non-replayable even for a background request. It
+    // must not emit the pre-reload notify/wake with an expired timeout.
+    let stale_delivery = tokio::time::timeout(Duration::from_millis(50), async {
         loop {
             match bus_rx.recv().await {
                 Ok(crate::bus::BusEvent::SwarmAwaitCompleted(event))
                     if event.session_id == requester =>
                 {
-                    return event;
+                    return true;
                 }
                 Ok(_) => continue,
                 Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
                 Err(tokio::sync::broadcast::error::RecvError::Closed) => {
-                    panic!("bus closed before SwarmAwaitCompleted arrived")
+                    return false;
                 }
             }
         }
     })
     .await
-    .expect("expired background await should publish SwarmAwaitCompleted on resume");
-
-    assert!(!event.completed, "expired await should finalize as timeout");
+    .unwrap_or(false);
     assert!(
-        event.summary.contains("Timed out"),
-        "summary: {}",
-        event.summary
+        !stale_delivery,
+        "reload must not deliver stale await completion"
     );
-    assert!(event.notify);
-    assert!(event.wake);
 
     let final_state = crate::server::await_members_state::load_state(&key)
         .expect("state should still be persisted");
     let final_response = final_state
         .final_response
-        .expect("expired await should have a persisted final response");
+        .expect("expired await should be cancelled during reload");
     assert!(!final_response.completed);
-    assert!(final_response.summary.contains("Timed out"));
+    assert!(final_response.summary.contains("reload orphaned"));
+    assert!(!final_response.replayable);
 }
 
 #[tokio::test]
@@ -108,9 +101,6 @@ async fn resume_background_awaits_cancels_orphaned_requester_without_wake() {
         &[peer.to_string()],
         &["completed".to_string()],
         None,
-        true,
-        true,
-        true,
     );
     let now_ms = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -172,7 +162,7 @@ async fn resume_background_awaits_cancels_orphaned_requester_without_wake() {
         .final_response
         .expect("orphan await should be cancelled during resume");
     assert!(!final_response.completed);
-    assert!(final_response.summary.contains("no longer in this swarm"));
+    assert!(final_response.summary.contains("reload orphaned"));
     assert!(
         !final_response.replayable,
         "orphan cancellation audit record must not be replayed"
@@ -188,6 +178,8 @@ async fn resume_background_awaits_cancels_orphaned_requester_without_wake() {
         HashSet::from([requester.to_string(), peer.to_string()]),
     );
     let (client_tx, mut client_rx) = mpsc::unbounded_channel();
+    // The retry sees current terminal status instead of the old cancellation,
+    // and cannot replay the stale pre-reload wake/notification.
     handle_comm_await_members(
         1,
         requester.to_string(),
@@ -230,4 +222,23 @@ async fn resume_background_awaits_cancels_orphaned_requester_without_wake() {
         }
         other => panic!("expected CommAwaitMembersResponse, got {other:?}"),
     }
+    let stale_delivery = tokio::time::timeout(Duration::from_millis(50), async {
+        loop {
+            match bus_rx.recv().await {
+                Ok(crate::bus::BusEvent::SwarmAwaitCompleted(event))
+                    if event.session_id == requester =>
+                {
+                    return true;
+                }
+                Ok(_) | Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => return false,
+            }
+        }
+    })
+    .await
+    .unwrap_or(false);
+    assert!(
+        !stale_delivery,
+        "retry must not receive a stale reload wake"
+    );
 }

@@ -1081,8 +1081,10 @@ cargo_action_needs_gate() {
 # Serialize compile-capable local Cargo actions across all jcode worktrees. A
 # single Cargo invocation can still use all jobs selected by select_build_jobs,
 # so this trades harmful process-level competition for useful crate-level
-# parallelism. Nested wrapper calls inherit JCODE_CARGO_GATE_HELD and cannot
-# deadlock. Set JCODE_CARGO_GATE=off for an intentional concurrency experiment.
+# parallelism. `fast_build.sh` sets JCODE_CARGO_GATE_HELD only while it owns
+# its compatibility lock, so its nested dev_cargo invocation cannot deadlock.
+# Direct callers must not set it: JCODE_CARGO_GATE=off is the documented
+# intentional concurrency override.
 acquire_cargo_gate() {
   cargo_gate_status="not-needed"
   cargo_gate_wait_ms=0
@@ -1108,7 +1110,10 @@ acquire_cargo_gate() {
   gate_dir="${JCODE_CARGO_GATE_DIR:-${XDG_RUNTIME_DIR:-${TMPDIR:-/tmp}}}"
   mkdir -p "$gate_dir"
   gate_path="${JCODE_CARGO_GATE_PATH:-$gate_dir/jcode-cargo-build.lock}"
-  exec {cargo_gate_fd}>"$gate_path"
+  # macOS still ships Bash 3.2, which lacks `exec {var}>file`; a fixed private
+  # descriptor keeps the gate usable from the supported system shell.
+  exec 9>"$gate_path"
+  cargo_gate_fd=9
   if ! flock -n "$cargo_gate_fd"; then
     log "waiting for the host-wide Cargo gate ($gate_path)"
     wait_started_ns=$(date +%s%N)

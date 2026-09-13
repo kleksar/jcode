@@ -94,7 +94,11 @@ acquire_lock() {
       # Atomic hard-link publication: owner and token are the same regular inode.
       ln "$token_file" "$lock_dir/owner" || { rm "$token_file"; rmdir "$lock_dir"; die 'could not publish lock ownership'; }
       lock_owned=1
-      export JCODE_FAST_BUILD_LOCK_KEY="$compat_key" JCODE_DEV_CARGO_GATE_HELD=1
+      # dev_cargo recognizes this internal wrapper handoff and therefore does
+      # not acquire its broader host-wide gate inside this compatibility lane.
+      # It is an optimization contract between these two scripts, not a public
+      # concurrency override: direct callers still acquire the Cargo gate.
+      export JCODE_FAST_BUILD_LOCK_KEY="$compat_key" JCODE_CARGO_GATE_HELD=1
       trap release_lock EXIT
       trap 'release_lock; exit 128' HUP INT TERM
       log "acquired shared build lane $compat_key"
