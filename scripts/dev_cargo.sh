@@ -4,6 +4,16 @@ set -euo pipefail
 repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 cd "$repo_root"
 
+# This is a deliberately narrow interface for scripts/fast_build.sh.  It runs
+# the same configuration path as a real invocation, then emits only a digest
+# of the effective compiler configuration.  It never invokes Cargo and it
+# never prints potentially sensitive environment values.
+print_fast_build_fingerprint=0
+if [[ "${1:-}" == "--print-fast-build-fingerprint" ]]; then
+  print_fast_build_fingerprint=1
+  shift
+fi
+
 # `selfdev test` installs a shell-level `cargo` shim so raw `cargo test/check`
 # commands receive this wrapper's memory, linker, feature, and toolchain policy.
 # Exporting this recursion guard makes the final `cargo` invocation below bypass
@@ -751,6 +761,35 @@ configure_linux_linker() {
   esac
 }
 
+fingerprint_hash() {
+  if command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 | awk '{print $1}'
+  elif command -v sha256sum >/dev/null 2>&1; then
+    sha256sum | awk '{print $1}'
+  else
+    return 1
+  fi
+}
+
+effective_fast_build_fingerprint() {
+  # Include the configured rustc identity, all artifact-affecting effective
+  # settings selected above, and the content of the runner/config files. Hash
+  # values as one stream so this interface cannot reveal flags or paths.
+  {
+    printf 'rustc-vV\n'
+    rustc -vV 2>/dev/null || return 1
+    printf 'toolchain=%s\nwrapper=%s\nworkspace-wrapper=%s\nrustflags=%s\ntarget-rustflags=%s\ntarget-linker=%s\nbuild-target=%s\nincremental=%s\n' \
+      "${RUSTUP_TOOLCHAIN:-}" "${RUSTC_WRAPPER:-}" "${RUSTC_WORKSPACE_WRAPPER:-}" "${RUSTFLAGS:-}" \
+      "${CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS:-}" "${CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER:-}" \
+      "${CARGO_BUILD_TARGET:-}" "${CARGO_INCREMENTAL:-}"
+    for file in "$repo_root/scripts/dev_cargo.sh" "$repo_root/Cargo.toml" "$repo_root/.cargo/config.toml" "$repo_root/.cargo/config"; do
+      [[ -f "$file" ]] || continue
+      printf 'file=%s\n' "${file#$repo_root/}"
+      fingerprint_hash < "$file" || return 1
+    done
+  } | fingerprint_hash
+}
+
 print_setup() {
   if [[ -n "${JCODE_DEV_FEATURE_PROFILE:-}" && "${JCODE_DEV_FEATURE_PROFILE}" != "default" ]]; then
     feature_profile_status="${JCODE_DEV_FEATURE_PROFILE}"
@@ -1042,8 +1081,10 @@ cargo_action_needs_gate() {
 # Serialize compile-capable local Cargo actions across all jcode worktrees. A
 # single Cargo invocation can still use all jobs selected by select_build_jobs,
 # so this trades harmful process-level competition for useful crate-level
-# parallelism. Nested wrapper calls inherit JCODE_CARGO_GATE_HELD and cannot
-# deadlock. Set JCODE_CARGO_GATE=off for an intentional concurrency experiment.
+# parallelism. `fast_build.sh` sets JCODE_CARGO_GATE_HELD only while it owns
+# its compatibility lock, so its nested dev_cargo invocation cannot deadlock.
+# Direct callers must not set it: JCODE_CARGO_GATE=off is the documented
+# intentional concurrency override.
 acquire_cargo_gate() {
   cargo_gate_status="not-needed"
   cargo_gate_wait_ms=0
@@ -1069,7 +1110,10 @@ acquire_cargo_gate() {
   gate_dir="${JCODE_CARGO_GATE_DIR:-${XDG_RUNTIME_DIR:-${TMPDIR:-/tmp}}}"
   mkdir -p "$gate_dir"
   gate_path="${JCODE_CARGO_GATE_PATH:-$gate_dir/jcode-cargo-build.lock}"
-  exec {cargo_gate_fd}>"$gate_path"
+  # macOS still ships Bash 3.2, which lacks `exec {var}>file`; a fixed private
+  # descriptor keeps the gate usable from the supported system shell.
+  exec 9>"$gate_path"
+  cargo_gate_fd=9
   if ! flock -n "$cargo_gate_fd"; then
     log "waiting for the host-wide Cargo gate ($gate_path)"
     wait_started_ns=$(date +%s%N)
@@ -1109,6 +1153,15 @@ cargo_argv=()
 while IFS= read -r -d '' arg; do
   cargo_argv+=("$arg")
 done < <(build_cargo_argv "$@")
+
+if [[ "$print_fast_build_fingerprint" == "1" ]]; then
+  fingerprint=$(effective_fast_build_fingerprint) || {
+    log 'could not calculate effective fast-build fingerprint'
+    exit 2
+  }
+  printf 'fast_build_runner_fingerprint=%s\n' "$fingerprint"
+  exit 0
+fi
 
 start_rust_action_log
 

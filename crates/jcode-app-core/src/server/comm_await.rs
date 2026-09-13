@@ -1,7 +1,6 @@
 use super::await_members_state::{
     PersistedAwaitMembersState, all_pending_await_members_including_expired, ensure_pending_state,
     load_state, persist_final_response, persist_non_replayable_final_response, request_key,
-    save_state,
 };
 use super::{AwaitMembersRuntime, SwarmEvent, SwarmMember};
 use crate::bus::{Bus, BusEvent, SwarmAwaitCompleted, UiActivity};
@@ -172,29 +171,72 @@ fn background_completion_notification(
     format!("🐝 **Swarm await finished**\n\n{}", body)
 }
 
-/// Reload the latest persisted pending state for `state.key`, if any. Delivery
-/// prefs (background/notify/wake) can be updated by duplicate requests after a
-/// watcher captured its own copy at spawn, so re-reading before exit/finalize
-/// keeps the watcher in sync with what the requesting tool was last told.
-fn refresh_pending_state(state: &PersistedAwaitMembersState) -> Option<PersistedAwaitMembersState> {
-    load_state(&state.key).filter(PersistedAwaitMembersState::is_pending)
+/// Claim terminal ownership while holding the transaction shared with request
+/// preference updates, waiter replacement, and disconnect cancellation. The
+/// returned state is the exact durable final record, not a snapshot reloaded
+/// before the claim, and is the only state a terminal publisher may use.
+async fn claim_terminal_response(
+    runtime: &AwaitMembersRuntime,
+    state: &PersistedAwaitMembersState,
+    completed: bool,
+    members: Vec<AwaitedMemberStatus>,
+    summary: String,
+) -> Option<PersistedAwaitMembersState> {
+    let _transaction = runtime.transaction_for_finalize(&state.key).await;
+    let pending = load_state(&state.key).filter(PersistedAwaitMembersState::is_pending)?;
+    let committed = persist_final_response(&pending, completed, members, summary);
+    Some(committed)
+}
+
+/// Atomically cancel a blocking watcher only if it still has no live waiter and
+/// has not been promoted to background delivery. A terminal claim that won
+/// first is left untouched for its sole publisher to deliver.
+async fn cancel_disconnected_blocking_await(
+    runtime: &AwaitMembersRuntime,
+    state: &PersistedAwaitMembersState,
+    members: Vec<AwaitedMemberStatus>,
+) -> bool {
+    let _transaction = runtime.transaction_for_cancel(&state.key).await;
+    let Some(current) = load_state(&state.key) else {
+        runtime.clear_active(&state.key).await;
+        return true;
+    };
+    if !current.is_pending() {
+        return true;
+    }
+    if current.background || runtime.retain_open_waiters(&state.key).await != 0 {
+        return false;
+    }
+
+    let _ = persist_non_replayable_final_response(
+        &current,
+        false,
+        members,
+        "Await cancelled because requesting client disconnected.".to_string(),
+    );
+    let _ = runtime.take_waiters(&state.key).await;
+    runtime.clear_active(&state.key).await;
+    true
 }
 
 /// Persist the terminal result, reply to any blocking socket waiters, and, when
 /// the await was started in background mode, publish a `SwarmAwaitCompleted`
 /// bus event so the server's bus monitor can wake/notify the requesting agent
 /// the same way background tasks do.
-async fn finalize_await(
+pub(super) async fn finalize_await(
     runtime: &AwaitMembersRuntime,
     state: &PersistedAwaitMembersState,
     completed: bool,
     members: Vec<AwaitedMemberStatus>,
     summary: String,
 ) {
-    // Deliver with the latest persisted prefs: a duplicate request may have
-    // changed background/notify/wake after the caller captured this copy.
-    let state = refresh_pending_state(state).unwrap_or_else(|| state.clone());
-    let _ = persist_final_response(&state, completed, members.clone(), summary.clone());
+    let Some(state) =
+        claim_terminal_response(runtime, state, completed, members.clone(), summary.clone()).await
+    else {
+        // Another watcher/cancellation already claimed this semantic wait. It
+        // owns all final delivery, so never publish a duplicate bus event.
+        return;
+    };
 
     if state.background && (state.notify || state.wake) {
         let notification = background_completion_notification(completed, &summary, &members);
@@ -262,18 +304,41 @@ pub(super) async fn spawn_or_resume_await_members(
             // Blocking waits stop watching once every socket waiter has
             // disconnected. Background watchers have no socket waiter, so they
             // keep running until they resolve or hit the deadline, delivering
-            // the result via notify/wake. Re-read the persisted prefs here: a
-            // duplicate request may have upgraded this wait to background mode
-            // after this watcher was spawned with a blocking-state copy.
-            let is_background = refresh_pending_state(&state)
+            // the result via notify/wake. This read is advisory only: the
+            // cancel path below rechecks the same policy under the per-key
+            // transaction before it can persist a cancellation.
+            let is_background = load_state(&state.key)
+                .filter(PersistedAwaitMembersState::is_pending)
                 .map(|latest| latest.background)
                 .unwrap_or(state.background);
-            if !is_background && await_members_runtime.retain_open_waiters(&key).await == 0 {
-                await_members_runtime.clear_active(&key).await;
+            if !is_background
+                && cancel_disconnected_blocking_await(
+                    &await_members_runtime,
+                    &state,
+                    member_statuses.clone(),
+                )
+                .await
+            {
                 return;
             }
 
             tokio::select! {
+                // If a terminal swarm event and a requester disconnect become
+                // ready together, cancellation owns this iteration. `biased`
+                // makes that ownership deterministic and ensures there is no
+                // completion delivery after the requester has gone away.
+                biased;
+                _ = await_members_runtime.waiter_disconnects(&key), if !is_background => {
+                    if cancel_disconnected_blocking_await(
+                        &await_members_runtime,
+                        &state,
+                        member_statuses,
+                    )
+                    .await
+                    {
+                        return;
+                    }
+                }
                 _ = tokio::time::sleep_until(deadline) => {
                     let summary = timeout_summary(&member_statuses);
                     finalize_await(&await_members_runtime, &state, false, member_statuses, summary).await;
@@ -297,6 +362,7 @@ pub(super) async fn spawn_or_resume_await_members(
                             continue;
                         }
                         Err(broadcast::error::RecvError::Closed) => {
+                            let _transaction = await_members_runtime.transaction_for_cancel(&key).await;
                             await_members_runtime.clear_active(&key).await;
                             return;
                         }
@@ -345,10 +411,15 @@ pub(super) async fn handle_comm_await_members(
             &requested_ids,
             &target_status,
             mode.as_deref(),
-            background,
-            notify,
-            wake,
         );
+        // This covers final-state replay, preference upsert, waiter
+        // replacement, active ownership, and any immediate expiration claim.
+        // A retry queued behind a terminal claimant observes that committed
+        // result instead of writing its preferences over the final record.
+        let transaction = ctx
+            .await_members_runtime
+            .transaction_for_request(&key)
+            .await;
         let mut persisted = load_state(&key);
 
         let initial_statuses = awaited_member_statuses(
@@ -421,31 +492,35 @@ pub(super) async fn handle_comm_await_members(
             .unwrap_or_default()
             .as_millis() as u64
             + Duration::from_secs(timeout_secs.unwrap_or(3600)).as_millis() as u64;
-        let mut state = persisted.unwrap_or_else(|| {
-            ensure_pending_state(
-                &key,
-                &req_session_id,
-                &swarm_id,
-                &requested_ids,
-                &target_status,
-                mode.as_deref(),
-                requested_deadline,
-                background,
-                notify,
-                wake,
-            )
-        });
-
-        // When reusing a persisted pending state (e.g. a resumed call after
-        // reload, or a duplicate request), let the latest call's delivery prefs
-        // win so the watcher and tool response stay in sync. The deadline is
-        // intentionally preserved from the original request.
-        if state.background != background || state.notify != notify || state.wake != wake {
-            state.background = background;
-            state.notify = notify;
-            state.wake = wake;
-            save_state(&state);
-        }
+        let was_blocking = persisted.as_ref().is_some_and(|state| !state.background);
+        // Re-enter the state upsert even when the semantic key already exists:
+        // its active delivery policy belongs to the latest retry, while the
+        // original deadline and sole watcher remain unchanged.
+        let state = match ensure_pending_state(
+            &key,
+            &req_session_id,
+            &swarm_id,
+            &requested_ids,
+            &target_status,
+            mode.as_deref(),
+            requested_deadline,
+            background,
+            notify,
+            wake,
+        ) {
+            Ok(state) => state,
+            Err(_) => {
+                // Refuse the retry instead of wrapping its persisted fence and
+                // allowing an old reload snapshot to impersonate it.
+                let _ = ctx.client_event_tx.send(ServerEvent::Error {
+                    id,
+                    message: "Await request generation exhausted; start a new semantic await."
+                        .to_string(),
+                    retry_after_secs: None,
+                });
+                return;
+            }
+        };
 
         let already_expired = state.deadline_unix_ms
             <= SystemTime::now()
@@ -457,8 +532,28 @@ pub(super) async fn handle_comm_await_members(
         // immediately so the requesting turn stays responsive. Completion is
         // delivered later via notify/wake.
         if background {
+            // A duplicate can promote an inline request to detached delivery.
+            // Replace old socket waiters now, so exactly one watcher owns this
+            // semantic key and no blocking caller waits for a second terminal
+            // response. The caller making this request receives the normal
+            // direct response below, including when it reused the same id.
+            if was_blocking {
+                let summary = background_started_summary(&initial_statuses, mode.as_deref(), wake);
+                for (waiter_id, waiter_tx) in ctx.await_members_runtime.take_waiters(&key).await {
+                    if waiter_id != id {
+                        let _ = waiter_tx.send(ServerEvent::CommAwaitMembersResponse {
+                            id: waiter_id,
+                            completed: false,
+                            members: initial_statuses.clone(),
+                            summary: summary.clone(),
+                            background_started: true,
+                        });
+                    }
+                }
+            }
             if already_expired {
                 let summary = timeout_summary(&initial_statuses);
+                drop(transaction);
                 finalize_await(
                     ctx.await_members_runtime,
                     &state,
@@ -516,11 +611,10 @@ pub(super) async fn handle_comm_await_members(
 
         if already_expired {
             let summary = timeout_summary(&initial_statuses);
-            let _ =
-                persist_final_response(&state, false, initial_statuses.clone(), summary.clone());
-            respond_to_waiters(
+            drop(transaction);
+            finalize_await(
                 ctx.await_members_runtime,
-                &key,
+                &state,
                 false,
                 initial_statuses,
                 summary,
@@ -611,115 +705,66 @@ fn publish_await_started_card(
     )));
 }
 
-/// Re-spawn detached watchers for every pending background `await_members`
-/// state after a server (re)start. Blocking waits are intentionally skipped:
-/// their requesting tool call is parked on a socket that no longer exists, and
-/// the agent is told to rerun the wait after reload. Background waits, by
-/// contrast, deliver via notify/wake, so they can resume transparently.
+/// Cancel pending `await_members` watches after a server (re)start. Neither a
+/// blocking socket nor an in-process detached task survives a reload, so both
+/// delivery modes are orphaned. The non-replayable audit record ensures a retry
+/// evaluates current member state with a fresh deadline and never emits a stale
+/// completion wake/notification from the pre-reload request.
 pub(super) async fn resume_background_awaits(
     swarm_members: &Arc<RwLock<HashMap<String, SwarmMember>>>,
     swarms_by_id: &Arc<RwLock<HashMap<String, HashSet<String>>>>,
     swarm_event_tx: &broadcast::Sender<SwarmEvent>,
     await_members_runtime: &AwaitMembersRuntime,
 ) {
-    let pending = all_pending_await_members_including_expired();
-    let now_ms = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis() as u64;
+    #[derive(Clone)]
+    struct ReloadOrphanSnapshot {
+        key: String,
+        request_generation: u64,
+        requester_session_id: String,
+    }
 
-    let mut resumed = 0usize;
-    let mut expired = 0usize;
+    // Snapshot the durable fence before any asynchronous cleanup. A new retry
+    // keeps the semantic key but advances its generation before releasing that
+    // key's transaction, so this stale snapshot cannot cancel it.
+    let pending: Vec<ReloadOrphanSnapshot> = all_pending_await_members_including_expired()
+        .into_iter()
+        .map(|state| ReloadOrphanSnapshot {
+            key: state.key,
+            request_generation: state.request_generation,
+            requester_session_id: state.session_id,
+        })
+        .collect();
+    await_members_runtime
+        .wait_after_reload_orphan_snapshot()
+        .await;
+    let _ = (swarm_members, swarms_by_id, swarm_event_tx);
     let mut cancelled_orphans = 0usize;
-    for state in pending {
-        // A blocking tool call was attached to the pre-restart socket. Its
-        // runtime waiter cannot survive a restart, so close out the durable
-        // state instead of allowing a later retry to inherit a ghost waiter.
-        // It deliberately emits no notify/wake because no live call remains.
-        if !state.background {
+    for snapshot in pending {
+        let _transaction = await_members_runtime
+            .transaction_for_cancel(&snapshot.key)
+            .await;
+        if let Some(pending) = load_state(&snapshot.key)
+            .filter(PersistedAwaitMembersState::is_pending)
+            .filter(|current| {
+                current.request_generation == snapshot.request_generation
+                    && current.session_id == snapshot.requester_session_id
+            })
+        {
             let _ = persist_non_replayable_final_response(
-                &state,
+                &pending,
                 false,
                 Vec::new(),
-                "Await cancelled because its requesting connection restarted. Rerun the await if it is still needed."
+                "Await cancelled because reload orphaned its watcher. Rerun the await if it is still needed; the retry uses current member state and a fresh timeout."
                     .to_string(),
             );
             cancelled_orphans += 1;
-            continue;
-        }
-
-        // Do not wake or notify an absent coordinator after restoration. This
-        // is an orphaned background watcher, not evidence that an unknown
-        // target should receive model work.
-        let requester_is_live = swarm_members
-            .read()
-            .await
-            .get(&state.session_id)
-            .is_some_and(|member| member.swarm_id.as_deref() == Some(state.swarm_id.as_str()));
-        if !requester_is_live {
-            let _ = persist_non_replayable_final_response(
-                &state,
-                false,
-                Vec::new(),
-                "Await cancelled because its requesting coordinator is no longer in this swarm."
-                    .to_string(),
-            );
-            cancelled_orphans += 1;
-            continue;
-        }
-
-        // Deadline passed while the server was down: the wait can never
-        // resolve, so finalize it as a timeout now so the promised
-        // notify/wake still fires instead of the await silently vanishing.
-        if state.deadline_unix_ms <= now_ms {
-            let member_statuses = awaited_member_statuses(
-                &state.session_id,
-                &state.swarm_id,
-                &state.requested_ids,
-                &state.target_status,
-                swarm_members,
-                swarms_by_id,
-            )
-            .await;
-            let (completed, summary) = if member_statuses.is_empty() {
-                (true, "No other members in swarm to wait for.".to_string())
-            } else if mode_satisfied(&member_statuses, state.mode.as_deref()) {
-                (true, mode_summary(&member_statuses, state.mode.as_deref()))
-            } else {
-                (false, timeout_summary(&member_statuses))
-            };
-            finalize_await(
-                await_members_runtime,
-                &state,
-                completed,
-                member_statuses,
-                summary,
-            )
-            .await;
-            expired += 1;
-            continue;
-        }
-
-        let key = state.key.clone();
-        if await_members_runtime.mark_active_if_new(&key).await {
-            let req_session_id = state.session_id.clone();
-            spawn_or_resume_await_members(
-                state,
-                req_session_id,
-                swarm_members.clone(),
-                swarms_by_id.clone(),
-                swarm_event_tx.clone(),
-                await_members_runtime.clone(),
-            )
-            .await;
-            resumed += 1;
         }
     }
 
-    if resumed > 0 || expired > 0 || cancelled_orphans > 0 {
+    if cancelled_orphans > 0 {
         crate::logging::info(&format!(
-            "Resumed {} background swarm await watcher(s) after startup ({} finalized as expired, {} orphaned wait(s) cancelled)",
-            resumed, expired, cancelled_orphans
+            "Cancelled {} reload-orphaned swarm await watcher(s)",
+            cancelled_orphans
         ));
     }
 }

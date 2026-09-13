@@ -9,9 +9,8 @@ use super::{
     build_openai_oauth_route, build_openrouter_auto_route, build_openrouter_endpoint_route,
     build_openrouter_fallback_provider_route, configured_standard_openrouter_profile_routes,
     copilot, dedupe_model_routes, direct_openai_compatible_profile_routes,
-    filter_disabled_model_routes,
-    format_account_model_availability_detail, is_listable_model_name, known_anthropic_model_ids,
-    known_openai_model_ids, model_availability_for_account, openrouter,
+    filter_disabled_model_routes, format_account_model_availability_detail, is_listable_model_name,
+    known_anthropic_model_ids, known_openai_model_ids, model_availability_for_account, openrouter,
     openrouter_catalog_model_id, provider_for_model, standard_openrouter_profile_configured,
 };
 

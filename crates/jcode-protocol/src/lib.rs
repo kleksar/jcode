@@ -456,6 +456,11 @@ pub struct SwarmMemberStatus {
     pub session_id: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub friendly_name: Option<String>,
+    /// Canonical linked-worktree root currently owned by this worker, when known.
+    /// This lets clients expose the actual filesystem context without changing
+    /// the coordinator conversation or message destination.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub working_dir: Option<String>,
     /// Lifecycle status (ready, running, completed, failed, stopped, etc.)
     pub status: String,
     /// Optional detail (task, error, etc.)
@@ -503,6 +508,11 @@ pub struct SwarmMemberStatus {
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SwarmMemberRuntime {
+    /// Canonical model/route selected when this worker was spawned. This remains
+    /// distinct from `model`, which is refreshed from the provider's runtime
+    /// status and can resolve a named route to its base model.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub selected_model: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -518,7 +528,8 @@ pub struct SwarmMemberRuntime {
 
 impl SwarmMemberRuntime {
     fn is_empty(&self) -> bool {
-        self.model.is_none()
+        self.selected_model.is_none()
+            && self.model.is_none()
             && self.provider.is_none()
             && self.auth_method.is_none()
             && self.effort.is_none()

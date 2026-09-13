@@ -1158,6 +1158,42 @@ mod tests {
     use ratatui::style::Modifier;
 
     #[test]
+    fn agent_strip_runtime_shows_model_then_effort_without_provider() {
+        let member = crate::protocol::SwarmMemberStatus {
+            session_id: "terra".to_string(),
+            working_dir: None,
+            friendly_name: Some("terra".to_string()),
+            status: "running".to_string(),
+            detail: None,
+            task_label: None,
+            role: Some("agent".to_string()),
+            is_headless: Some(false),
+            live_attachments: None,
+            status_age_secs: None,
+            output_tail: None,
+            report_back_to_session_id: None,
+            todo_progress: None,
+            todo_items: Vec::new(),
+            runtime: crate::protocol::SwarmMemberRuntime {
+                selected_model: Some("gpt-5.6-terra".to_string()),
+                model: Some("gpt-5.6".to_string()),
+                provider: Some("OpenAI".to_string()),
+                auth_method: Some("OAuth".to_string()),
+                effort: Some("low".to_string()),
+                elapsed_secs: None,
+            },
+        };
+
+        let rendered = overscroll_member_spans(&member)
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect::<String>();
+        assert!(rendered.contains("Terra low"), "{rendered}");
+        assert!(!rendered.contains("OpenAI"), "{rendered}");
+        assert!(!rendered.contains("OAuth"), "{rendered}");
+    }
+
+    #[test]
     fn running_tool_header_emphasizes_detail_over_tool_name() {
         let accent = Color::Rgb(12, 34, 56);
         let spans = running_tool_header_spans("*", "bash", Some("cargo test"), accent);
@@ -1322,6 +1358,42 @@ mod tests {
 
         assert!(!text.contains("snake"), "footer: {text:?}");
         assert!(!text.contains('🐍'), "footer: {text:?}");
+    }
+
+    #[test]
+    fn footer_compositor_elides_path_leading_components_before_its_basename() {
+        let path = Span::styled(
+            "/a/b/c/issue24-rss24-implement1",
+            Style::default().fg(rgb(105, 205, 215)).bold(),
+        );
+        let text = footer_compositor_spans(vec![path], Vec::new(), Vec::new(), 28)
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect::<String>();
+
+        assert_eq!(text, "…/c/issue24-rss24-implement1");
+    }
+
+    #[test]
+    fn real_footer_path_keeps_trailing_identity_with_quota_and_session_competing() {
+        let mut app = crate::tui::app::tests::create_test_app();
+        app.set_session_footer_test_data("/a/b/c/issue24-rss24-implement1", "session-name");
+        let spans = footer_compositor_spans(
+            footer_fact_spans(&app),
+            footer_quota_spans(Some(crate::tui::FooterQuota {
+                remaining_percent: 77,
+                reset_in: "6d 20h".to_string(),
+            })),
+            footer_session_spans(&app),
+            50,
+        );
+        let text = spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect::<String>();
+
+        assert!(text.contains("implement1"), "footer: {text:?}");
+        assert!(unicode_width::UnicodeWidthStr::width(text.as_str()) <= 50);
     }
 
     #[test]
@@ -2150,6 +2222,38 @@ pub(super) fn draw_overscroll_status(
     if area.height == 0 || area.width == 0 {
         return;
     }
+    let active_members: Vec<_> = app
+        .overscroll_swarm_members()
+        .into_iter()
+        .filter(|member| jcode_tui_render::swarm_gallery::is_active_status(&member.status))
+        .collect();
+
+    // Draw member rows first so every early return in the legacy metadata and
+    // countdown path still preserves them. Layout reserves the metadata row
+    // plus exactly one row per active member.
+    if !active_members.is_empty() && area.height > 1 {
+        let member_area = Rect {
+            y: area.y.saturating_add(1),
+            height: area.height.saturating_sub(1),
+            ..area
+        };
+        for (index, member) in active_members.iter().enumerate() {
+            if index >= member_area.height as usize {
+                break;
+            }
+            let row = Rect {
+                y: member_area.y.saturating_add(index as u16),
+                height: 1,
+                ..member_area
+            };
+            let line = Line::from(overscroll_truncate_spans(
+                overscroll_member_spans(member),
+                row.width as usize,
+            ));
+            frame.render_widget(Paragraph::new(line), row);
+        }
+    }
+    let area = Rect { height: 1, ..area };
     let data = app.info_widget_data();
 
     let sep = || Span::styled(" · ", Style::default().fg(rgb(100, 100, 110)));
@@ -2315,6 +2419,100 @@ pub(super) fn draw_overscroll_status(
 
     let countdown_line = Line::from(vec![countdown]).alignment(Alignment::Right);
     frame.render_widget(Paragraph::new(countdown_line), right_area);
+}
+
+pub(super) fn overscroll_active_member_count(app: &dyn TuiState) -> u16 {
+    app.overscroll_swarm_members()
+        .iter()
+        .filter(|member| jcode_tui_render::swarm_gallery::is_active_status(&member.status))
+        .count()
+        .min(u16::MAX as usize) as u16
+}
+
+fn overscroll_member_spans(member: &crate::protocol::SwarmMemberStatus) -> Vec<Span<'static>> {
+    let sep = || Span::styled(" · ", Style::default().fg(rgb(100, 100, 110)));
+    let identity = member
+        .friendly_name
+        .as_deref()
+        .filter(|name| !name.trim().is_empty())
+        .unwrap_or(member.session_id.as_str());
+    let actual_model = member
+        .runtime
+        .model
+        .as_deref()
+        .filter(|value| !value.is_empty());
+    let selected_model = member
+        .runtime
+        .selected_model
+        .as_deref()
+        .filter(|value| !value.is_empty());
+    let model = compact_worker_model_label(selected_model, actual_model);
+    let effort = member
+        .runtime
+        .effort
+        .as_deref()
+        .filter(|value| !value.is_empty());
+    // This compact agent strip identifies the active model and its effort.
+    // Provider/auth metadata remains in the runtime state for the detailed
+    // swarm card and other surfaces, but is intentionally not repeated here.
+    let runtime = [model.as_deref(), effort]
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>()
+        .join(" ");
+    let task = member
+        .task_label
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+        .or(member
+            .detail
+            .as_deref()
+            .filter(|value| !value.trim().is_empty()))
+        .unwrap_or(member.status.as_str());
+
+    let mut spans = vec![
+        Span::styled("● ", Style::default().fg(rgb(100, 210, 180))),
+        Span::styled(
+            identity.to_string(),
+            Style::default().fg(rgb(130, 200, 255)).bold(),
+        ),
+    ];
+    if !runtime.is_empty() {
+        spans.push(sep());
+        spans.push(Span::styled(
+            runtime,
+            Style::default().fg(rgb(210, 190, 255)),
+        ));
+    }
+    spans.push(sep());
+    spans.push(Span::styled(
+        task.to_string(),
+        Style::default().fg(rgb(180, 180, 190)),
+    ));
+    spans
+}
+
+fn compact_worker_model_label(selected: Option<&str>, actual: Option<&str>) -> Option<String> {
+    let selected = selected.map(str::trim).filter(|value| !value.is_empty());
+    let actual = actual.map(str::trim).filter(|value| !value.is_empty());
+    if let (Some(selected), Some(actual)) = (selected, actual) {
+        let selected = selected.rsplit([':', '/']).next().unwrap_or(selected);
+        let actual = actual.rsplit([':', '/']).next().unwrap_or(actual);
+        if let Some(route) = selected.strip_prefix(&format!("{actual}-"))
+            && !route.is_empty()
+            && route
+                .chars()
+                .all(|character| character.is_ascii_alphabetic())
+        {
+            let mut chars = route.chars();
+            let first = chars
+                .next()
+                .expect("nonempty checked route")
+                .to_ascii_uppercase();
+            return Some(format!("{first}{}", chars.as_str().to_ascii_lowercase()));
+        }
+    }
+    selected.or(actual).map(str::to_string)
 }
 
 /// Truncate a list of spans to at most `max_width` display columns, appending a
@@ -2620,10 +2818,10 @@ fn footer_fact_spans(app: &dyn TuiState) -> Vec<Span<'static>> {
     let separator = || Span::styled("  │  ", Style::default().fg(rgb(72, 72, 82)));
     let mut groups: Vec<Vec<Span<'static>>> = Vec::new();
 
-    if let Some(dir) = app
-        .working_dir()
-        .and_then(|path| session_facts::dir_label_short(&path))
-    {
+    if let Some(dir) = app.working_dir().and_then(|path| {
+        let path = path.trim();
+        (!path.is_empty()).then(|| session_facts::dir_label(path))
+    }) {
         groups.push(vec![Span::styled(
             dir,
             Style::default().fg(rgb(105, 205, 215)).bold(),
@@ -2752,6 +2950,31 @@ fn footer_compositor_spans(
 /// footer facts, do not replace a fully fitting number pair with an ellipsis
 /// merely because the optional meter does not fit after it.
 fn footer_truncate_fact_spans(facts: Vec<Span<'static>>, width: usize) -> Vec<Span<'static>> {
+    // The first footer fact is the working directory. It has a semantic
+    // truncation rule: retain its basename and trailing parents instead of
+    // using the generic left-to-right ellipsis that can hide both.
+    if let Some(path) = facts.first().filter(|span| {
+        span.style.fg == Some(rgb(105, 205, 215))
+            && span.style.add_modifier.contains(Modifier::BOLD)
+    }) {
+        let path_width = path.width();
+        if path_width > width {
+            let mut retained = vec![Span::styled(
+                session_facts::dir_label_for_width(path.content.as_ref(), width),
+                path.style,
+            )];
+            let mut used = retained[0].width();
+            for span in facts.into_iter().skip(1) {
+                let span_width = span.width();
+                if used + span_width > width {
+                    break;
+                }
+                used += span_width;
+                retained.push(span);
+            }
+            return retained;
+        }
+    }
     let Some(numbers) = facts
         .first()
         .filter(|span| span.style.fg == Some(rgb(140, 140, 150)) && span.content.contains('/'))

@@ -1013,23 +1013,38 @@ fn session_picker_ctrl_x_requires_double_press_and_resets_when_selection_changes
 }
 
 #[test]
-fn session_picker_ctrl_x_refuses_working_current_closed_and_external_rows() {
-    let working = make_session("working", "working", false, SessionStatus::Active);
+fn session_picker_ctrl_x_allows_idle_current_session_after_double_press() {
     let current = make_session("current", "current", false, SessionStatus::Active);
+    let mut picker = SessionPicker::new(vec![current]);
+    picker.set_current_session_id(Some("current".to_string()));
+    picker.set_live_presence_for_test(vec![live_presence("current", false)]);
+
+    assert!(matches!(
+        picker
+            .handle_overlay_key(KeyCode::Char('x'), KeyModifiers::CONTROL)
+            .expect("first Ctrl+X should arm current-session close"),
+        OverlayAction::Continue
+    ));
+    assert!(matches!(
+        picker
+            .handle_overlay_key(KeyCode::Char('x'), KeyModifiers::CONTROL)
+            .expect("second Ctrl+X should close idle current session"),
+        OverlayAction::Selected(PickerResult::CloseSession { ref session_id }) if session_id == "current"
+    ));
+}
+
+#[test]
+fn session_picker_ctrl_x_refuses_working_closed_and_external_rows() {
+    let working = make_session("working", "working", false, SessionStatus::Active);
     let closed = make_session("closed", "closed", false, SessionStatus::Closed);
     let mut external = make_session("external", "external", false, SessionStatus::Closed);
     external.source = SessionSource::Codex;
-    let mut picker = SessionPicker::new(vec![working, current, closed, external]);
+    let mut picker = SessionPicker::new(vec![working, closed, external]);
     picker.filter_mode = SessionFilterMode::All;
-    picker.set_current_session_id(Some("current".to_string()));
-    picker.set_live_presence_for_test(vec![
-        live_presence("working", true),
-        live_presence("current", false),
-    ]);
+    picker.set_live_presence_for_test(vec![live_presence("working", true)]);
 
     for (session_id, expected_feedback) in [
         ("working", "working"),
-        ("current", "current session"),
         ("closed", "already closed"),
         ("external", "External sessions"),
     ] {

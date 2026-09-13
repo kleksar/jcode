@@ -67,6 +67,8 @@ pub struct SubagentStatus {
     pub session_id: String,
     pub status: String, // e.g., "calling API", "running grep", "streaming"
     pub model: Option<String>,
+    /// The provider's currently effective reasoning effort, when supported.
+    pub effort: Option<String>,
 }
 
 #[derive(Clone, Debug)]

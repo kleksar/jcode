@@ -438,10 +438,11 @@ pub(super) async fn dispatch_swarm_runtime_status(
         let Some(member) = members.get_mut(&event.session_id) else {
             return;
         };
-        if member.runtime.model.as_ref() == Some(model) {
+        if member.runtime.model.as_ref() == Some(model) && member.runtime.effort == event.effort {
             return;
         }
         member.runtime.model = Some(model.clone());
+        member.runtime.effort = event.effort.clone();
         member.swarm_id.clone()
     };
     if let Some(swarm_id) = swarm_id {
@@ -586,7 +587,11 @@ fn cap_chars(s: &str, cap: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::bus::{BatchProgress, ToolEvent, ToolStatus};
+    use crate::bus::{BatchProgress, SubagentStatus, ToolEvent, ToolStatus};
+    use std::collections::HashMap;
+    use std::sync::Arc;
+    use std::time::Instant;
+    use tokio::sync::{RwLock, mpsc};
 
     fn tool(id: &str, intent: &str, status: ToolStatus) -> ToolEvent {
         ToolEvent {
@@ -671,6 +676,62 @@ mod tests {
             .expect("progress captured");
         assert_eq!((captured.current, captured.total), (27, 43));
         assert!(!update_active_todo_batch_progress(&mut items, &progress));
+    }
+
+    #[tokio::test]
+    async fn runtime_status_updates_effective_effort() {
+        let (event_tx, _event_rx) = mpsc::unbounded_channel();
+        let now = Instant::now();
+        let members = Arc::new(RwLock::new(HashMap::from([(
+            "worker".to_string(),
+            SwarmMember {
+                session_id: "worker".to_string(),
+                event_tx,
+                event_txs: HashMap::new(),
+                working_dir: None,
+                swarm_id: Some("swarm".to_string()),
+                swarm_enabled: true,
+                status: "running".to_string(),
+                detail: None,
+                task_label: None,
+                friendly_name: None,
+                report_back_to_session_id: None,
+                latest_completion_report: None,
+                role: "agent".to_string(),
+                joined_at: now,
+                last_status_change: now,
+                is_headless: true,
+                output_tail: None,
+                todo_progress: None,
+                todo_items: Vec::new(),
+                runtime: crate::protocol::SwarmMemberRuntime {
+                    selected_model: None,
+                    model: Some("old-model".to_string()),
+                    effort: Some("low".to_string()),
+                    ..Default::default()
+                },
+            },
+        )])));
+        let swarms = Arc::new(RwLock::new(HashMap::from([(
+            "swarm".to_string(),
+            std::collections::HashSet::from(["worker".to_string()]),
+        )])));
+
+        dispatch_swarm_runtime_status(
+            &SubagentStatus {
+                session_id: "worker".to_string(),
+                status: "streaming".to_string(),
+                model: Some("new-model".to_string()),
+                effort: Some("high".to_string()),
+            },
+            &members,
+            &swarms,
+        )
+        .await;
+
+        let member = members.read().await;
+        assert_eq!(member["worker"].runtime.model.as_deref(), Some("new-model"));
+        assert_eq!(member["worker"].runtime.effort.as_deref(), Some("high"));
     }
 }
 

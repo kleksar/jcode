@@ -123,29 +123,41 @@ fn format_elapsed(seconds: u64) -> String {
     }
 }
 
-fn format_model(model: &str) -> String {
-    let routed = model.rsplit([':', '/']).next().unwrap_or(model);
-    let model = routed
-        .strip_suffix("-sol")
-        .or_else(|| routed.strip_suffix("-luna"))
-        .unwrap_or(routed);
-    if let Some(rest) = model.strip_prefix("gpt-") {
-        format!("GPT-{rest}")
-    } else {
-        model.to_string()
-    }
+/// Format the canonical worker model ID without its provider/auth qualifier.
+/// The model identifier itself is lowercased for a stable public display.
+fn worker_model_id(model: &str) -> Option<String> {
+    let model = model
+        .trim()
+        .rsplit([':', '/'])
+        .next()
+        .unwrap_or(model)
+        .to_ascii_lowercase();
+    (!model.is_empty()).then_some(model)
 }
 
-/// Combine provider display name and credential route into one metadata piece,
-/// e.g. "OpenAI oauth". Returns `None` when both are blank.
-fn format_route(provider: Option<&str>, auth_method: Option<&str>) -> Option<String> {
-    let provider = provider.map(str::trim).filter(|p| !p.is_empty());
-    let auth_method = auth_method.map(str::trim).filter(|m| !m.is_empty());
-    match (provider, auth_method) {
-        (Some(provider), Some(method)) => Some(format!("{provider} {method}")),
-        (Some(provider), None) => Some(provider.to_string()),
-        (None, Some(method)) => Some(method.to_string()),
-        (None, None) => None,
+/// Render worker metadata without exposing providers or authentication routes.
+/// The canonical selected model wins, then the actual model, then `unknown`.
+fn format_worker_model(selected: Option<&str>, actual: Option<&str>) -> String {
+    selected
+        .and_then(worker_model_id)
+        .or_else(|| actual.and_then(worker_model_id))
+        .unwrap_or_else(|| "unknown".into())
+}
+
+/// Render worker metadata through one shared path so every worker surface uses
+/// the canonical model ID and runtime effort consistently. Web uses fixed Pro
+/// thinking, so it never displays a configurable effort.
+fn format_worker_runtime(
+    selected: Option<&str>,
+    actual: Option<&str>,
+    effort: Option<&str>,
+) -> Option<String> {
+    let route = format_worker_model(selected, actual);
+    let effort = effort.map(str::trim).filter(|value| !value.is_empty());
+    match effort {
+        _ if route.ends_with("[web]") => Some(route),
+        Some(effort) => Some(format!("{route} {effort}")),
+        None => Some(route),
     }
 }
 
@@ -223,6 +235,8 @@ pub struct GalleryMember {
     pub todo_items: Vec<GalleryTodo>,
     /// Provider model currently running this member, when known.
     pub model: Option<String>,
+    /// Canonical model/route selected for this worker at spawn time.
+    pub selected_model: Option<String>,
     /// Provider display name and credential route used by this member.
     pub provider: Option<String>,
     pub auth_method: Option<String>,
@@ -258,9 +272,17 @@ pub fn members_to_tiles(members: &[GalleryMember]) -> Vec<SwarmTile> {
     sort_members_for_display(members)
         .into_iter()
         .map(|m| {
+            let mut body = m.body.clone();
+            if let Some(runtime) = format_worker_runtime(
+                m.selected_model.as_deref(),
+                m.model.as_deref(),
+                m.effort.as_deref(),
+            ) {
+                body.push(runtime);
+            }
             let mut tile =
                 SwarmTile::new(m.label.clone(), m.status.clone(), status_accent(&m.status))
-                    .with_body(m.body.clone());
+                    .with_body(body);
             if let Some(glyph) = role_glyph(m.role.as_deref()) {
                 tile = tile.with_role_glyph(glyph);
             }
@@ -307,8 +329,8 @@ pub fn render_gallery(
 /// tool progress, and animated glyphs. Those fields update frequently and make
 /// old chat rows move while the user is reading them. The dedicated live swarm
 /// page owns the detailed, animated representation instead. Spawn-time-stable
-/// metadata (model, provider/auth route) is shown since it answers "what is
-/// this agent running on" without churning.
+/// metadata (selected worker route and effort) is shown since it answers "what
+/// is this agent running" without leaking provider or authentication details.
 pub fn render_swarm_chat_cards(members: &[GalleryMember], width: usize) -> Vec<Line<'static>> {
     if members.is_empty() || width < 8 {
         return Vec::new();
@@ -324,20 +346,17 @@ pub fn render_swarm_chat_cards(members: &[GalleryMember], width: usize) -> Vec<L
         );
         let label = member.label.clone();
 
-        // Stable runtime metadata (model and provider/auth route) is fixed at
-        // spawn time, so it can live on the transcript card without making old
-        // chat rows churn. Drop trailing pieces first when width is tight.
+        // Stable selected-route metadata is fixed at spawn time, so it can live
+        // on the transcript card without making old chat rows churn. Provider
+        // and authentication details belong only to main-session auth UI.
+        // Drop trailing pieces first when width is tight.
         let mut metadata = vec![card_status_label(&member.status).to_string()];
-        if let Some(model) = member
-            .model
-            .as_deref()
-            .filter(|model| !model.trim().is_empty())
-        {
-            metadata.push(format_model(model));
-        }
-        if let Some(route) = format_route(member.provider.as_deref(), member.auth_method.as_deref())
-        {
-            metadata.push(route);
+        if let Some(runtime) = format_worker_runtime(
+            member.selected_model.as_deref(),
+            member.model.as_deref(),
+            member.effort.as_deref(),
+        ) {
+            metadata.push(runtime);
         }
         let mut tail = format!(" · {}", metadata.join(" · "));
         while metadata.len() > 1 && disp_w(&lead) + disp_w(&label) + disp_w(&tail) > width {
@@ -383,22 +402,12 @@ pub fn render_swarm_live_card(
     if let Some(elapsed) = member.elapsed_secs {
         metadata.push(format_elapsed(elapsed));
     }
-    if let Some(model) = member
-        .model
-        .as_deref()
-        .filter(|model| !model.trim().is_empty())
-    {
-        metadata.push(format_model(model));
-    }
-    if let Some(route) = format_route(member.provider.as_deref(), member.auth_method.as_deref()) {
-        metadata.push(route);
-    }
-    if let Some(effort) = member
-        .effort
-        .as_deref()
-        .filter(|effort| !effort.trim().is_empty())
-    {
-        metadata.push(effort.to_string());
+    if let Some(runtime) = format_worker_runtime(
+        member.selected_model.as_deref(),
+        member.model.as_deref(),
+        member.effort.as_deref(),
+    ) {
+        metadata.push(runtime);
     }
 
     let lead = format!(
@@ -593,13 +602,14 @@ pub fn render_swarm_strip(
     let gap = 2usize; // minimum gap between chips and the right tail
     let hint_w = hint_text.map(|h| disp_w(h) + disp_w(hint_sep)).unwrap_or(0);
 
-    // ---- Chips: "<glyph> <name>[·task][ done/total]" ----
+    // ---- Chips: "<glyph> <name>[ · model effort][·task][ done/total]" ----
     // Task labels are additive: chips are fitted by their base width (glyph +
     // name + todo) so a long task can never hide other agents; leftover line
     // width is then shared out to task labels (see below).
     struct Chip {
         glyph: String,
         name: String,
+        runtime: Option<String>,
         task: Option<String>,
         todo: Option<String>,
         color: Color,
@@ -611,6 +621,15 @@ pub fn render_swarm_strip(
         .map(|(idx, m)| Chip {
             glyph: status_glyph(&m.status, spinner_frame).to_string(),
             name: m.label.clone(),
+            runtime: is_active_status(&m.status)
+                .then(|| {
+                    format_worker_runtime(
+                        m.selected_model.as_deref(),
+                        m.model.as_deref(),
+                        m.effort.as_deref(),
+                    )
+                })
+                .flatten(),
             task: m
                 .task
                 .as_deref()
@@ -622,7 +641,11 @@ pub fn render_swarm_strip(
         })
         .collect();
     let chip_w = |c: &Chip| -> usize {
-        disp_w(&c.glyph) + 1 + disp_w(&c.name) + c.todo.as_ref().map(|t| disp_w(t) + 1).unwrap_or(0)
+        disp_w(&c.glyph)
+            + 1
+            + disp_w(&c.name)
+            + c.runtime.as_ref().map(|r| disp_w(r) + 3).unwrap_or(0)
+            + c.todo.as_ref().map(|t| disp_w(t) + 1).unwrap_or(0)
     };
 
     // Fit as many chips as possible into `budget`, collapsing overflow into a
@@ -734,6 +757,13 @@ pub fn render_swarm_strip(
                 style = style.add_modifier(Modifier::BOLD);
             }
             spans.push(Span::styled(format!("{} {}", chip.glyph, chip.name), style));
+            if let Some(runtime) = &chip.runtime {
+                spans.push(Span::styled(" · ", Style::default().fg(rgb(80, 80, 90))));
+                spans.push(Span::styled(
+                    runtime.clone(),
+                    Style::default().fg(rgb(150, 150, 160)),
+                ));
+            }
             if per_task_w > 0
                 && let Some(task) = &chip.task
             {
@@ -868,8 +898,9 @@ pub fn render_swarm_strip(
 /// agent per row, capped to `max_rows` agent lines with a `+N more` overflow
 /// marker on the last row.
 ///
-/// Each row is `<status glyph> <icon> · <task>` with a right-aligned todo
-/// counter when present. The first row carries the leading "🐝" swarm marker;
+/// Each row is `<status glyph> <icon> · <model> <effort> · <task>` with a
+/// right-aligned todo counter when present. Provider labels intentionally stay
+/// out of this compact persistent surface. The first row carries the leading "🐝" swarm marker;
 /// the header tally (`M/N active`) and the enter hint live on the first row's
 /// right side, mirroring the horizontal strip.
 ///
@@ -993,8 +1024,12 @@ pub fn render_swarm_strip_vertical(
             if let Some(elapsed) = m.elapsed_secs {
                 metadata.push(format_elapsed(elapsed));
             }
-            if let Some(model) = m.model.as_deref().filter(|model| !model.trim().is_empty()) {
-                metadata.push(format_model(model));
+            if let Some(runtime) = format_worker_runtime(
+                m.selected_model.as_deref(),
+                m.model.as_deref(),
+                m.effort.as_deref(),
+            ) {
+                metadata.push(runtime);
             }
 
             let mut tail = metadata.join(" · ");
@@ -1014,16 +1049,16 @@ pub fn render_swarm_strip_vertical(
             continue;
         }
 
-        // <glyph> [icon ]<name>[ · task][ done/total]
+        // <glyph> [icon ]<name>[ · model effort][ · task][ done/total]
         let mut style = Style::default().fg(color);
         if is_sel && focused {
             style = style.add_modifier(Modifier::BOLD);
         }
-        // The assigned animal icon already identifies the worker. Keep compact
-        // strip rows emoji-only so names such as "sauropod" do not consume the
-        // task-label space; the expanded chat card carries the full identity.
+        // The animal icon is a useful scan cue, but it is not a substitute for
+        // the worker name. This persistent panel must keep the human-readable
+        // identity visible even when a session has a known animal icon.
         let ident = match m.icon.as_deref().filter(|i| !i.is_empty()) {
-            Some(icon) => icon.to_string(),
+            Some(icon) => format!("{icon} {}", m.label),
             None => m.label.clone(),
         };
         let marker = if focused {
@@ -1036,6 +1071,27 @@ pub fn render_swarm_strip_vertical(
         let todo_w = todo.as_ref().map(|t| disp_w(t) + 1).unwrap_or(0);
         let mut used = head_w;
         spans.push(Span::styled(head, style));
+
+        // The persistent panel identifies the selected worker route and actual
+        // effort, but never repeats provider/auth metadata. Model and effort
+        // take precedence over task when a narrow row sheds optional detail.
+        let runtime = format_worker_runtime(
+            m.selected_model.as_deref(),
+            m.model.as_deref(),
+            m.effort.as_deref(),
+        )
+        .unwrap_or_default();
+        if !runtime.is_empty() {
+            let avail = body_budget.saturating_sub(used + todo_w + disp_w(" · "));
+            if avail >= 4 {
+                let runtime = truncate_label(&runtime, avail);
+                used += disp_w(" · ") + disp_w(&runtime);
+                spans.push(Span::styled(
+                    format!(" · {runtime}"),
+                    Style::default().fg(rgb(170, 180, 205)),
+                ));
+            }
+        }
 
         if let Some(task) = m.task.as_deref().filter(|t| !t.trim().is_empty()) {
             let avail = body_budget.saturating_sub(used + todo_w + disp_w(" · "));
@@ -1301,6 +1357,24 @@ pub fn render_swarm_compact(
         ),
     ];
     let mut used: usize = spans.iter().map(|s| disp_w(&s.content)).sum();
+    for member in members.iter().filter(|m| is_active_status(&m.status)) {
+        let Some(runtime) = format_worker_runtime(
+            member.selected_model.as_deref(),
+            member.model.as_deref(),
+            member.effort.as_deref(),
+        ) else {
+            continue;
+        };
+        if used + 3 + disp_w(&runtime) > width {
+            continue;
+        }
+        used += 3 + disp_w(&runtime);
+        spans.push(Span::styled(" · ", sep_style));
+        spans.push(Span::styled(
+            runtime,
+            Style::default().fg(rgb(150, 150, 160)),
+        ));
+    }
     if let Some((done, _running, total)) = plan {
         let text = format!("nodes {done}/{total}");
         if used + 3 + disp_w(&text) <= width {
@@ -1956,11 +2030,97 @@ mod tests {
             todo: None,
             todo_items: Vec::new(),
             model: None,
+            selected_model: None,
             provider: None,
             auth_method: None,
             effort: None,
             elapsed_secs: None,
         }
+    }
+
+    #[test]
+    fn worker_runtime_uses_canonical_model_and_actual_effort() {
+        for (selected, actual, effort, expected) in [
+            (
+                Some("gpt-5.6-sol"),
+                Some("GPT-5.6"),
+                Some("high"),
+                "gpt-5.6-sol high",
+            ),
+            (
+                Some("openai-api:GPT_5.6_TERRA"),
+                Some("gpt-5.6"),
+                Some("medium"),
+                "gpt_5.6_terra medium",
+            ),
+            (
+                Some("openai/gpt-5.6-luna"),
+                Some("GPT-5.6"),
+                Some("low"),
+                "gpt-5.6-luna low",
+            ),
+            (
+                Some("gpt-6-astra"),
+                Some("gpt-6"),
+                Some("high"),
+                "gpt-6-astra high",
+            ),
+            (
+                Some("gpt-6-astra[web]"),
+                Some("gpt-6"),
+                Some("high"),
+                "gpt-6-astra[web]",
+            ),
+            (
+                Some("openai-api:gpt-6-astra[web]"),
+                Some("gpt-6"),
+                Some("high"),
+                "gpt-6-astra[web]",
+            ),
+            (
+                Some("openai/oauth:gpt-6-astra"),
+                Some("gpt-6"),
+                Some("high"),
+                "gpt-6-astra high",
+            ),
+            (
+                None,
+                Some("openai:GPT-5.6-TERRA"),
+                Some("medium"),
+                "gpt-5.6-terra medium",
+            ),
+            (None, None, Some("high"), "unknown high"),
+            (Some("  "), Some("\t"), Some("high"), "unknown high"),
+            (None, None, None, "unknown"),
+            (
+                Some("unrecognized-route"),
+                Some("gpt-5.6-terra"),
+                Some("low"),
+                "unrecognized-route low",
+            ),
+        ] {
+            assert_eq!(
+                format_worker_runtime(selected, actual, effort).as_deref(),
+                Some(expected),
+                "selected={selected:?}, actual={actual:?}"
+            );
+        }
+
+        // The canonical selected ID wins over a differently reported actual ID.
+        assert_eq!(
+            format_worker_runtime(Some("gpt-5.6-sol"), Some("gpt-5.6-terra"), Some("low"))
+                .as_deref(),
+            Some("gpt-5.6-sol low")
+        );
+        assert_eq!(
+            format_worker_runtime(
+                Some("openai-api:gpt-5.6-sol"),
+                Some("GPT-5.6"),
+                Some("high")
+            )
+            .as_deref(),
+            Some("gpt-5.6-sol high")
+        );
     }
 
     #[test]
@@ -2046,6 +2206,46 @@ mod tests {
         assert!(!header.contains("swarm"), "got: {header}");
         for line in &lines {
             assert!(line.width() <= 80);
+        }
+    }
+
+    #[test]
+    fn active_astra_web_gallery_strip_and_card_omit_provider_details() {
+        let mut worker = member("astra-worker", "running", None, &[]);
+        worker.selected_model = Some("openai:gpt-6-astra[web]".into());
+        worker.model = Some("GPT-6".into());
+        worker.effort = Some("high".into());
+        worker.provider = Some("OpenAI".into());
+        worker.auth_method = Some("OAuth".into());
+
+        let gallery = members_to_tiles(&[worker.clone()])[0].body.join("\n");
+        let strip = render_swarm_strip_vertical(
+            std::slice::from_ref(&worker),
+            0,
+            false,
+            &[],
+            None,
+            0,
+            100,
+            1,
+            2,
+        )
+        .iter()
+        .map(plain_line)
+        .collect::<Vec<_>>()
+        .join("\n");
+        let card = render_swarm_chat_cards(std::slice::from_ref(&worker), 100)
+            .iter()
+            .map(plain_line)
+            .collect::<Vec<_>>()
+            .join("\n");
+        for text in [&gallery, &strip, &card] {
+            assert_eq!(text.matches("gpt-6-astra[web]").count(), 1, "{text}");
+            assert!(
+                !text.contains("GPT") && !text.contains("OpenAI") && !text.contains("OAuth"),
+                "leaked provider detail: {text}"
+            );
+            assert!(!text.contains("high"), "Web must not show effort: {text}");
         }
     }
 
@@ -2213,10 +2413,10 @@ mod tests {
             row0.contains("🐝"),
             "first row carries the swarm marker: {row0:?}"
         );
-        assert!(row0.contains("🦊"), "icon replaces the name: {row0:?}");
+        assert!(row0.contains("🦊"), "icon remains visible: {row0:?}");
         assert!(
-            !row0.contains("fox"),
-            "name hidden when icon present: {row0:?}"
+            row0.contains("fox"),
+            "name remains visible when icon is present: {row0:?}"
         );
         assert!(row0.contains("wire the auth flow"), "task shown: {row0:?}");
         assert!(row0.contains("3/9"), "todo counter shown: {row0:?}");
@@ -2248,12 +2448,85 @@ mod tests {
     #[test]
     fn vertical_strip_caps_rows_and_reports_overflow() {
         let members: Vec<GalleryMember> = (0..7)
-            .map(|i| member(&format!("agent{i}"), "running", None, &[]))
+            .map(|i| {
+                let mut worker = member(&format!("agent{i}"), "running", None, &[]);
+                worker.selected_model = Some("gpt-5.6-sol".into());
+                worker.model = Some("gpt-5.6".into());
+                worker
+            })
             .collect();
         let lines = render_swarm_strip_vertical(&members, 0, false, &hints(), None, 0, 80, 4, 12);
         assert_eq!(lines.len(), 4, "capped to max_rows lines");
         let last = plain_line(&lines[3]);
         assert!(last.contains("+4 more"), "overflow marker: {last:?}");
+    }
+
+    #[test]
+    fn vertical_strip_shows_selected_routes_and_effort_without_provider_for_active_workers() {
+        let mut sol = member("sol-worker", "running", None, &[]);
+        sol.selected_model = Some("openai:gpt-5.6-sol".into());
+        sol.model = Some("gpt-5.6".into());
+        sol.effort = Some("high".into());
+        sol.provider = Some("OpenAI".into());
+        sol.auth_method = Some("OAuth".into());
+        let mut terra = member("terra-worker", "thinking", None, &[]);
+        terra.selected_model = Some("gpt-5.6-terra".into());
+        terra.model = Some("gpt-5.6".into());
+        terra.effort = Some("medium".into());
+        let mut luna = member("luna-worker", "ready", None, &[]);
+        luna.selected_model = Some("gpt-5.6-luna".into());
+        luna.model = Some("gpt-5.6".into());
+        luna.effort = Some("low".into());
+
+        let text =
+            render_swarm_strip_vertical(&[sol, terra, luna], 0, false, &[], None, 0, 100, 4, 8)
+                .iter()
+                .map(plain_line)
+                .collect::<Vec<_>>()
+                .join("\n");
+        for expected in [
+            "gpt-5.6-sol high",
+            "gpt-5.6-terra medium",
+            "gpt-5.6-luna low",
+        ] {
+            assert!(text.contains(expected), "missing {expected}: {text}");
+        }
+        for hidden in ["GPT-5.6", "OpenAI", "OAuth"] {
+            assert!(!text.contains(hidden), "leaked {hidden}: {text}");
+        }
+    }
+
+    #[test]
+    fn vertical_strip_shows_selected_routes_for_completed_workers_at_narrow_width() {
+        let mut sol = member("sol-complete", "completed", None, &[]);
+        sol.selected_model = Some("gpt-5.6-sol".into());
+        sol.model = Some("gpt-5.6".into());
+        sol.effort = Some("high".into());
+        let mut terra = member("terra-complete", "completed", None, &[]);
+        terra.selected_model = Some("gpt-5.6-terra".into());
+        terra.model = Some("gpt-5.6".into());
+        terra.effort = Some("medium".into());
+        let mut luna = member("luna-complete", "completed", None, &[]);
+        luna.selected_model = Some("gpt-5.6-luna".into());
+        luna.model = Some("gpt-5.6".into());
+        luna.effort = Some("low".into());
+
+        let text =
+            render_swarm_strip_vertical(&[sol, terra, luna], 0, false, &[], None, 0, 54, 4, 8)
+                .iter()
+                .map(plain_line)
+                .collect::<Vec<_>>()
+                .join("\n");
+        assert!(
+            text.contains("gpt-5.6-sol high")
+                && text.contains("gpt-5.6-terra medium")
+                && text.contains("gpt-5.6-luna low"),
+            "{text}"
+        );
+        assert!(
+            !text.contains("GPT-5.6") && !text.contains("OpenAI") && !text.contains("OAuth"),
+            "{text}"
+        );
     }
 
     #[test]
@@ -2276,24 +2549,24 @@ mod tests {
         let texts: Vec<String> = lines.iter().map(plain_line).collect();
         let all = texts.join("\n");
         // Selected agent (bee, sorted second: fox is active and sorts first)
-        // shows marker + icon without repeating the animal name; its detail
-        // slides in directly beneath.
+        // shows marker + icon + name; its detail slides in directly beneath.
         let bee_row = texts
             .iter()
             .position(|l| l.contains("▸") && l.contains("🐝"))
             .expect("selected row shows marker and icon: {texts:?}");
         assert!(
-            !texts[bee_row].contains("bee"),
-            "selected compact row should stay emoji-only: {texts:?}"
+            texts[bee_row].contains("bee"),
+            "selected row shows name: {texts:?}"
         );
         assert!(
             texts[bee_row + 1].contains("waiting for work"),
             "detail expands directly under the selected row: {texts:?}"
         );
-        // Unselected agent stays icon-only.
+        // Unselected agents keep their readable identity in the persistent
+        // strip, while their transcript stays collapsed.
         assert!(
-            !texts.iter().any(|l| l.contains("fox") && !l.contains("▸")),
-            "unselected agents stay icon-only: {texts:?}"
+            texts.iter().any(|l| l.contains("fox") && !l.contains("▸")),
+            "unselected agent keeps readable identity: {texts:?}"
         );
         assert!(
             !all.contains("compiling the renderer"),
@@ -2308,7 +2581,8 @@ mod tests {
         worker.icon = Some("🦕".to_string());
         worker.task = Some("review authentication changes".to_string());
         worker.todo = Some((2, 4));
-        worker.model = Some("openai:gpt-5.6-sol".into());
+        worker.selected_model = Some("gpt-5.6-sol".into());
+        worker.model = Some("openai:gpt-5.6".into());
         worker.provider = Some("OpenAI".into());
         worker.auth_method = Some("OAuth".into());
         worker.effort = Some("high".into());
@@ -2369,8 +2643,8 @@ mod tests {
             "assigned agent emoji missing: {all}"
         );
         assert!(
-            all.contains("reviewer · Working · GPT-5.6 · OpenAI OAuth"),
-            "stable status/model/route metadata missing: {all}"
+            all.contains("reviewer · Working · gpt-5.6-sol high"),
+            "stable status/worker-route metadata missing: {all}"
         );
         assert!(
             STRIP_SPINNER_FRAMES
@@ -2393,8 +2667,15 @@ mod tests {
             .collect::<Vec<_>>()
             .join("\n");
         assert!(
-            live.contains("reviewer · 00:18 · GPT-5.6 · OpenAI OAuth · high"),
+            live.contains("reviewer · 00:18 · gpt-5.6-sol high"),
             "live header metadata missing: {live}"
+        );
+        assert!(
+            !all.contains("OpenAI")
+                && !all.contains("OAuth")
+                && !live.contains("OpenAI")
+                && !live.contains("OAuth"),
+            "worker surfaces must stay provider-neutral: {all}\n{live}"
         );
         assert!(
             live.contains("test token refresh flow")
@@ -2410,7 +2691,8 @@ mod tests {
     fn chat_card_metadata_degrades_and_is_width_bounded() {
         let mut worker = member("reviewer", "running", None, &[]);
         worker.icon = Some("🦕".to_string());
-        worker.model = Some("openai:gpt-5.6-sol".into());
+        worker.selected_model = Some("gpt-5.6-sol".into());
+        worker.model = Some("openai:gpt-5.6".into());
         worker.provider = Some("OpenAI".into());
         worker.auth_method = Some("OAuth".into());
 
@@ -2424,20 +2706,24 @@ mod tests {
             }
         }
 
-        // Wide: everything fits. Narrow: route drops before model, model before
-        // status, and the label always survives.
+        // Wide: selected route fits. Narrow: route drops before status, while
+        // the label always survives. Provider/auth never render for workers.
         let wide = plain_line(&render_swarm_chat_cards(std::slice::from_ref(&worker), 100)[0]);
-        assert!(wide.contains("Working · GPT-5.6 · OpenAI OAuth"), "{wide}");
+        assert!(wide.contains("Working · gpt-5.6-sol"), "{wide}");
+        assert!(
+            !wide.contains("OpenAI") && !wide.contains("OAuth"),
+            "{wide}"
+        );
         let mid = plain_line(&render_swarm_chat_cards(std::slice::from_ref(&worker), 34)[0]);
         assert!(
-            mid.contains("Working") && !mid.contains("OpenAI OAuth"),
+            mid.contains("Working") && !mid.contains("OpenAI") && !mid.contains("OAuth"),
             "{mid}"
         );
 
         let mut bare = member("plain", "running", None, &[]);
         bare.icon = Some("🦕".to_string());
         let bare_line = plain_line(&render_swarm_chat_cards(std::slice::from_ref(&bare), 100)[0]);
-        assert_eq!(bare_line.trim(), "🦕 ● plain · Working");
+        assert_eq!(bare_line.trim(), "🦕 ● plain · Working · unknown");
     }
 
     #[test]
@@ -2467,8 +2753,8 @@ mod tests {
         assert_eq!(lines.len(), 1, "unfocused strip stays compact: {all}");
         assert!(all.contains("🐝"), "assigned icon missing: {all}");
         assert!(
-            !all.contains("reviewer"),
-            "compact strip should not repeat the animal name: {all}"
+            all.contains("reviewer"),
+            "compact strip keeps worker identity: {all}"
         );
         assert!(
             !all.contains("test token refresh flow"),
@@ -2647,6 +2933,47 @@ mod tests {
     }
 
     #[test]
+    fn active_horizontal_strip_variants_show_canonical_runtime_without_provider_auth() {
+        let mut terra = member("terra", "running", None, &[]);
+        terra.selected_model = Some("openai-api:gpt-5.6-terra".into());
+        terra.model = Some("provider-reported-model".into());
+        terra.effort = Some("medium".into());
+        terra.provider = Some("OpenAI API".into());
+        terra.auth_method = Some("service-account".into());
+        let mut astra = member("astra", "thinking", None, &[]);
+        astra.selected_model = Some("openai/oauth:gpt-6-astra[web]".into());
+        astra.model = Some("provider-reported-web-model".into());
+        astra.effort = Some("high".into());
+        astra.provider = Some("OpenAI OAuth".into());
+        astra.auth_method = Some("browser-auth".into());
+        let mut completed = member("completed", "completed", None, &[]);
+        completed.selected_model = Some("openai-api:gpt-5.6-terra".into());
+        completed.effort = Some("medium".into());
+
+        for focused in [false, true] {
+            let lines = render_swarm_strip(
+                &[terra.clone(), astra.clone(), completed.clone()],
+                0,
+                focused,
+                &hints(),
+                None,
+                0,
+                160,
+                12,
+            );
+            let chips = plain_line(&lines[0]);
+            assert!(chips.contains("terra"), "got: {chips}");
+            assert!(chips.contains("astra"), "got: {chips}");
+            assert!(chips.contains("gpt-5.6-terra medium"), "got: {chips}");
+            assert!(chips.contains("gpt-6-astra[web]"), "got: {chips}");
+            assert!(!chips.contains("gpt-6-astra[web] high"), "got: {chips}");
+            assert!(!chips.contains("OpenAI"), "got: {chips}");
+            assert!(!chips.contains("auth"), "got: {chips}");
+            assert!(!chips.contains("completed · gpt-5.6-terra"), "got: {chips}");
+        }
+    }
+
+    #[test]
     fn strip_unfocused_shows_enter_controls_hint() {
         let members = vec![member("a", "running", None, &[])];
         let lines = render_swarm_strip(
@@ -2678,11 +3005,11 @@ mod tests {
         a.task = Some("fix parser".to_string());
         let mut b = member("owl", "running", None, &[]);
         b.task = Some("write docs".to_string());
-        let lines = render_swarm_strip(&[a, b], 0, false, &hints(), None, 0, 100, 12);
+        let lines = render_swarm_strip(&[a, b], 0, false, &hints(), None, 0, 120, 12);
         let chips = plain_line(&lines[0]);
-        assert!(chips.contains("fox·fix parser"), "got: {chips}");
-        assert!(chips.contains("owl·write docs"), "got: {chips}");
-        assert!(lines[0].width() <= 100);
+        assert!(chips.contains("fox · unknown·fix parser"), "got: {chips}");
+        assert!(chips.contains("owl · unknown·write docs"), "got: {chips}");
+        assert!(lines[0].width() <= 120);
     }
 
     #[test]
@@ -2908,6 +3235,15 @@ mod tests {
     }
 
     #[test]
+    fn horizontal_strip_shows_unknown_runtime_with_effort() {
+        let mut worker = member("worker", "running", None, &[]);
+        worker.effort = Some("medium".into());
+        let lines = render_swarm_strip(&[worker], 0, true, &hints(), None, 0, 80, 12);
+        let text = plain_line(&lines[0]);
+        assert!(text.contains("unknown medium"), "got: {text:?}");
+    }
+
+    #[test]
     fn compact_empty_renders_nothing() {
         assert!(render_swarm_compact(&[], Some((1, 1, 3)), 30, 2).is_empty());
     }
@@ -2920,7 +3256,7 @@ mod tests {
             member("c", "completed", None, &[]),
             member("d", "blocked", None, &[]),
         ];
-        let lines = render_swarm_compact(&members, Some((5, 3, 12)), 32, 2);
+        let lines = render_swarm_compact(&members, Some((5, 3, 12)), 60, 2);
         assert_eq!(lines.len(), 2, "expected summary + bar");
         let header = plain_line(&lines[0]);
         assert!(header.contains("2/4 agents"), "got: {header}");
@@ -2930,13 +3266,54 @@ mod tests {
         // Bar: green done, yellow running, dim remainder, exactly `width` cells.
         let bar = &lines[1];
         let bar_text = plain_line(bar);
-        assert_eq!(disp_w(&bar_text), 32, "bar fills the width: {bar_text:?}");
+        assert_eq!(disp_w(&bar_text), 60, "bar fills the width: {bar_text:?}");
         assert_eq!(bar.spans.len(), 3, "done + running + empty segments");
         for span in &bar.spans {
             assert!(span.content.chars().all(|c| c == '▁'), "got: {bar_text:?}");
         }
         assert_eq!(bar.spans[0].style.fg, Some(rgb(100, 200, 100)));
         assert_eq!(bar.spans[1].style.fg, Some(rgb(255, 200, 100)));
+    }
+
+    #[test]
+    fn compact_shows_active_canonical_runtime_without_provider_auth() {
+        let mut terra = member("terra", "running", None, &[]);
+        terra.selected_model = Some("openai-api:gpt-5.6-terra".into());
+        terra.model = Some("provider-reported-model".into());
+        terra.effort = Some("medium".into());
+        terra.provider = Some("OpenAI API".into());
+        terra.auth_method = Some("service-account".into());
+        let mut astra = member("astra", "thinking", None, &[]);
+        astra.selected_model = Some("openai/oauth:gpt-6-astra[web]".into());
+        astra.model = Some("provider-reported-web-model".into());
+        astra.effort = Some("high".into());
+        astra.provider = Some("OpenAI OAuth".into());
+        astra.auth_method = Some("browser-auth".into());
+        let mut completed = member("completed", "completed", None, &[]);
+        completed.selected_model = Some("openai-api:gpt-5.6-terra".into());
+        completed.effort = Some("medium".into());
+
+        let lines = render_swarm_compact(&[terra, astra, completed], None, 120, 2);
+        let header = plain_line(&lines[0]);
+        assert!(header.contains("2/3 agents"), "got: {header}");
+        assert!(header.contains("gpt-5.6-terra medium"), "got: {header}");
+        assert!(header.contains("gpt-6-astra[web]"), "got: {header}");
+        assert!(!header.contains("gpt-6-astra[web] high"), "got: {header}");
+        assert!(!header.contains("OpenAI"), "got: {header}");
+        assert!(!header.contains("auth"), "got: {header}");
+        assert!(
+            !header.contains("completed · gpt-5.6-terra"),
+            "got: {header}"
+        );
+    }
+
+    #[test]
+    fn compact_shows_unknown_runtime_with_effort() {
+        let mut worker = member("worker", "running", None, &[]);
+        worker.effort = Some("medium".into());
+        let lines = render_swarm_compact(&[worker], None, 80, 2);
+        let text = plain_line(&lines[0]);
+        assert!(text.contains("unknown medium"), "got: {text:?}");
     }
 
     #[test]

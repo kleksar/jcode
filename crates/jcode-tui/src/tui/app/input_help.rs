@@ -61,6 +61,9 @@ impl App {
             "git" => {
                 "/git\nShow git status --short --branch for the current session working directory.\n\n/git status\nAlias for /git."
             }
+            "pwd" => {
+                "/pwd\nPrint the exact current session working directory in chat so it can be selected and copied. This does not modify the clipboard."
+            }
             "commit" => {
                 "/commit\nAsk the agent to inspect current uncommitted changes and create interactive, logical commits.\n\nThe agent should group related files or hunks, preserve unrelated work, validate as appropriate, and report the commits created plus anything left uncommitted."
             }

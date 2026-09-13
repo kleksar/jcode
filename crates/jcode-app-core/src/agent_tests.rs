@@ -1228,6 +1228,111 @@ async fn restore_session_reapplies_persisted_delegated_root_read_boundary() {
 }
 
 #[tokio::test]
+async fn enforced_root_boundary_applies_before_a_user_root_spawns_workers() {
+    let _guard = crate::storage::lock_test_env();
+    let home = tempfile::TempDir::new().expect("create enforced-boundary config home");
+    std::fs::write(
+        home.path().join("config.toml"),
+        "[agents]\nenforce_delegated_swarm_root_read_boundary = true\n",
+    )
+    .expect("write enforced-boundary config");
+    let previous_home = std::env::var_os("JCODE_HOME");
+    crate::env::set_var("JCODE_HOME", home.path());
+    crate::config::invalidate_config_cache();
+
+    let provider: Arc<dyn Provider> = Arc::new(NativeAutoCompactionProvider);
+    let registry = Registry::new(provider.clone()).await;
+    let agent = Agent::new(provider, registry);
+
+    assert!(agent.delegated_swarm_root_read_boundary());
+    assert_eq!(
+        crate::tool::session_delegated_swarm_read_boundary_for_test(agent.session_id()),
+        Some(true),
+        "the repository-read boundary must be active before any worker spawn"
+    );
+
+    match previous_home {
+        Some(value) => crate::env::set_var("JCODE_HOME", value),
+        None => crate::env::remove_var("JCODE_HOME"),
+    }
+    crate::config::invalidate_config_cache();
+}
+
+#[tokio::test]
+async fn enforced_root_boundary_is_persisted_and_reapplied_on_restore() {
+    let _guard = crate::storage::lock_test_env();
+    let home = tempfile::TempDir::new().expect("create enforced-boundary config home");
+    std::fs::write(
+        home.path().join("config.toml"),
+        "[agents]\nenforce_delegated_swarm_root_read_boundary = true\n",
+    )
+    .expect("write enforced-boundary config");
+    let previous_home = std::env::var_os("JCODE_HOME");
+    crate::env::set_var("JCODE_HOME", home.path());
+    crate::config::invalidate_config_cache();
+
+    let provider: Arc<dyn Provider> = Arc::new(NativeAutoCompactionProvider);
+    let registry = Registry::new(provider.clone()).await;
+    let mut root = Agent::new(provider.clone(), registry);
+    let root_id = root.session_id().to_string();
+    root.session.save().expect("persist enforced root");
+    crate::tool::set_session_delegated_swarm_read_boundary(&root_id, false);
+
+    let restored_registry = Registry::new(provider.clone()).await;
+    let mut restored = Agent::new(provider, restored_registry);
+    restored
+        .restore_session_with_working_dir(&root_id, None)
+        .expect("restore persisted enforced root");
+    assert_eq!(
+        crate::tool::session_delegated_swarm_read_boundary_for_test(&root_id),
+        Some(true),
+        "restoring an enforced root must reapply its persisted boundary"
+    );
+
+    match previous_home {
+        Some(value) => crate::env::set_var("JCODE_HOME", value),
+        None => crate::env::remove_var("JCODE_HOME"),
+    }
+    crate::config::invalidate_config_cache();
+}
+
+#[tokio::test]
+async fn enforced_root_boundary_does_not_restrict_swarm_workers() {
+    let _guard = crate::storage::lock_test_env();
+    let home = tempfile::TempDir::new().expect("create enforced-boundary config home");
+    std::fs::write(
+        home.path().join("config.toml"),
+        "[agents]\nenforce_delegated_swarm_root_read_boundary = true\n",
+    )
+    .expect("write enforced-boundary config");
+    let previous_home = std::env::var_os("JCODE_HOME");
+    crate::env::set_var("JCODE_HOME", home.path());
+    crate::config::invalidate_config_cache();
+
+    let provider: Arc<dyn Provider> = Arc::new(NativeAutoCompactionProvider);
+    let registry = Registry::new(provider.clone()).await;
+    let worker = Agent::new_with_parent_and_initial_working_dir_and_origin(
+        provider,
+        registry,
+        None,
+        Some("root".to_string()),
+        crate::session::SessionOrigin::SwarmWorker,
+    )
+    .expect("create swarm worker");
+    assert_eq!(
+        crate::tool::session_delegated_swarm_read_boundary_for_test(worker.session_id()),
+        Some(false),
+        "the root-only boundary must not deny worker repository reads or bash access"
+    );
+
+    match previous_home {
+        Some(value) => crate::env::set_var("JCODE_HOME", value),
+        None => crate::env::remove_var("JCODE_HOME"),
+    }
+    crate::config::invalidate_config_cache();
+}
+
+#[tokio::test]
 async fn explicit_provider_pin_is_persisted_and_reapplied_on_restore() {
     let _guard = crate::storage::lock_test_env();
     let provider = Arc::new(ExplicitPinProvider::new("z-ai/glm-5.2"));

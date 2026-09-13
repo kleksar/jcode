@@ -414,6 +414,12 @@ pub trait TuiState {
     fn chat_overscroll_remaining(&self) -> Option<f32> {
         None
     }
+    /// Live members managed by this session for the elastic overscroll view.
+    /// Implementations must scope this to the current session's spawn subtree;
+    /// the renderer filters lifecycle state through the shared swarm predicate.
+    fn overscroll_swarm_members(&self) -> Vec<crate::protocol::SwarmMemberStatus> {
+        Vec::new()
+    }
     /// Whether a mouse drag-selection is currently held at the top/bottom edge of
     /// a pane and should keep auto-scrolling on every tick (browser-style). When
     /// true the redraw loop must stay responsive even if the transcript is
@@ -818,6 +824,9 @@ pub trait TuiState {
     fn working_dir(&self) -> Option<String>;
     /// Current git branch of the working directory, if in a repo.
     fn git_branch(&self) -> Option<String> {
+        None
+    }
+    fn workspace_context_label(&self) -> Option<String> {
         None
     }
     /// Monotonic clock for viewport animations

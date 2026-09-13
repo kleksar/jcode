@@ -120,6 +120,162 @@ fn select_inspector_file(
 }
 
 #[test]
+fn swarm_worktree_selection_updates_the_diff_and_files_root() {
+    let _lock = scroll_render_test_lock();
+    let coordinator = init_worktree_pane_test_repo();
+    let worker = coordinator.path().join(".worktrees/worker");
+    assert!(std::process::Command::new("git")
+        .current_dir(coordinator.path())
+        .args(["worktree", "add", "-b", "wt-test", ".worktrees/worker"])
+        .status()
+        .unwrap()
+        .success());
+    std::fs::write(worker.join("worker-only.rs"), "worker-only-marker\n").unwrap();
+    let mut app = create_test_app();
+    let coordinator_root = coordinator.path().to_string_lossy().into_owned();
+    let worker_root = worker.to_string_lossy().into_owned();
+    app.session.working_dir = Some(coordinator_root.clone());
+    app.swarm_enabled = true;
+    app.debug_force_inline_gallery = true;
+    app.remote_swarm_members = vec![crate::protocol::SwarmMemberStatus {
+        session_id: "worker".to_string(),
+        friendly_name: Some("worker".to_string()),
+        working_dir: Some(worker_root.clone()),
+        status: "running".to_string(),
+        detail: None, task_label: None, role: Some("agent".to_string()),
+        is_headless: Some(true), live_attachments: None, status_age_secs: Some(1),
+        output_tail: None, report_back_to_session_id: Some(app.session.id.clone()),
+        todo_progress: None, todo_items: Vec::new(),
+        runtime: crate::protocol::SwarmMemberRuntime::default(),
+    }];
+    assert_eq!(app.view_working_dir(), Some(worker_root.clone()));
+    app.swarm_panel_focused = true;
+    assert!(app.handle_swarm_panel_key(
+        KeyCode::Char('w'),
+        KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+    ));
+    assert_eq!(app.view_working_dir(), Some(worker_root.clone()));
+    crate::tui::ui::prime_worktree_changes_for_tests(worker.as_path());
+    app.diff_mode = crate::config::DiffDisplayMode::Inline;
+    app.set_worktree_pane_tab(super::worktree_pane::WorktreePaneTab::Diff);
+    let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(140, 30)).unwrap();
+    render_and_snap(&app, &mut terminal);
+    let worker_diff = render_and_snap(&app, &mut terminal);
+    assert!(worker_diff.contains("worker-only-marker"), "worker diff: {worker_diff}");
+    assert!(app.handle_swarm_panel_key(
+        KeyCode::Char('j'),
+        KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+    ));
+    assert_eq!(app.view_working_dir(), Some(coordinator_root.clone()));
+    crate::tui::ui::prime_worktree_changes_for_tests(coordinator.path());
+    let coordinator_diff = render_and_snap(&app, &mut terminal);
+    assert!(!coordinator_diff.contains("worker-only-marker"), "coordinator diff: {coordinator_diff}");
+    assert!(!coordinator_diff.contains(".worktrees/worker/"));
+    assert!(!coordinator_diff.contains("unreadable file"));
+    assert!(app.handle_swarm_panel_key(
+        KeyCode::Char('k'),
+        KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+    ));
+    assert_eq!(app.view_working_dir(), Some(worker.to_string_lossy().into_owned()));
+    app.remote_swarm_members[0].working_dir = Some("/definitely/unavailable-worker-root".into());
+    app.worktree_view_mode = super::WorktreeViewMode::Coordinator;
+    app.focused_worker_worktree = None;
+    assert!(app.handle_swarm_panel_key(
+        KeyCode::Char('w'),
+        KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+    ));
+    assert_eq!(app.view_working_dir(), Some(coordinator_root));
+    assert_eq!(crate::tui::TuiState::workspace_context_label(&app), None);
+}
+
+#[test]
+fn swarm_worktree_auto_selection_is_sticky_and_resets() {
+    let _lock = scroll_render_test_lock();
+    let coordinator = init_worktree_pane_test_repo();
+    let z = init_worktree_pane_test_repo();
+    let a = init_worktree_pane_test_repo();
+    let mut app = create_test_app();
+    app.session.working_dir = Some(coordinator.path().to_string_lossy().into_owned());
+    app.swarm_enabled = true;
+    app.debug_force_inline_gallery = true;
+    let parent = app.session.id.clone();
+    let member = |id: &str, root: &std::path::Path| crate::protocol::SwarmMemberStatus {
+        session_id: id.into(), friendly_name: Some(id.into()),
+        working_dir: Some(root.to_string_lossy().into_owned()), status: "running".into(),
+        detail: None, task_label: None, role: Some("agent".into()), is_headless: Some(true),
+        live_attachments: None, status_age_secs: Some(1), output_tail: None,
+        report_back_to_session_id: Some(parent.clone()), todo_progress: None, todo_items: vec![],
+        runtime: Default::default(),
+    };
+    app.remote_swarm_members = vec![member("z", z.path())];
+    assert_eq!(app.view_working_dir(), Some(z.path().to_string_lossy().into_owned()));
+    app.remote_swarm_members.insert(0, member("a", a.path()));
+    assert_eq!(app.view_working_dir(), Some(z.path().to_string_lossy().into_owned()));
+    app.swarm_panel_selected = 0;
+    assert!(!app.handle_swarm_panel_key(
+        KeyCode::Char('w'),
+        KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+    ));
+    app.swarm_panel_focused = true;
+    assert!(app.handle_swarm_panel_key(
+        KeyCode::Char('w'),
+        KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+    ));
+    assert_eq!(app.view_working_dir(), Some(a.path().to_string_lossy().into_owned()));
+    app.remote_swarm_members[1].status = "completed".into();
+    assert_eq!(app.view_working_dir(), Some(a.path().to_string_lossy().into_owned()));
+    assert!(app.handle_swarm_panel_key(
+        KeyCode::Char('j'),
+        KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+    ));
+    assert_eq!(app.view_working_dir(), app.session.working_dir.clone());
+    app.reset_worktree_view();
+    assert_eq!(app.worktree_view_mode, super::WorktreeViewMode::Auto);
+    assert!(app.focused_worker_worktree.is_none());
+    assert!(app.auto_worker_worktree.borrow().is_none());
+    assert_eq!(app.view_working_dir(), Some(a.path().to_string_lossy().into_owned()));
+}
+
+#[test]
+fn diff_command_switches_worker_coordinator_and_auto_worktree_views() {
+    let _lock = scroll_render_test_lock();
+    let coordinator = init_worktree_pane_test_repo();
+    let worker = init_worktree_pane_test_repo();
+    let mut app = create_test_app();
+    let coordinator_root = coordinator.path().to_string_lossy().into_owned();
+    let worker_root = worker.path().to_string_lossy().into_owned();
+    app.session.working_dir = Some(coordinator_root.clone());
+    app.swarm_enabled = true;
+    app.debug_force_inline_gallery = true;
+    app.remote_swarm_members = vec![crate::protocol::SwarmMemberStatus {
+        session_id: "worker".to_string(),
+        friendly_name: Some("worker".to_string()),
+        working_dir: Some(worker_root.clone()),
+        status: "running".to_string(),
+        detail: None, task_label: None, role: Some("agent".to_string()),
+        is_headless: Some(true), live_attachments: None, status_age_secs: Some(1),
+        output_tail: None, report_back_to_session_id: Some(app.session.id.clone()),
+        todo_progress: None, todo_items: Vec::new(),
+        runtime: crate::protocol::SwarmMemberRuntime::default(),
+    }];
+
+    assert!(super::commands::handle_diff_command(&mut app, "/diff worker"));
+    assert_eq!(app.worktree_view_mode, super::WorktreeViewMode::Worker);
+    assert_eq!(app.view_working_dir(), Some(worker_root.clone()));
+
+    assert!(super::commands::handle_diff_command(&mut app, "/diff coordinator"));
+    assert_eq!(app.worktree_view_mode, super::WorktreeViewMode::Coordinator);
+    assert_eq!(app.view_working_dir(), Some(coordinator_root));
+
+    assert!(super::commands::handle_diff_command(&mut app, "/diff auto"));
+    assert_eq!(app.worktree_view_mode, super::WorktreeViewMode::Auto);
+    assert_eq!(app.view_working_dir(), Some(worker_root));
+
+    assert!(super::commands::handle_diff_command(&mut app, "/diff inline"));
+    assert_eq!(app.diff_mode, crate::config::DiffDisplayMode::Inline);
+}
+
+#[test]
 fn files_inspector_markdown_read_source_and_changes_are_real_views() {
     let _lock = scroll_render_test_lock();
     let (_repo, mut app, mut terminal) = inspector_fixture();

@@ -107,6 +107,7 @@ fn workers_to_members(workers: &[MockWorker]) -> Vec<GalleryMember> {
                 todo: None,
                 todo_items: Vec::new(),
                 model: None,
+                selected_model: None,
                 provider: None,
                 auth_method: None,
                 effort: None,

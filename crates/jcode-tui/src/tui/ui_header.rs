@@ -886,6 +886,9 @@ fn build_header_lines_with_auth(
     if let Some(dir) = app.working_dir() {
         let display_dir = abbreviate_home(&dir);
         let mut text = display_dir;
+        if let Some(worker) = app.workspace_context_label() {
+            text = format!("{text} [worker: {worker}]");
+        }
         if let Some(branch) = app.git_branch() {
             let with_branch = format!("{} ({})", text, branch);
             if with_branch.chars().count() <= w {

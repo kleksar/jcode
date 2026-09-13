@@ -4,9 +4,12 @@ use crate::server::durable_state::{
 };
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
-use std::sync::Arc;
+use std::future::Future;
+use std::pin::Pin;
+use std::sync::{Arc, Mutex as StdMutex, Weak};
+use std::task::{Context, Poll};
 use std::time::Duration;
-use tokio::sync::{RwLock, mpsc};
+use tokio::sync::{Mutex, OwnedMutexGuard, RwLock, mpsc};
 
 const AWAIT_MEMBERS_DIR: &str = "jcode-await-members";
 const FINAL_STATE_TTL: Duration = Duration::from_secs(6 * 60 * 60);
@@ -35,9 +38,9 @@ pub struct PersistedAwaitMembersState {
     pub mode: Option<String>,
     pub created_at_unix_ms: u64,
     pub deadline_unix_ms: u64,
-    /// When true, the wait runs as a detached background watcher that delivers
-    /// its result via notify/wake instead of blocking the requesting turn.
-    /// Background watchers are auto-resumed at server startup after a reload.
+    /// Active delivery policy for the semantic wait. It is deliberately not
+    /// part of `request_key`: a retry updates this policy in place while the
+    /// same watcher continues to own the target and deadline.
     #[serde(default)]
     pub background: bool,
     /// Surface a completion notification card to attached clients.
@@ -46,12 +49,22 @@ pub struct PersistedAwaitMembersState {
     /// Wake an idle requesting agent on completion (or soft-interrupt if busy).
     #[serde(default = "default_true")]
     pub wake: bool,
+    /// Monotonic incarnation of this semantic wait. The semantic key remains
+    /// stable across preference retries, while this persisted generation fences
+    /// a reload orphan snapshot from cancelling a newer requester.
+    #[serde(default)]
+    pub request_generation: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub final_response: Option<PersistedAwaitMembersResult>,
 }
 
 fn default_true() -> bool {
     true
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub(super) enum AwaitRequestGenerationError {
+    Exhausted,
 }
 
 impl PersistedAwaitMembersState {
@@ -75,9 +88,318 @@ struct AwaitMembersWaiter {
 pub(crate) struct AwaitMembersRuntime {
     active_keys: Arc<RwLock<HashSet<String>>>,
     waiters: Arc<RwLock<HashMap<String, Vec<AwaitMembersWaiter>>>>,
+    /// Every in-process operation that can change the durable state or waiter
+    /// set for one semantic wait uses this lock. The state file is then written
+    /// while that operation still owns the lock, so a preference retry cannot
+    /// race a terminal claim with independent read-modify-write snapshots.
+    /// Weak registry entries cannot keep dead semantic keys alive. Each
+    /// transaction lease owns the strong lock reference and removes its exact
+    /// registry entry after releasing the final lock holder. The std mutex is
+    /// only held for a map lookup/update, never across an await.
+    transactions: Arc<StdMutex<HashMap<String, Weak<Mutex<()>>>>>,
+    #[cfg(test)]
+    transaction_queue_pause: Arc<Mutex<Option<AwaitTransactionQueuePause>>>,
+    #[cfg(test)]
+    transaction_pause: Arc<Mutex<Option<AwaitTransactionPause>>>,
+    #[cfg(test)]
+    reload_orphan_pause: Arc<Mutex<Option<AwaitReloadOrphanPause>>>,
+}
+
+/// Owns the strong lock reference from registration until a transaction either
+/// completes or is cancelled. This is deliberately created before polling
+/// `lock_owned`: cancellation while queued must still clean the matching weak
+/// registry entry once no other operation retains this lock.
+struct AwaitTransactionRegistration {
+    registry: Arc<StdMutex<HashMap<String, Weak<Mutex<()>>>>>,
+    key: String,
+    lock: Arc<Mutex<()>>,
+}
+
+impl AwaitTransactionRegistration {
+    fn install(registry: Arc<StdMutex<HashMap<String, Weak<Mutex<()>>>>>, key: &str) -> Self {
+        let lock = {
+            let mut transactions = registry
+                .lock()
+                .expect("await transaction registry mutex poisoned");
+            match transactions.get(key).and_then(Weak::upgrade) {
+                Some(lock) => lock,
+                None => {
+                    let lock = Arc::new(Mutex::new(()));
+                    transactions.insert(key.to_string(), Arc::downgrade(&lock));
+                    lock
+                }
+            }
+        };
+        Self {
+            registry,
+            key: key.to_string(),
+            lock,
+        }
+    }
+}
+
+impl Drop for AwaitTransactionRegistration {
+    fn drop(&mut self) {
+        let mut registry = self
+            .registry
+            .lock()
+            .expect("await transaction registry mutex poisoned");
+        let matches_this_lock = registry
+            .get(&self.key)
+            .is_some_and(|registered| registered.ptr_eq(&Arc::downgrade(&self.lock)));
+        // The registration itself contributes the final strong reference only
+        // when no queued acquirer, acquired lease, or owned mutex guard remains.
+        // Pointer identity prevents an old lease from removing a newer lock.
+        if matches_this_lock && Arc::strong_count(&self.lock) == 1 {
+            registry.remove(&self.key);
+        }
+    }
+}
+
+/// Couples the pre-acquisition registration with the lock future. Field order
+/// is intentional: cancellation drops `acquire` before `registration`, so the
+/// temporary Arc owned by `lock_owned` cannot leave a dead weak entry behind.
+struct AwaitTransactionAcquisition {
+    acquire: Pin<Box<dyn Future<Output = OwnedMutexGuard<()>> + Send>>,
+    registration: Option<AwaitTransactionRegistration>,
+    #[cfg(test)]
+    queue_pause: Option<AwaitTransactionQueuePause>,
+}
+
+impl AwaitTransactionAcquisition {
+    fn new(
+        registry: Arc<StdMutex<HashMap<String, Weak<Mutex<()>>>>>,
+        key: &str,
+        #[cfg(test)] queue_pause: Option<AwaitTransactionQueuePause>,
+    ) -> Self {
+        let registration = AwaitTransactionRegistration::install(registry, key);
+        let acquire = Box::pin(registration.lock.clone().lock_owned());
+        Self {
+            acquire,
+            registration: Some(registration),
+            #[cfg(test)]
+            queue_pause,
+        }
+    }
+}
+
+impl Future for AwaitTransactionAcquisition {
+    type Output = (AwaitTransactionRegistration, OwnedMutexGuard<()>);
+
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        let this = self.as_mut().get_mut();
+        match this.acquire.as_mut().poll(cx) {
+            Poll::Ready(guard) => Poll::Ready((
+                this.registration
+                    .take()
+                    .expect("await transaction registration present until acquisition"),
+                guard,
+            )),
+            Poll::Pending => {
+                #[cfg(test)]
+                if let Some(pause) = &this.queue_pause {
+                    pause.entered.notify_one();
+                }
+                Poll::Pending
+            }
+        }
+    }
+}
+
+/// A per-key transaction remains registered for every queued/acquired lease.
+/// Dropping the final lease removes the matching weak entry only after its
+/// mutex guard is gone, so a concurrent acquirer cannot receive a second lock
+/// for the same key.
+pub(super) struct AwaitTransactionLease {
+    registration: Option<AwaitTransactionRegistration>,
+    guard: Option<OwnedMutexGuard<()>>,
+}
+
+impl Drop for AwaitTransactionLease {
+    fn drop(&mut self) {
+        // `OwnedMutexGuard` retains a strong Arc. Release it before testing
+        // whether this lease is the last operation still associated with key.
+        self.guard.take();
+        // Drop the composed registration exactly once after the guard. Its
+        // Drop implementation conditionally removes the matching weak entry.
+        self.registration.take();
+    }
+}
+
+#[cfg(test)]
+impl AwaitTransactionLease {
+    pub(super) fn lock_identity(&self) -> usize {
+        Arc::as_ptr(
+            &self
+                .registration
+                .as_ref()
+                .expect("live transaction lease retains its registration")
+                .lock,
+        ) as usize
+    }
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum AwaitTransactionOperation {
+    Request,
+    Finalize,
+    Cancel,
+}
+
+#[cfg(test)]
+#[derive(Clone)]
+struct AwaitTransactionPause {
+    operation: AwaitTransactionOperation,
+    entered: Arc<tokio::sync::Notify>,
+    release: Arc<tokio::sync::Notify>,
+}
+
+#[cfg(test)]
+#[derive(Clone)]
+struct AwaitTransactionQueuePause {
+    entered: Arc<tokio::sync::Notify>,
+}
+
+#[cfg(test)]
+#[derive(Clone)]
+struct AwaitReloadOrphanPause {
+    entered: Arc<tokio::sync::Notify>,
+    release: Arc<tokio::sync::Notify>,
 }
 
 impl AwaitMembersRuntime {
+    /// Acquire the sole in-process transaction for `key`. The durable request
+    /// generation is authoritative across reload/process boundaries, while
+    /// this lease linearizes the current process's state and waiter mutations.
+    async fn transaction(
+        &self,
+        key: &str,
+        #[cfg(test)] operation: AwaitTransactionOperation,
+    ) -> AwaitTransactionLease {
+        #[cfg(test)]
+        let queue_pause = self.transaction_queue_pause.lock().await.clone();
+        let (registration, guard) = AwaitTransactionAcquisition::new(
+            self.transactions.clone(),
+            key,
+            #[cfg(test)]
+            queue_pause,
+        )
+        .await;
+        // Compose the pre-acquisition registration and owned guard before any
+        // later await. A cancellation after lock acquisition therefore uses
+        // the normal lease cleanup ordering rather than split local drops.
+        let lease = AwaitTransactionLease {
+            registration: Some(registration),
+            guard: Some(guard),
+        };
+        #[cfg(test)]
+        if let Some(pause) = self.transaction_pause.lock().await.clone()
+            && pause.operation == operation
+        {
+            pause.entered.notify_one();
+            pause.release.notified().await;
+        }
+        lease
+    }
+
+    pub(super) async fn transaction_for_request(&self, key: &str) -> AwaitTransactionLease {
+        self.transaction(
+            key,
+            #[cfg(test)]
+            AwaitTransactionOperation::Request,
+        )
+        .await
+    }
+
+    pub(super) async fn transaction_for_finalize(&self, key: &str) -> AwaitTransactionLease {
+        self.transaction(
+            key,
+            #[cfg(test)]
+            AwaitTransactionOperation::Finalize,
+        )
+        .await
+    }
+
+    pub(super) async fn transaction_for_cancel(&self, key: &str) -> AwaitTransactionLease {
+        self.transaction(
+            key,
+            #[cfg(test)]
+            AwaitTransactionOperation::Cancel,
+        )
+        .await
+    }
+
+    #[cfg(test)]
+    pub(super) async fn pause_transaction_after_acquire(
+        &self,
+        operation: AwaitTransactionOperation,
+        entered: Arc<tokio::sync::Notify>,
+        release: Arc<tokio::sync::Notify>,
+    ) {
+        *self.transaction_pause.lock().await = Some(AwaitTransactionPause {
+            operation,
+            entered,
+            release,
+        });
+    }
+
+    #[cfg(test)]
+    pub(super) async fn pause_transaction_while_queued(&self, entered: Arc<tokio::sync::Notify>) {
+        *self.transaction_queue_pause.lock().await = Some(AwaitTransactionQueuePause { entered });
+    }
+
+    #[cfg(test)]
+    pub(super) async fn clear_transaction_queue_pause(&self) {
+        *self.transaction_queue_pause.lock().await = None;
+    }
+
+    #[cfg(test)]
+    pub(super) async fn clear_transaction_pause(&self) {
+        *self.transaction_pause.lock().await = None;
+    }
+
+    #[cfg(test)]
+    pub(super) async fn pause_reload_orphan_after_snapshot(
+        &self,
+        entered: Arc<tokio::sync::Notify>,
+        release: Arc<tokio::sync::Notify>,
+    ) {
+        *self.reload_orphan_pause.lock().await = Some(AwaitReloadOrphanPause { entered, release });
+    }
+
+    #[cfg(test)]
+    pub(super) async fn clear_reload_orphan_pause(&self) {
+        *self.reload_orphan_pause.lock().await = None;
+    }
+
+    #[cfg(test)]
+    pub(super) async fn wait_after_reload_orphan_snapshot(&self) {
+        if let Some(pause) = self.reload_orphan_pause.lock().await.clone() {
+            pause.entered.notify_one();
+            pause.release.notified().await;
+        }
+    }
+
+    #[cfg(not(test))]
+    pub(super) async fn wait_after_reload_orphan_snapshot(&self) {}
+
+    #[cfg(test)]
+    /// Count all stored entries without retaining or upgrading weak pointers.
+    /// This exposes tombstones directly to lifecycle tests instead of pruning
+    /// them as an observation side effect.
+    pub(super) fn transaction_registry_raw_len(&self) -> usize {
+        self.transactions
+            .lock()
+            .expect("await transaction registry mutex poisoned")
+            .len()
+    }
+
+    #[cfg(test)]
+    pub(super) fn transaction_registry_len(&self) -> usize {
+        self.transaction_registry_raw_len()
+    }
+
     pub(super) async fn add_waiter(
         &self,
         key: &str,
@@ -124,6 +446,32 @@ impl AwaitMembersRuntime {
         remaining
     }
 
+    /// Resolve as soon as one currently registered blocking requester loses its
+    /// receiving half. The watcher always follows this with
+    /// `retain_open_waiters`, which is the authoritative cleanup/ownership
+    /// operation and handles a concurrent replacement or another live waiter.
+    pub(super) async fn waiter_disconnects(&self, key: &str) {
+        let waiters = self
+            .waiters
+            .read()
+            .await
+            .get(key)
+            .cloned()
+            .unwrap_or_default();
+
+        if waiters.is_empty() {
+            return;
+        }
+
+        futures::future::select_all(
+            waiters
+                .iter()
+                .map(|waiter| Box::pin(waiter.client_event_tx.closed()))
+                .collect::<Vec<_>>(),
+        )
+        .await;
+    }
+
     pub(super) async fn take_waiters(
         &self,
         key: &str,
@@ -154,9 +502,6 @@ pub(super) fn request_key(
     requested_ids: &[String],
     target_status: &[String],
     mode: Option<&str>,
-    background: bool,
-    notify: bool,
-    wake: bool,
 ) -> String {
     let mut requested = requested_ids.to_vec();
     requested.sort();
@@ -172,9 +517,6 @@ pub(super) fn request_key(
             requested.join("\u{1f}"),
             target.join("\u{1f}"),
             mode.unwrap_or("all").to_string(),
-            background.to_string(),
-            notify.to_string(),
-            wake.to_string(),
         ],
     )
 }
@@ -202,11 +544,44 @@ pub(super) fn ensure_pending_state(
     background: bool,
     notify: bool,
     wake: bool,
-) -> PersistedAwaitMembersState {
-    if let Some(existing) = load_state(key).filter(PersistedAwaitMembersState::is_pending) {
-        return existing;
+) -> Result<PersistedAwaitMembersState, AwaitRequestGenerationError> {
+    let previous = load_state(key);
+    if let Some(mut existing) = previous
+        .clone()
+        .filter(PersistedAwaitMembersState::is_pending)
+    {
+        // Every retry gets a new durable incarnation even when its delivery
+        // flags happen to match. This fences a reload cleanup snapshot taken
+        // before the retry. `checked_add` deliberately refuses wraparound: a
+        // wrapped value could make a stale snapshot look current again.
+        existing.request_generation = existing
+            .request_generation
+            .checked_add(1)
+            .ok_or(AwaitRequestGenerationError::Exhausted)?;
+        // Delivery flags are active mutable policy, not wait identity. The
+        // caller holds AwaitMembersRuntime's semantic-key transaction while
+        // replacing this durable record, so the latest duplicate request is
+        // authoritative for the sole existing watcher.
+        if existing.background != background || existing.notify != notify || existing.wake != wake {
+            existing.background = background;
+            existing.notify = notify;
+            existing.wake = wake;
+        }
+        save_state(&existing);
+        return Ok(existing);
     }
 
+    // A non-replayable reload audit is deliberately replaced by a fresh
+    // pending watcher on retry, but it still carries the last incarnation.
+    // Advance it rather than resetting to one so an older reload snapshot
+    // cannot mistake the replacement for its orphan.
+    let request_generation = match previous {
+        Some(state) => state
+            .request_generation
+            .checked_add(1)
+            .ok_or(AwaitRequestGenerationError::Exhausted)?,
+        None => 1,
+    };
     let state = PersistedAwaitMembersState {
         key: key.to_string(),
         session_id: session_id.to_string(),
@@ -219,10 +594,11 @@ pub(super) fn ensure_pending_state(
         background,
         notify,
         wake,
+        request_generation,
         final_response: None,
     };
     save_state(&state);
-    state
+    Ok(state)
 }
 
 pub(super) fn persist_final_response(

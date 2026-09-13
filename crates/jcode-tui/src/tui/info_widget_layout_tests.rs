@@ -71,6 +71,7 @@ fn contended_data() -> InfoWidgetData {
                     report_back_to_session_id: Some("parent".to_string()),
                     todo_progress: Some((1, 4)),
                     todo_items: Vec::new(),
+                    working_dir: None,
                     runtime: crate::protocol::SwarmMemberRuntime::default(),
                 },
                 crate::protocol::SwarmMemberStatus {
@@ -87,6 +88,7 @@ fn contended_data() -> InfoWidgetData {
                     report_back_to_session_id: Some("parent".to_string()),
                     todo_progress: None,
                     todo_items: Vec::new(),
+                    working_dir: None,
                     runtime: crate::protocol::SwarmMemberRuntime::default(),
                 },
             ],

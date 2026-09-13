@@ -1544,15 +1544,27 @@ fn overscroll_reveal_does_not_relayout_transcript() {
 
     for pad in 4..30usize {
         let (mut app, mut terminal) = create_scroll_test_app(100, 24, 0, pad);
+        // The test specifically covers the opt-in elastic reveal. Keep the
+        // user's retained Off configuration out of this local fixture.
+        app.overscroll_status_mode = crate::config::OverscrollStatusMode::Overscroll;
         app.chat_native_scrollbar = true;
         app.context_info = crate::prompt::ContextInfo {
             total_chars: 40_000,
             ..Default::default()
         };
         app.context_limit = 200_000;
+        // The fixture creates a fresh App but the renderer retains the previous
+        // frame's tail-follow state. Request a real bottom snap before taking
+        // the pre-reveal reference frame so this test verifies the documented
+        // "wheel-down while pinned" case rather than a stale catch-up slide.
+        app.follow_chat_bottom();
 
         let before = render_and_snap(&app, &mut terminal);
         let max_before = crate::tui::ui::last_max_scroll();
+        let before_layout = crate::tui::ui::last_layout_snapshot();
+        let before_total = crate::tui::ui::last_total_wrapped_lines();
+        let before_viewport = crate::tui::ui::last_chat_viewport_height();
+        let before_resolved = crate::tui::ui::last_resolved_chat_scroll();
 
         // Wheel-down while pinned at the bottom: registers an overscroll tick
         // and reveals the status line for the dwell window.
@@ -1568,6 +1580,10 @@ fn overscroll_reveal_does_not_relayout_transcript() {
         );
         let during = render_and_snap(&app, &mut terminal);
         let max_during = crate::tui::ui::last_max_scroll();
+        let during_layout = crate::tui::ui::last_layout_snapshot();
+        let during_total = crate::tui::ui::last_total_wrapped_lines();
+        let during_viewport = crate::tui::ui::last_chat_viewport_height();
+        let during_resolved = crate::tui::ui::last_resolved_chat_scroll();
 
         // The reveal may slide the transcript up by at most the one row the
         // elastic line claims (the intended pull-to-reveal). It must not jump
@@ -1578,7 +1594,9 @@ fn overscroll_reveal_does_not_relayout_transcript() {
         assert!(
             max_during <= max_before + 1,
             "pad={pad}: reveal moved the viewport by more than the elastic \
-             row (max {max_before} -> {max_during})"
+             row (max {max_before} -> {max_during}; before total={before_total}, \
+             viewport={before_viewport}, layout={before_layout:?}; during \
+             total={during_total}, viewport={during_viewport}, layout={during_layout:?})"
         );
         let before_rows: Vec<&str> = before.lines().collect();
         let during_rows: Vec<&str> = during.lines().collect();
@@ -1627,7 +1645,8 @@ fn overscroll_reveal_does_not_relayout_transcript() {
         assert!(
             dropped <= 1 && body_before[dropped..] == body_during[..],
             "pad={pad}: transcript body rows re-wrapped while the overscroll \
-             line was revealed (scrollbar/wrap flip):\nbefore:\n{before}\nduring:\n{during}"
+             line was revealed (scrollbar/wrap flip; max {max_before}->{max_during}, \
+             resolved {before_resolved}->{during_resolved}):\nbefore:\n{before}\nduring:\n{during}"
         );
 
         // After the dwell expires the transcript must return to the exact

@@ -41,7 +41,7 @@ When opening in a new terminal:
 ## Lifecycle controls
 
 - The picker opens in **Active** view, which shows live ready and working sessions. Press `Ctrl+A` to toggle Active and All recent sessions.
-- Press `Ctrl+X` twice within two seconds to close an idle, non-current Jcode session. Working, current, closed, and external sessions cannot be closed from the picker.
+- Press `Ctrl+X` twice within two seconds to close an idle Jcode session, including the current one. After the server acknowledges closing the current session, its TUI exits without creating or attaching a replacement. A rejected close leaves the TUI attached and shows a retryable error. Working, closed, and external sessions cannot be closed from the picker.
 - Closing a terminal or losing its connection only detaches that client. It does not close the session or cancel a server-owned turn.
 - Closing a session retains its transcript. A closed session can be resumed later.
 

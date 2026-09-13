@@ -76,7 +76,7 @@ impl Default for WorktreePaneState {
 impl App {
     pub(super) fn worktree_pane_matches_session(&self) -> bool {
         self.worktree_pane.session_id == self.session.id
-            && self.worktree_pane.working_dir == self.session.working_dir
+            && self.worktree_pane.working_dir == self.view_working_dir()
     }
 
     pub(super) fn current_worktree_selected_file(&self) -> Option<&str> {
@@ -93,7 +93,7 @@ impl App {
                 explicit_open,
                 tab,
                 session_id: self.session.id.clone(),
-                working_dir: self.session.working_dir.clone(),
+                working_dir: self.view_working_dir(),
                 ..Default::default()
             };
             self.files_inspector.clear_selection();
@@ -253,8 +253,7 @@ impl App {
         let mut transfer = None;
         if let Some(path) = selected {
             let root = self
-                .session
-                .working_dir
+                .view_working_dir()
                 .as_ref()
                 .map(std::path::PathBuf::from)
                 .or_else(|| std::env::current_dir().ok());
@@ -366,7 +365,7 @@ impl App {
                         .and_then(|layout| layout.paths.first().cloned())
                         .or_else(|| {
                             crate::tui::ui::cached_worktree_paths(
-                                self.session.working_dir.as_deref(),
+                                self.view_working_dir().as_deref(),
                             )
                             .into_iter()
                             .next()
@@ -438,7 +437,7 @@ impl App {
             } else {
                 super::files_inspector::FileInspectorCapabilities::source_and_changes()
             };
-            if let Some(root) = self.session.working_dir.clone() {
+            if let Some(root) = self.view_working_dir() {
                 self.files_inspector
                     .select_file(root, row.path.clone(), capabilities);
             }
@@ -661,7 +660,7 @@ impl App {
             .last_activity
             .is_some_and(|last| now.saturating_duration_since(last) >= FILTER_IDLE_TIMEOUT);
         let stale = !self.worktree_pane_matches_session()
-            || crate::tui::ui::worktree_file_is_present(self.session.working_dir.as_deref(), path)
+            || crate::tui::ui::worktree_file_is_present(self.view_working_dir().as_deref(), path)
                 == Some(false);
         if !stale && (!expired || self.worktree_pane.tab == WorktreePaneTab::Files) {
             return false;
@@ -669,12 +668,12 @@ impl App {
         let replacement = crate::tui::ui::worktree_pane_layout()
             .map(|layout| layout.paths.as_ref().clone())
             .unwrap_or_else(|| {
-                crate::tui::ui::cached_worktree_paths(self.session.working_dir.as_deref())
+                crate::tui::ui::cached_worktree_paths(self.view_working_dir().as_deref())
             })
             .into_iter()
             .find(|candidate| {
                 crate::tui::ui::worktree_file_is_present(
-                    self.session.working_dir.as_deref(),
+                    self.view_working_dir().as_deref(),
                     candidate,
                 ) != Some(false)
             });
@@ -696,7 +695,7 @@ impl App {
         let Some(layout) = crate::tui::ui::worktree_pane_layout() else {
             return false;
         };
-        if layout.working_dir != self.session.working_dir
+        if layout.working_dir != self.view_working_dir()
             || !crate::tui::layout_utils::point_in_rect(mouse.column, mouse.row, layout.area)
         {
             return false;

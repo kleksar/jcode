@@ -791,7 +791,9 @@ fn test_swarm_completion_notification_inserts_agent_snapshot_without_report_pros
         report_back_to_session_id: Some("coordinator".to_string()),
         todo_progress: Some((3, 3)),
         todo_items: Vec::new(),
+        working_dir: None,
         runtime: crate::protocol::SwarmMemberRuntime {
+            selected_model: None,
             model: Some("openai:gpt-5.6-sol".to_string()),
             provider: Some("OpenAI".to_string()),
             auth_method: Some("OAuth".to_string()),

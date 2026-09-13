@@ -125,7 +125,7 @@ fn session_picker_enter_queues_current_terminal_resume_and_closes_overlay() {
 }
 
 #[test]
-fn session_closed_event_refreshes_picker_and_keeps_it_open() {
+fn session_closed_event_for_non_current_session_refreshes_picker_and_keeps_it_open() {
     let mut app = create_test_app();
     app.session_picker_mode = SessionPickerMode::Resume;
     app.session_picker_overlay = Some(RefCell::new(
@@ -180,11 +180,39 @@ fn session_closed_event_refreshes_picker_and_keeps_it_open() {
         &mut remote,
     ));
     assert!(app.session_picker_overlay.is_some());
+    assert!(!app.should_quit);
     assert!(
         app.status_notice
             .as_ref()
             .is_some_and(|(notice, _)| notice.contains("Session closed"))
     );
+}
+
+#[test]
+fn session_closed_event_for_current_session_exits_without_replacement() {
+    let mut app = create_test_app();
+    let current_session_id = app.session.id.clone();
+    app.session_picker_mode = SessionPickerMode::Resume;
+    app.session_picker_overlay = Some(RefCell::new(
+        crate::tui::session_picker::SessionPicker::new(Vec::new()),
+    ));
+    app.workspace_client
+        .begin_close_request(72, current_session_id.clone());
+    let runtime = tokio::runtime::Runtime::new().expect("test runtime");
+    let _guard = runtime.enter();
+    let mut remote = crate::tui::backend::RemoteConnection::dummy();
+
+    assert!(app.handle_server_event(
+        crate::protocol::ServerEvent::SessionClosed {
+            id: 72,
+            session_id: current_session_id.clone(),
+        },
+        &mut remote,
+    ));
+    assert!(app.should_quit);
+    assert_eq!(app.session.id, current_session_id);
+    assert!(app.pending_clean_session_create.is_none());
+    assert!(app.pending_session_start_prompt.is_none());
 }
 
 #[test]
@@ -209,6 +237,7 @@ fn close_session_error_keeps_picker_open_and_shows_server_reason() {
         &mut remote,
     ));
     assert!(app.session_picker_overlay.is_some());
+    assert!(!app.should_quit);
     assert!(
         app.status_notice
             .as_ref()

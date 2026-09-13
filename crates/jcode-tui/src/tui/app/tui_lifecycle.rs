@@ -571,6 +571,9 @@ impl App {
             remote_side_pane_images: Vec::new(),
             side_pane_images_signature_cache: std::cell::Cell::new(None),
             remote_swarm_members: Vec::new(),
+            focused_worker_worktree: None,
+            worktree_view_mode: super::WorktreeViewMode::Auto,
+            auto_worker_worktree: std::cell::RefCell::new(None),
             swarm_plan_items: Vec::new(),
             swarm_plan_version: None,
             swarm_plan_swarm_id: None,
@@ -1032,6 +1035,9 @@ impl App {
             remote_side_pane_images: Vec::new(),
             side_pane_images_signature_cache: std::cell::Cell::new(None),
             remote_swarm_members: Vec::new(),
+            focused_worker_worktree: None,
+            worktree_view_mode: super::WorktreeViewMode::Auto,
+            auto_worker_worktree: std::cell::RefCell::new(None),
             swarm_plan_items: Vec::new(),
             swarm_plan_version: None,
             swarm_plan_swarm_id: None,
@@ -1310,6 +1316,7 @@ impl App {
         session.env_snapshots.shrink_to_fit();
         session.memory_injections.shrink_to_fit();
         session.replay_events.shrink_to_fit();
+        self.reset_worktree_view();
         self.session = session;
         // The full deserialized transcript (raw file + Session structs) was a
         // large transient; return the freed arena pages to the OS now instead

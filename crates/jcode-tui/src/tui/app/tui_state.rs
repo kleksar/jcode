@@ -60,6 +60,12 @@ struct WidgetRouteInfo {
 }
 
 impl App {
+    pub(super) fn reset_worktree_view(&mut self) {
+        self.focused_worker_worktree = None;
+        self.worktree_view_mode = super::WorktreeViewMode::Auto;
+        self.auto_worker_worktree.replace(None);
+    }
+
     fn sanitize_remote_model_hint(model: Option<String>) -> Option<String> {
         model
             .map(|model| model.trim().to_string())
@@ -1429,6 +1435,7 @@ impl crate::tui::TuiState for App {
                         report_back_to_session_id: None,
                         todo_progress: None,
                         todo_items: Vec::new(),
+                        working_dir: None,
                         runtime: crate::protocol::SwarmMemberRuntime::default(),
                     });
                 }
@@ -1477,8 +1484,7 @@ impl crate::tui::TuiState for App {
                     selected: if managed_members.is_empty() {
                         0
                     } else {
-                        self.swarm_panel_selected
-                            .min(managed_members.len().saturating_sub(1))
+                        self.swarm_panel_selected_for_members(&managed_members)
                     },
                     focused: self.swarm_panel_focused,
                     plan_progress,
@@ -1742,12 +1748,7 @@ impl crate::tui::TuiState for App {
         if self.debug_force_inline_gallery {
             return !self.inline_swarm_members().is_empty();
         }
-        self.swarm_enabled
-            && matches!(
-                crate::config::config().agents.swarm_spawn_mode,
-                crate::config::SwarmSpawnMode::Inline
-            )
-            && !self.inline_swarm_members().is_empty()
+        self.swarm_enabled && !self.inline_swarm_members().is_empty()
     }
 
     fn inline_swarm_members(&self) -> Vec<crate::protocol::SwarmMemberStatus> {
@@ -1776,6 +1777,10 @@ impl crate::tui::TuiState for App {
             // strip until we know who we are.
             None => Vec::new(),
         }
+    }
+
+    fn overscroll_swarm_members(&self) -> Vec<crate::protocol::SwarmMemberStatus> {
+        self.inline_swarm_members()
     }
 
     fn swarm_members_for_transcript(&self) -> Vec<crate::protocol::SwarmMemberStatus> {
@@ -1815,7 +1820,7 @@ impl crate::tui::TuiState for App {
     }
 
     fn swarm_panel_selected(&self) -> usize {
-        let count = self.inline_swarm_members().len();
+        let count = self.swarm_panel_members().len();
         if count == 0 {
             0
         } else {
@@ -2045,11 +2050,28 @@ impl crate::tui::TuiState for App {
     }
 
     fn working_dir(&self) -> Option<String> {
-        self.session.working_dir.clone()
+        self.view_working_dir()
     }
 
     fn git_branch(&self) -> Option<String> {
-        gather_git_info(self.session.working_dir.as_deref().map(Path::new)).map(|info| info.branch)
+        gather_git_info(self.view_working_dir().as_deref().map(Path::new)).map(|info| info.branch)
+    }
+
+    fn workspace_context_label(&self) -> Option<String> {
+        if self.worktree_view_mode != super::WorktreeViewMode::Worker {
+            return None;
+        }
+        let id = self.focused_worker_worktree.as_deref()?;
+        let members = self.inline_swarm_members();
+        let member = members.iter().find(|m| m.session_id == id)?;
+        // A stale or non-shared worker root resolves to the coordinator root.
+        // Never decorate that coordinator diff with a misleading worker label.
+        (member.working_dir.as_ref() == self.view_working_dir().as_ref()).then(|| {
+            member
+                .friendly_name
+                .clone()
+                .unwrap_or_else(|| member.session_id.chars().take(8).collect())
+        })
     }
 
     fn now_millis(&self) -> u64 {
@@ -2152,6 +2174,7 @@ impl App {
             return SwarmPanelView::Chat;
         }
 
+        let selected_id = self.selected_swarm_panel_session_id();
         let next = match (self.swarm_panel_focused, self.swarm_panel_full_page) {
             (false, _) => SwarmPanelView::Controls,
             (true, false) => SwarmPanelView::FullPage,
@@ -2171,29 +2194,103 @@ impl App {
                 self.swarm_panel_full_page = true;
             }
         }
-        if next != SwarmPanelView::Chat {
-            let count = self.inline_swarm_members().len();
-            self.swarm_panel_selected = self.swarm_panel_selected.min(count.saturating_sub(1));
-        }
+        self.select_swarm_panel_session(selected_id.as_deref());
         next
     }
 
     #[allow(dead_code)]
     pub(crate) fn set_swarm_panel_focus(&mut self, focused: bool) {
+        let selected_id = self.selected_swarm_panel_session_id();
         self.swarm_panel_focused = focused && self.inline_swarm_gallery_active();
         self.swarm_panel_full_page = false;
+        self.select_swarm_panel_session(selected_id.as_deref());
     }
 
     /// Move the swarm panel selection by `delta` (e.g. +1 for next, -1 for
     /// previous), saturating at the ends.
     pub(crate) fn move_swarm_panel_selection(&mut self, delta: isize) {
-        let count = self.inline_swarm_members().len();
+        let count = self.swarm_panel_members().len();
         if count == 0 {
             return;
         }
         let cur = self.swarm_panel_selected.min(count - 1) as isize;
         let next = (cur + delta).clamp(0, count as isize - 1);
         self.swarm_panel_selected = next as usize;
+    }
+
+    pub(super) fn view_working_dir(&self) -> Option<String> {
+        let members = self.inline_swarm_members();
+        let eligible = |id: &str| {
+            members
+                .iter()
+                .find(|member| member.session_id == id)
+                .filter(|member| {
+                    matches!(member.status.as_str(), "running" | "streaming" | "thinking")
+                        && member.working_dir.as_ref().is_some_and(|root| {
+                            let path = Path::new(root);
+                            path.is_dir() && path.join(".git").exists()
+                        })
+                })
+        };
+        if self.worktree_view_mode == super::WorktreeViewMode::Worker
+            && let Some(session_id) = self.focused_worker_worktree.as_deref()
+        {
+            if let Some(root) = members
+                .iter()
+                .find(|member| member.session_id == session_id)
+                .and_then(|member| member.working_dir.clone())
+            {
+                let path = Path::new(&root);
+                if path.is_dir() && path.join(".git").exists() {
+                    return Some(root);
+                }
+            }
+        }
+        if self.worktree_view_mode == super::WorktreeViewMode::Auto {
+            let mut selected = self.auto_worker_worktree.borrow_mut();
+            if selected.as_deref().and_then(eligible).is_none() {
+                *selected = members
+                    .iter()
+                    .filter(|member| eligible(&member.session_id).is_some())
+                    .map(|member| member.session_id.clone())
+                    .min();
+            }
+            if let Some(member) = selected.as_deref().and_then(eligible) {
+                return member.working_dir.clone();
+            }
+        }
+        self.session.working_dir.clone()
+    }
+
+    pub(super) fn focus_selected_swarm_worktree(&mut self) {
+        let members = self.inline_swarm_members();
+        let order = crate::tui::info_widget::swarm_gallery::members_display_order(&members);
+        let Some(session_id) =
+            order.get(self.swarm_panel_selected.min(order.len().saturating_sub(1)))
+        else {
+            self.set_status_notice("No swarm worker selected");
+            return;
+        };
+        let Some(member) = members
+            .iter()
+            .find(|member| &member.session_id == session_id)
+        else {
+            return;
+        };
+        if member.working_dir.as_deref().is_none_or(|root| {
+            let path = Path::new(root);
+            root.trim().is_empty() || !path.is_dir() || !path.join(".git").exists()
+        }) {
+            self.set_status_notice("Selected worker worktree is unavailable to this client");
+            return;
+        }
+        let label = member
+            .friendly_name
+            .clone()
+            .unwrap_or_else(|| member.session_id.chars().take(8).collect());
+        self.focused_worker_worktree = Some(session_id.clone());
+        self.worktree_view_mode = super::WorktreeViewMode::Worker;
+        self.set_status_notice(format!("Viewing {label} worktree"));
     }
 
     /// Handle a key while the swarm panel is focused. Returns true if the key was
@@ -2223,6 +2320,22 @@ impl App {
                 self.pop_out_selected_swarm_agent();
                 true
             }
+            Some(SwarmPanelAction::FocusWorktree) => {
+                self.focus_selected_swarm_worktree();
+                true
+            }
+            Some(SwarmPanelAction::ReturnToCoordinator) => {
+                self.focused_worker_worktree = None;
+                self.worktree_view_mode = super::WorktreeViewMode::Coordinator;
+                self.set_status_notice("Viewing coordinator worktree");
+                true
+            }
+            Some(SwarmPanelAction::ResumeAutoWorktree) => {
+                self.focused_worker_worktree = None;
+                self.worktree_view_mode = super::WorktreeViewMode::Auto;
+                self.set_status_notice("Auto-following eligible worker worktree");
+                true
+            }
             Some(SwarmPanelAction::OpenPrompt) => {
                 super::commands::handle_swarm_prompt_command(self, "/swarm-prompt");
                 true
@@ -2239,14 +2352,12 @@ impl App {
     /// Open the currently selected swarm agent's session in a new terminal
     /// window (pop-out), reusing the resume-in-new-terminal launcher.
     pub(crate) fn pop_out_selected_swarm_agent(&mut self) {
-        let members = self.inline_swarm_members();
+        let members = self.swarm_panel_members();
         if members.is_empty() {
             self.set_status_notice("No swarm agents to open");
             return;
         }
-        let order = crate::tui::info_widget::swarm_gallery::members_display_order(&members);
-        let idx = self.swarm_panel_selected.min(order.len().saturating_sub(1));
-        let Some(session_id) = order.get(idx).cloned() else {
+        let Some(session_id) = self.selected_swarm_panel_session_id() else {
             self.set_status_notice("No swarm agent selected");
             return;
         };
@@ -2269,6 +2380,55 @@ impl App {
     }
 }
 
+impl App {
+    /// The inline strip renders only active members, while the full page keeps
+    /// terminal members visible. All selection, movement, and pop-out paths
+    /// use this exact view-specific list.
+    fn swarm_panel_members(&self) -> Vec<crate::protocol::SwarmMemberStatus> {
+        if self.swarm_panel_full_page {
+            self.inline_swarm_members()
+        } else {
+            self.active_inline_swarm_members()
+        }
+    }
+
+    fn active_inline_swarm_members(&self) -> Vec<crate::protocol::SwarmMemberStatus> {
+        self.inline_swarm_members()
+            .into_iter()
+            .filter(|member| jcode_tui_render::swarm_gallery::is_active_status(&member.status))
+            .collect()
+    }
+
+    fn selected_swarm_panel_session_id(&self) -> Option<String> {
+        let members = self.swarm_panel_members();
+        let order = crate::tui::info_widget::swarm_gallery::members_display_order(&members);
+        order
+            .get(self.swarm_panel_selected.min(order.len().saturating_sub(1)))
+            .cloned()
+    }
+
+    fn select_swarm_panel_session(&mut self, session_id: Option<&str>) {
+        let members = self.swarm_panel_members();
+        let order = crate::tui::info_widget::swarm_gallery::members_display_order(&members);
+        self.swarm_panel_selected = session_id
+            .and_then(|id| order.iter().position(|candidate| candidate == id))
+            .unwrap_or_else(|| self.swarm_panel_selected.min(order.len().saturating_sub(1)));
+    }
+
+    fn swarm_panel_selected_for_members(
+        &self,
+        members: &[crate::protocol::SwarmMemberStatus],
+    ) -> usize {
+        let Some(selected_id) = self.selected_swarm_panel_session_id() else {
+            return 0;
+        };
+        crate::tui::info_widget::swarm_gallery::members_display_order(members)
+            .iter()
+            .position(|candidate| candidate == &selected_id)
+            .unwrap_or(0)
+    }
+}
+
 /// What a key press should do while the swarm panel is focused.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum SwarmPanelAction {
@@ -2276,6 +2436,9 @@ pub(crate) enum SwarmPanelAction {
     SelectPrev,
     PopOut,
     OpenPrompt,
+    FocusWorktree,
+    ReturnToCoordinator,
+    ResumeAutoWorktree,
     Exit,
 }
 
@@ -2283,9 +2446,14 @@ pub(crate) enum SwarmPanelAction {
 ///
 /// Deliberately narrow: the focused panel must NOT swallow plain typing (the
 /// user may keep writing into the chat input while glancing at agents), so
-/// only Esc and Alt-chords are claimed:
+/// only panel-local Esc and modifier chords are claimed:
 /// - Alt+↑ / Alt+↓ (also Alt+k / Alt+j): move the selection
 /// - Alt+o / Alt+Enter: pop the selected agent out to a terminal
+/// - Alt+w: pin Files/Diff to the selected worker's worktree
+/// - Alt+c: return Files/Diff to the coordinator worktree (or auto-follow)
+/// - Alt+Shift+c: resume auto-following an eligible worker worktree
+/// - Ctrl+Shift+w: pin the selected worker (macOS-safe alternative)
+/// - Ctrl+Shift+j: view coordinator; Ctrl+Shift+k: resume auto-follow
 /// - Alt+Shift+p: open the active swarm routing prompt in the editor
 /// - Esc: exit the panel
 pub(crate) fn swarm_panel_action_for_key(
@@ -2297,6 +2465,7 @@ pub(crate) fn swarm_panel_action_for_key(
         return Some(SwarmPanelAction::Exit);
     }
     let alt = modifiers.contains(KeyModifiers::ALT);
+    let ctrl_shift = modifiers == (KeyModifiers::CONTROL | KeyModifiers::SHIFT);
     // macOS Option+letter often arrives as a transformed glyph with no ALT
     // modifier; normalize through the shared shortcut helper.
     let macos_letter = crate::tui::keybind::shortcut_char_for_macos_option_key(code, modifiers);
@@ -2306,10 +2475,19 @@ pub(crate) fn swarm_panel_action_for_key(
         return Some(SwarmPanelAction::OpenPrompt);
     }
     match code {
+        KeyCode::Char('w') if ctrl_shift => Some(SwarmPanelAction::FocusWorktree),
+        KeyCode::Char('j') if ctrl_shift => Some(SwarmPanelAction::ReturnToCoordinator),
+        KeyCode::Char('k') if ctrl_shift => Some(SwarmPanelAction::ResumeAutoWorktree),
         KeyCode::Down | KeyCode::Char('j') if alt => Some(SwarmPanelAction::SelectNext),
         KeyCode::Up | KeyCode::Char('k') if alt => Some(SwarmPanelAction::SelectPrev),
         KeyCode::Char('o') | KeyCode::Enter if alt => Some(SwarmPanelAction::PopOut),
         KeyCode::Char('P') if alt => Some(SwarmPanelAction::OpenPrompt),
+        KeyCode::Char('w') if alt => Some(SwarmPanelAction::FocusWorktree),
+        KeyCode::Char('c') if alt && modifiers.contains(KeyModifiers::SHIFT) => {
+            Some(SwarmPanelAction::ResumeAutoWorktree)
+        }
+        KeyCode::Char('c') if alt => Some(SwarmPanelAction::ReturnToCoordinator),
+        KeyCode::Char('C') if alt => Some(SwarmPanelAction::ResumeAutoWorktree),
         KeyCode::Char('p') if alt && modifiers.contains(KeyModifiers::SHIFT) => {
             Some(SwarmPanelAction::OpenPrompt)
         }
@@ -2317,6 +2495,8 @@ pub(crate) fn swarm_panel_action_for_key(
             Some('j') => Some(SwarmPanelAction::SelectNext),
             Some('k') => Some(SwarmPanelAction::SelectPrev),
             Some('o') => Some(SwarmPanelAction::PopOut),
+            Some('w') => Some(SwarmPanelAction::FocusWorktree),
+            Some('c') => Some(SwarmPanelAction::ReturnToCoordinator),
             _ => None,
         },
     }
@@ -2379,6 +2559,77 @@ pub(crate) fn filter_inline_swarm_subtree(
 mod swarm_panel_key_tests {
     use super::{SwarmPanelAction, swarm_panel_action_for_key};
     use crossterm::event::{KeyCode, KeyModifiers};
+
+    #[test]
+    fn selection_preserves_the_visible_worker_across_inline_and_full_page() {
+        use crate::tui::TuiState;
+        use crate::tui::app::tests::create_test_app;
+
+        let mut app = create_test_app();
+        app.swarm_enabled = true;
+        let parent = app.session.id.clone();
+        let member = |id: &str, status: &str| crate::protocol::SwarmMemberStatus {
+            session_id: id.to_string(),
+            working_dir: None,
+            friendly_name: Some(id.to_string()),
+            status: status.to_string(),
+            detail: None,
+            task_label: None,
+            role: None,
+            is_headless: Some(true),
+            live_attachments: None,
+            status_age_secs: None,
+            output_tail: None,
+            report_back_to_session_id: Some(parent.clone()),
+            todo_progress: None,
+            todo_items: Vec::new(),
+            runtime: crate::protocol::SwarmMemberRuntime::default(),
+        };
+        app.remote_swarm_members = vec![
+            member("terminal-first", "completed"),
+            member("active-second", "running"),
+        ];
+        // A previously selected terminal index resolves to the first visible
+        // inline row, not a hidden terminal worker.
+        app.swarm_panel_selected = 1;
+        assert_eq!(
+            app.cycle_swarm_panel_view(),
+            super::SwarmPanelView::Controls
+        );
+        assert_eq!(app.swarm_panel_selected(), 0);
+        let selected = app.active_inline_swarm_members();
+        assert_eq!(
+            selected[app.swarm_panel_selected()].session_id,
+            "active-second"
+        );
+
+        // The full page deliberately restores the terminal row, but remaps
+        // selection by session id so its detail and Alt+O still target the
+        // worker selected in the inline strip.
+        assert_eq!(
+            app.cycle_swarm_panel_view(),
+            super::SwarmPanelView::FullPage
+        );
+        assert!(
+            app.swarm_panel_members()
+                .iter()
+                .any(|m| m.session_id == "terminal-first")
+        );
+        assert_eq!(
+            app.selected_swarm_panel_session_id().as_deref(),
+            Some("active-second")
+        );
+
+        assert_eq!(app.cycle_swarm_panel_view(), super::SwarmPanelView::Chat);
+        assert_eq!(
+            app.cycle_swarm_panel_view(),
+            super::SwarmPanelView::Controls
+        );
+        assert_eq!(
+            app.selected_swarm_panel_session_id().as_deref(),
+            Some("active-second")
+        );
+    }
 
     /// Plain typing (letters, space, enter, arrows without alt) must pass
     /// through so the user can keep writing into the chat input while the
@@ -2447,6 +2698,27 @@ mod swarm_panel_key_tests {
             Some(SwarmPanelAction::OpenPrompt)
         );
         assert_eq!(
+            swarm_panel_action_for_key(
+                KeyCode::Char('w'),
+                KeyModifiers::CONTROL | KeyModifiers::SHIFT
+            ),
+            Some(SwarmPanelAction::FocusWorktree)
+        );
+        assert_eq!(
+            swarm_panel_action_for_key(
+                KeyCode::Char('j'),
+                KeyModifiers::CONTROL | KeyModifiers::SHIFT
+            ),
+            Some(SwarmPanelAction::ReturnToCoordinator)
+        );
+        assert_eq!(
+            swarm_panel_action_for_key(
+                KeyCode::Char('k'),
+                KeyModifiers::CONTROL | KeyModifiers::SHIFT
+            ),
+            Some(SwarmPanelAction::ResumeAutoWorktree)
+        );
+        assert_eq!(
             swarm_panel_action_for_key(KeyCode::Esc, KeyModifiers::NONE),
             Some(SwarmPanelAction::Exit)
         );
@@ -2454,7 +2726,14 @@ mod swarm_panel_key_tests {
 
     #[test]
     fn ctrl_chords_pass_through() {
-        for code in [KeyCode::Char('j'), KeyCode::Char('o'), KeyCode::Down] {
+        for code in [
+            KeyCode::Char('w'),
+            KeyCode::Char('c'),
+            KeyCode::Char('j'),
+            KeyCode::Char('k'),
+            KeyCode::Char('o'),
+            KeyCode::Down,
+        ] {
             assert_eq!(
                 swarm_panel_action_for_key(code, KeyModifiers::CONTROL),
                 None,
@@ -2484,6 +2763,7 @@ mod inline_swarm_subtree_tests {
             report_back_to_session_id: parent.map(str::to_string),
             todo_progress: None,
             todo_items: Vec::new(),
+            working_dir: None,
             runtime: crate::protocol::SwarmMemberRuntime::default(),
         }
     }

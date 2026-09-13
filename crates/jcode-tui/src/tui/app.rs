@@ -1281,6 +1281,12 @@ pub struct App {
     side_pane_images_signature_cache: std::cell::Cell<Option<(usize, u64)>>,
     // Swarm member status snapshots (remote mode only)
     remote_swarm_members: Vec<crate::protocol::SwarmMemberStatus>,
+    /// Files/Diff context only. Chat remains attached to `session`.
+    focused_worker_worktree: Option<String>,
+    worktree_view_mode: WorktreeViewMode,
+    /// Last eligible auto-follow worker for this coordinator. Interior mutability
+    /// keeps selection stable across render-only reads.
+    auto_worker_worktree: std::cell::RefCell<Option<String>>,
     // Latest swarm plan snapshot (local or remote server event stream)
     swarm_plan_items: Vec<crate::plan::PlanItem>,
     swarm_plan_version: Option<u64>,
@@ -1706,6 +1712,14 @@ pub struct App {
     persisted_prompt_history: Option<Vec<String>>,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum WorktreeViewMode {
+    #[default]
+    Auto,
+    Coordinator,
+    Worker,
+}
+
 /// Inert provider used by runtime modes whose output is supplied by another source.
 ///
 /// Remote clients render server events. Replay renders recorded events. Neither mode may call a
@@ -1756,6 +1770,12 @@ impl Provider for InertRuntimeProvider {
 }
 
 impl App {
+    #[cfg(test)]
+    pub(crate) fn set_session_footer_test_data(&mut self, working_dir: &str, short_name: &str) {
+        self.session.working_dir = Some(working_dir.to_string());
+        self.session.short_name = Some(short_name.to_string());
+    }
+
     const AUTO_RETRY_BASE_DELAY_SECS: u64 = 2;
     const AUTO_RETRY_MAX_ATTEMPTS: u8 = 3;
     /// Budget for completion-confidence gate nudges per auto-poke cycle.
@@ -2606,4 +2626,4 @@ fn ratio_pct(numerator: u64, denominator: u64) -> u8 {
 }
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;

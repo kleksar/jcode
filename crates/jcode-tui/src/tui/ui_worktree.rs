@@ -773,10 +773,15 @@ fn collect_worktree_changes(working_dir: &Path) -> Option<WorktreeChangesSnapsho
         paths.extend(nul_paths(&output));
     }
 
-    let untracked: HashSet<String> =
+    let mut untracked: HashSet<String> =
         command_output(&root, &["ls-files", "--others", "--exclude-standard", "-z"])
             .map(|output| nul_paths(&output).into_iter().collect())
             .unwrap_or_default();
+    untracked.retain(|path| {
+        std::fs::symlink_metadata(root.join(path))
+            .map(|metadata| !metadata.file_type().is_dir())
+            .unwrap_or(true)
+    });
     paths.extend(untracked.iter().cloned());
     paths.sort();
     paths.dedup();

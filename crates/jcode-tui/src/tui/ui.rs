@@ -3061,36 +3061,38 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
     // the bottom chrome and shoves the transcript up: reacting to raw
     // frame-by-frame dock visibility made the strip pop in and out and the
     // whole screen bounce (flicker).
-    let swarm_strip_lines: Vec<Line<'static>> = if !swarm_page_active
-        && app.inline_swarm_gallery_active()
-        && (app.swarm_panel_focused() || !super::info_widget::swarm_strip_stands_down_for_dock())
-    {
-        let members = app.inline_swarm_members();
-        if chat_area.width >= 24 {
-            let focus_key = crate::tui::keybind::swarm_panel_focus_key_label();
-            // Use the same smooth cadence as the primary status spinner.
-            let spinner_frame = (app.animation_elapsed()
-                * jcode_tui_render::swarm_gallery::STRIP_SPINNER_FPS)
-                as usize;
-            // Focused budget: chips + hints + a ~14-line detail viewport, but
-            // never more than a third of the chat column so the transcript
-            // stays usable on short terminals.
-            let focused_budget = ((chat_area.height as usize) / 3).clamp(3, 16);
-            super::info_widget::swarm_gallery::render_swarm_strip_lines(
-                &members,
-                app.swarm_panel_selected(),
-                app.swarm_panel_focused(),
-                &focus_key,
-                spinner_frame,
-                chat_area.width as usize,
-                focused_budget,
-            )
+    let swarm_strip_lines: Vec<Line<'static>> =
+        if !swarm_page_active && app.inline_swarm_gallery_active() {
+            let members: Vec<_> = app
+                .inline_swarm_members()
+                .into_iter()
+                .filter(|member| jcode_tui_render::swarm_gallery::is_active_status(&member.status))
+                .collect();
+            if chat_area.width >= 24 {
+                let focus_key = crate::tui::keybind::swarm_panel_focus_key_label();
+                // Use the same smooth cadence as the primary status spinner.
+                let spinner_frame = (app.animation_elapsed()
+                    * jcode_tui_render::swarm_gallery::STRIP_SPINNER_FPS)
+                    as usize;
+                // Focused budget: chips + hints + a ~14-line detail viewport, but
+                // never more than a third of the chat column so the transcript
+                // stays usable on short terminals.
+                let focused_budget = ((chat_area.height as usize) / 3).clamp(3, 16);
+                super::info_widget::swarm_gallery::render_swarm_strip_lines(
+                    &members,
+                    app.swarm_panel_selected(),
+                    app.swarm_panel_focused(),
+                    &focus_key,
+                    spinner_frame,
+                    chat_area.width as usize,
+                    focused_budget,
+                )
+            } else {
+                Vec::new()
+            }
         } else {
             Vec::new()
-        }
-    } else {
-        Vec::new()
-    };
+        };
     let swarm_strip_height = swarm_strip_lines.len() as u16;
 
     // Calculate pending messages (queued + interleave) for numbering and layout
@@ -3170,9 +3172,14 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
     let show_donut = !onboarding_welcome && super::idle_donut_active(app);
     let donut_height: u16 = idle_donut_reserved_height(show_donut, input_height);
     let notification_height: u16 = if app.has_notification() { 1 } else { 0 };
-    // Elastic overscroll status line revealed when the user scrolls past the
-    // bottom of the transcript. Rendered directly below the input line.
-    let overscroll_height: u16 = if app.chat_overscroll_active() { 1 } else { 0 };
+    // Elastic overscroll session metadata plus one row for every active member
+    // managed by this session. The member source is ownership-scoped by App,
+    // while the renderer uses the shared lifecycle predicate.
+    let overscroll_height: u16 = if app.chat_overscroll_active() {
+        1u16.saturating_add(input_ui::overscroll_active_member_count(app))
+    } else {
+        0
+    };
     let session_footer_height = input_ui::session_footer_height(chat_area);
     let available_height = chat_area.height;
     let fixed_chrome_height = 1

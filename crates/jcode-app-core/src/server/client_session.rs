@@ -314,6 +314,32 @@ pub(super) async fn handle_clear_session(
 }
 
 #[allow(clippy::too_many_arguments)]
+async fn sync_swarm_member_runtime_effort(
+    session_id: &str,
+    agent: &Arc<Mutex<Agent>>,
+    swarm_members: &Arc<RwLock<HashMap<String, SwarmMember>>>,
+    swarms_by_id: &Arc<RwLock<HashMap<String, HashSet<String>>>>,
+) {
+    // This reads the initialized provider after session effort restoration, so
+    // unsupported requests and provider-specific normalization cannot leak to
+    // the coordinator as a claimed effective effort.
+    let effort = agent.lock().await.provider_reasoning_effort();
+    let swarm_id = {
+        let mut members = swarm_members.write().await;
+        let Some(member) = members.get_mut(session_id) else {
+            return;
+        };
+        if member.runtime.effort == effort {
+            return;
+        }
+        member.runtime.effort = effort;
+        member.swarm_id.clone()
+    };
+    if let Some(swarm_id) = swarm_id {
+        super::swarm::broadcast_swarm_status(&swarm_id, swarm_members, swarms_by_id).await;
+    }
+}
+
 async fn ensure_client_swarm_member(
     client_session_id: &str,
     client_connection_id: &str,
@@ -327,19 +353,20 @@ async fn ensure_client_swarm_member(
     event_counter: &Arc<std::sync::atomic::AtomicU64>,
     swarm_event_tx: &broadcast::Sender<SwarmEvent>,
 ) -> bool {
-    let (working_dir, derived_swarm_id, fallback_name) = {
+    let (working_dir, derived_swarm_id, fallback_name, runtime_effort) = {
         // A target-aware subscribe can attach to an agent that is in the middle
         // of a turn. Never wait for that turn's agent lock just to populate
         // connection metadata: doing so prevents the subscribe request from
         // completing, so subsequent state requests sit unread until the desktop
         // client times out. The persisted startup stub has the same immutable
         // identity metadata and is safe to read while the live agent is busy.
-        let (working_dir, fallback_name) = match agent.try_lock() {
+        let (working_dir, fallback_name, runtime_effort) = match agent.try_lock() {
             Ok(agent_guard) => (
                 agent_guard.working_dir().map(PathBuf::from),
                 agent_guard
                     .session_short_name()
                     .map(|value| value.to_string()),
+                agent_guard.provider_reasoning_effort(),
             ),
             Err(_) => {
                 crate::logging::info(&format!(
@@ -348,7 +375,8 @@ async fn ensure_client_swarm_member(
                 ));
                 crate::session::Session::load_startup_stub(client_session_id)
                     .map(|session| (session.working_dir.map(PathBuf::from), session.short_name))
-                    .unwrap_or((None, None))
+                    .map(|(working_dir, name)| (working_dir, name, None))
+                    .unwrap_or((None, None, None))
             }
         };
         let derived_swarm_id = if swarm_enabled {
@@ -356,7 +384,7 @@ async fn ensure_client_swarm_member(
         } else {
             None
         };
-        (working_dir, derived_swarm_id, fallback_name)
+        (working_dir, derived_swarm_id, fallback_name, runtime_effort)
     };
 
     // Prefer the currently restored agent/session identity over the temporary
@@ -365,6 +393,7 @@ async fn ensure_client_swarm_member(
     // resumed session and corrupt swarm metadata.
     let member_name = fallback_name.or_else(|| friendly_name.clone());
     let mut inserted = false;
+    let mut runtime_effort_changed = false;
     {
         let mut members = swarm_members.write().await;
         if let Some(member) = members.get_mut(client_session_id) {
@@ -374,6 +403,10 @@ async fn ensure_client_swarm_member(
                 .insert(client_connection_id.to_string(), client_event_tx.clone());
             member.swarm_enabled = swarm_enabled;
             member.is_headless = false;
+            if let Some(effort) = runtime_effort.as_ref() {
+                runtime_effort_changed = member.runtime.effort.as_ref() != Some(effort);
+                member.runtime.effort = Some(effort.clone());
+            }
             if member_name.is_some() {
                 member.friendly_name = member_name.clone();
             }
@@ -404,7 +437,10 @@ async fn ensure_client_swarm_member(
                     output_tail: None,
                     todo_progress: None,
                     todo_items: Vec::new(),
-                    runtime: crate::protocol::SwarmMemberRuntime::default(),
+                    runtime: crate::protocol::SwarmMemberRuntime {
+                        effort: runtime_effort.clone(),
+                        ..Default::default()
+                    },
                 },
             );
             inserted = true;
@@ -430,6 +466,30 @@ async fn ensure_client_swarm_member(
             },
         )
         .await;
+    }
+
+    if runtime_effort_changed && !inserted {
+        let swarm_id = swarm_members
+            .read()
+            .await
+            .get(client_session_id)
+            .and_then(|member| member.swarm_id.clone());
+        if let Some(swarm_id) = swarm_id {
+            super::swarm::broadcast_swarm_status(&swarm_id, swarm_members, swarms_by_id).await;
+        }
+    }
+
+    // Subscribe must remain lock-free for a busy headed worker. Once its turn
+    // releases, asynchronously publish the provider's authoritative effort.
+    if runtime_effort.is_none() {
+        let session_id = client_session_id.to_string();
+        let agent = Arc::clone(agent);
+        let swarm_members = Arc::clone(swarm_members);
+        let swarms_by_id = Arc::clone(swarms_by_id);
+        tokio::spawn(async move {
+            sync_swarm_member_runtime_effort(&session_id, &agent, &swarm_members, &swarms_by_id)
+                .await;
+        });
     }
 
     crate::logging::event_info(

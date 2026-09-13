@@ -1,10 +1,10 @@
 use super::{
     apply_or_defer_subscribe_working_dir, claim_live_target_agent, effective_subscribe_working_dir,
-    handle_clear_session, handle_reload, handle_resume_session, handle_subscribe,
-    mark_remote_reload_started, prewarm_idle_agent, remove_detached_source_if_unclaimed,
-    rename_shutdown_signal, rename_swarm_member_session, restored_session_was_interrupted,
-    session_was_interrupted_by_reload, subscribe_should_mark_ready,
-    subscribe_working_dir_replacement,
+    ensure_client_swarm_member, handle_clear_session, handle_reload, handle_resume_session,
+    handle_subscribe, mark_remote_reload_started, prewarm_idle_agent,
+    remove_detached_source_if_unclaimed, rename_shutdown_signal, rename_swarm_member_session,
+    restored_session_was_interrupted, session_was_interrupted_by_reload,
+    subscribe_should_mark_ready, subscribe_working_dir_replacement,
 };
 use crate::agent::Agent;
 use crate::message::ContentBlock;
@@ -28,6 +28,33 @@ use tokio::sync::{Mutex, RwLock, broadcast, mpsc};
 mod concurrency;
 
 struct MockProvider;
+
+struct EffectiveEffortProvider(Option<String>);
+
+#[async_trait]
+impl Provider for EffectiveEffortProvider {
+    async fn complete(
+        &self,
+        _messages: &[Message],
+        _tools: &[ToolDefinition],
+        _system: &str,
+        _resume_session_id: Option<&str>,
+    ) -> Result<EventStream> {
+        Err(anyhow::anyhow!("test provider must not complete"))
+    }
+
+    fn name(&self) -> &str {
+        "effective-effort-test"
+    }
+
+    fn reasoning_effort(&self) -> Option<String> {
+        self.0.clone()
+    }
+
+    fn fork(&self) -> Arc<dyn Provider> {
+        Arc::new(Self(self.0.clone()))
+    }
+}
 
 struct IdlePrewarmProvider(Arc<tokio::sync::Notify>, bool);
 
@@ -121,6 +148,86 @@ fn test_swarm_member(session_id: &str, status: &str) -> SwarmMember {
         todo_items: Vec::new(),
         runtime: crate::protocol::SwarmMemberRuntime::default(),
     }
+}
+
+async fn sync_test_agent(effort: Option<&str>) -> Arc<Mutex<Agent>> {
+    let provider: Arc<dyn Provider> = Arc::new(EffectiveEffortProvider(effort.map(str::to_string)));
+    let registry = Registry::new(Arc::clone(&provider)).await;
+    Arc::new(Mutex::new(Agent::new(provider, registry)))
+}
+
+#[tokio::test]
+async fn headed_runtime_effort_uses_provider_normalization_not_requested_value() {
+    let agent = sync_test_agent(Some("medium")).await;
+    let mut member = test_swarm_member("headed", "running");
+    member.runtime.effort = Some("ultra".to_string());
+    let members = Arc::new(RwLock::new(HashMap::from([("headed".to_string(), member)])));
+    let swarms = Arc::new(RwLock::new(HashMap::from([(
+        "swarm-test".to_string(),
+        HashSet::from(["headed".to_string()]),
+    )])));
+
+    super::sync_swarm_member_runtime_effort("headed", &agent, &members, &swarms).await;
+
+    assert_eq!(
+        members.read().await["headed"].runtime.effort.as_deref(),
+        Some("medium"),
+        "the strip must receive the provider's normalized effective effort"
+    );
+}
+
+#[tokio::test]
+async fn headed_runtime_effort_clears_unsupported_requested_value() {
+    let agent = sync_test_agent(None).await;
+    let mut member = test_swarm_member("headed", "running");
+    member.runtime.effort = Some("high".to_string());
+    let members = Arc::new(RwLock::new(HashMap::from([("headed".to_string(), member)])));
+    let swarms = Arc::new(RwLock::new(HashMap::from([(
+        "swarm-test".to_string(),
+        HashSet::from(["headed".to_string()]),
+    )])));
+
+    super::sync_swarm_member_runtime_effort("headed", &agent, &members, &swarms).await;
+
+    assert_eq!(
+        members.read().await["headed"].runtime.effort,
+        None,
+        "unsupported providers must not retain a requested effort in the strip"
+    );
+}
+
+#[tokio::test]
+async fn new_headed_member_keeps_available_authoritative_effort() {
+    let agent = sync_test_agent(Some("medium")).await;
+    let members = Arc::new(RwLock::new(HashMap::new()));
+    let swarms = Arc::new(RwLock::new(HashMap::new()));
+    let history = Arc::new(RwLock::new(VecDeque::new()));
+    let counter = Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let (swarm_events, _swarm_events_rx) = broadcast::channel(8);
+    let (client_events, _client_events_rx) = mpsc::unbounded_channel();
+
+    assert!(
+        ensure_client_swarm_member(
+            "new-headed",
+            "connection",
+            &Some("headed".to_string()),
+            &client_events,
+            &agent,
+            false,
+            &members,
+            &swarms,
+            &history,
+            &counter,
+            &swarm_events,
+        )
+        .await
+    );
+
+    assert_eq!(
+        members.read().await["new-headed"].runtime.effort.as_deref(),
+        Some("medium"),
+        "new members must retain the available effective provider effort"
+    );
 }
 
 #[tokio::test]

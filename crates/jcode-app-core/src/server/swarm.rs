@@ -701,6 +701,10 @@ async fn broadcast_swarm_status_now(
                 .map(|m| crate::protocol::SwarmMemberStatus {
                     session_id: m.session_id.clone(),
                     friendly_name: m.friendly_name.clone(),
+                    working_dir: m
+                        .working_dir
+                        .as_ref()
+                        .map(|path| path.display().to_string()),
                     status: m.status.clone(),
                     detail: m.detail.clone(),
                     task_label: m.task_label.clone(),
@@ -713,6 +717,7 @@ async fn broadcast_swarm_status_now(
                     todo_progress: m.todo_progress,
                     todo_items: m.todo_items.clone(),
                     runtime: crate::protocol::SwarmMemberRuntime {
+                        selected_model: m.runtime.selected_model.clone(),
                         model: m.runtime.model.clone(),
                         provider: m.runtime.provider.clone(),
                         auth_method: m.runtime.auth_method.clone(),
