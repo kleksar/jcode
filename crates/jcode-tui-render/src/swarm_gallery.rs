@@ -621,16 +621,15 @@ pub fn render_swarm_strip(
         .map(|(idx, m)| Chip {
             glyph: status_glyph(&m.status, spinner_frame).to_string(),
             name: m.label.clone(),
-            runtime: (is_active_status(&m.status)
-                && (m.selected_model.is_some() || m.model.is_some()))
-            .then(|| {
-                format_worker_runtime(
-                    m.selected_model.as_deref(),
-                    m.model.as_deref(),
-                    m.effort.as_deref(),
-                )
-            })
-            .flatten(),
+            runtime: is_active_status(&m.status)
+                .then(|| {
+                    format_worker_runtime(
+                        m.selected_model.as_deref(),
+                        m.model.as_deref(),
+                        m.effort.as_deref(),
+                    )
+                })
+                .flatten(),
             task: m
                 .task
                 .as_deref()
@@ -1358,9 +1357,7 @@ pub fn render_swarm_compact(
         ),
     ];
     let mut used: usize = spans.iter().map(|s| disp_w(&s.content)).sum();
-    for member in members.iter().filter(|m| {
-        is_active_status(&m.status) && (m.selected_model.is_some() || m.model.is_some())
-    }) {
+    for member in members.iter().filter(|m| is_active_status(&m.status)) {
         let Some(runtime) = format_worker_runtime(
             member.selected_model.as_deref(),
             member.model.as_deref(),
@@ -3008,11 +3005,11 @@ mod tests {
         a.task = Some("fix parser".to_string());
         let mut b = member("owl", "running", None, &[]);
         b.task = Some("write docs".to_string());
-        let lines = render_swarm_strip(&[a, b], 0, false, &hints(), None, 0, 100, 12);
+        let lines = render_swarm_strip(&[a, b], 0, false, &hints(), None, 0, 120, 12);
         let chips = plain_line(&lines[0]);
-        assert!(chips.contains("fox·fix parser"), "got: {chips}");
-        assert!(chips.contains("owl·write docs"), "got: {chips}");
-        assert!(lines[0].width() <= 100);
+        assert!(chips.contains("fox · unknown·fix parser"), "got: {chips}");
+        assert!(chips.contains("owl · unknown·write docs"), "got: {chips}");
+        assert!(lines[0].width() <= 120);
     }
 
     #[test]
@@ -3238,6 +3235,15 @@ mod tests {
     }
 
     #[test]
+    fn horizontal_strip_shows_unknown_runtime_with_effort() {
+        let mut worker = member("worker", "running", None, &[]);
+        worker.effort = Some("medium".into());
+        let lines = render_swarm_strip(&[worker], 0, true, &hints(), None, 0, 80, 12);
+        let text = plain_line(&lines[0]);
+        assert!(text.contains("unknown medium"), "got: {text:?}");
+    }
+
+    #[test]
     fn compact_empty_renders_nothing() {
         assert!(render_swarm_compact(&[], Some((1, 1, 3)), 30, 2).is_empty());
     }
@@ -3250,7 +3256,7 @@ mod tests {
             member("c", "completed", None, &[]),
             member("d", "blocked", None, &[]),
         ];
-        let lines = render_swarm_compact(&members, Some((5, 3, 12)), 32, 2);
+        let lines = render_swarm_compact(&members, Some((5, 3, 12)), 60, 2);
         assert_eq!(lines.len(), 2, "expected summary + bar");
         let header = plain_line(&lines[0]);
         assert!(header.contains("2/4 agents"), "got: {header}");
@@ -3260,7 +3266,7 @@ mod tests {
         // Bar: green done, yellow running, dim remainder, exactly `width` cells.
         let bar = &lines[1];
         let bar_text = plain_line(bar);
-        assert_eq!(disp_w(&bar_text), 32, "bar fills the width: {bar_text:?}");
+        assert_eq!(disp_w(&bar_text), 60, "bar fills the width: {bar_text:?}");
         assert_eq!(bar.spans.len(), 3, "done + running + empty segments");
         for span in &bar.spans {
             assert!(span.content.chars().all(|c| c == '▁'), "got: {bar_text:?}");
@@ -3299,6 +3305,15 @@ mod tests {
             !header.contains("completed · gpt-5.6-terra"),
             "got: {header}"
         );
+    }
+
+    #[test]
+    fn compact_shows_unknown_runtime_with_effort() {
+        let mut worker = member("worker", "running", None, &[]);
+        worker.effort = Some("medium".into());
+        let lines = render_swarm_compact(&[worker], None, 80, 2);
+        let text = plain_line(&lines[0]);
+        assert!(text.contains("unknown medium"), "got: {text:?}");
     }
 
     #[test]
