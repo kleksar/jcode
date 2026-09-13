@@ -123,18 +123,10 @@ fn format_elapsed(seconds: u64) -> String {
     }
 }
 
-fn format_model(model: &str) -> String {
-    let routed = model.rsplit([':', '/']).next().unwrap_or(model);
-    if let Some(rest) = routed.strip_prefix("gpt-") {
-        format!("GPT-{rest}")
-    } else {
-        model.to_string()
-    }
-}
-
-/// Format the named worker route from a canonical selected route. Provider
-/// state can report a differently cased base model, so normalize case and
-/// provider separators before deriving the public worker label.
+/// Format a recognized named worker route. Provider state can report a
+/// differently cased base model, so normalize case and provider separators
+/// before deriving the public worker label. Transport qualifiers are internal
+/// routing details, not part of the display label.
 fn short_worker_route(model: &str) -> Option<String> {
     let model = model
         .trim()
@@ -143,35 +135,36 @@ fn short_worker_route(model: &str) -> Option<String> {
         .unwrap_or(model)
         .to_ascii_lowercase()
         .replace('_', "-");
-    let (model, transport) = match model.strip_suffix("[web]") {
-        Some(model) => (model, Some("web")),
-        None => (model.as_str(), None),
-    };
+    let model = model.strip_suffix("[web]").unwrap_or(&model);
     let (_, route) = model.rsplit_once('-')?;
-    if !model.starts_with("gpt-")
-        || route.is_empty()
-        || !route.chars().all(|c| c.is_ascii_alphabetic())
-    {
+    if !model.starts_with("gpt-") {
         return None;
     }
-    let mut chars = route.chars();
-    let first = chars.next()?.to_ascii_uppercase();
-    let mut label = format!("{first}{}", chars.as_str());
-    if let Some(transport) = transport {
-        label.push(' ');
-        label.push_str(transport);
-    }
-    Some(label)
+    let label = match route {
+        "sol" => "Sol",
+        "terra" => "Terra",
+        "luna" => "Luna",
+        "astra" => "Astra",
+        _ => return None,
+    };
+    Some(label.to_string())
 }
 
-/// Render a canonical worker selection without exposing the resolved base
-/// model, provider, or authentication route. A selected named route always
-/// takes precedence over the provider's actual base model.
+fn has_model_value(model: Option<&str>) -> bool {
+    model.is_some_and(|model| !model.trim().is_empty())
+}
+
+/// Render worker metadata without exposing resolved base models, providers, or
+/// authentication routes. A recognized selected route wins. If it is absent or
+/// unrecognized, a recognized actual route is still safe to display; otherwise
+/// use a provider-neutral fallback.
 fn format_worker_model(selected: Option<&str>, actual: Option<&str>) -> Option<String> {
     selected
         .and_then(short_worker_route)
         .or_else(|| actual.and_then(short_worker_route))
-        .or_else(|| selected.or(actual).map(format_model))
+        .or_else(|| {
+            (has_model_value(selected) || has_model_value(actual)).then(|| "Unknown".into())
+        })
 }
 
 /// Render worker metadata through one shared path so every worker surface uses
@@ -2030,20 +2023,51 @@ mod tests {
     }
 
     #[test]
-    fn worker_runtime_uses_normalized_selected_route_and_actual_effort() {
+    fn worker_runtime_uses_recognized_route_and_actual_effort() {
         for (selected, actual, effort, expected) in [
-            ("gpt-5.6-sol", "GPT-5.6", "high", "Sol high"),
+            (Some("gpt-5.6-sol"), Some("GPT-5.6"), "high", "Sol high"),
             (
-                "openai-api:GPT_5.6_TERRA",
-                "gpt-5.6",
+                Some("openai-api:GPT_5.6_TERRA"),
+                Some("gpt-5.6"),
                 "medium",
                 "Terra medium",
             ),
-            ("openai/gpt-5.6-luna", "GPT-5.6", "low", "Luna low"),
-            ("gpt-6-astra[web]", "gpt-6", "high", "Astra web high"),
+            (
+                Some("openai/gpt-5.6-luna"),
+                Some("GPT-5.6"),
+                "low",
+                "Luna low",
+            ),
+            (Some("gpt-6-astra"), Some("gpt-6"), "high", "Astra high"),
+            (
+                Some("gpt-6-astra[web]"),
+                Some("gpt-6"),
+                "high",
+                "Astra high",
+            ),
+            (
+                Some("openai-api:gpt-6-astra[web]"),
+                Some("gpt-6"),
+                "high",
+                "Astra high",
+            ),
+            (
+                Some("openai/oauth:gpt-6-astra"),
+                Some("gpt-6"),
+                "high",
+                "Astra high",
+            ),
+            (None, Some("gpt-5.6-terra"), "medium", "Terra medium"),
+            (None, Some("gpt-5.6"), "high", "Unknown high"),
+            (
+                Some("unrecognized-route"),
+                Some("gpt-5.6"),
+                "low",
+                "Unknown low",
+            ),
         ] {
             assert_eq!(
-                format_worker_runtime(Some(selected), Some(actual), Some(effort)).as_deref(),
+                format_worker_runtime(selected, actual, Some(effort)).as_deref(),
                 Some(expected),
                 "selected={selected:?}, actual={actual:?}"
             );
@@ -2163,8 +2187,13 @@ mod tests {
         worker.auth_method = Some("OAuth".into());
 
         let text = members_to_tiles(&[worker])[0].body.join("\n");
-        assert_eq!(text, "Astra web high");
-        assert!(!text.contains("GPT") && !text.contains("OpenAI") && !text.contains("OAuth"));
+        assert_eq!(text, "Astra high");
+        assert!(
+            !text.contains("GPT")
+                && !text.contains("OpenAI")
+                && !text.contains("OAuth")
+                && !text.contains("web")
+        );
     }
 
     #[test]
