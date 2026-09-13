@@ -602,13 +602,14 @@ pub fn render_swarm_strip(
     let gap = 2usize; // minimum gap between chips and the right tail
     let hint_w = hint_text.map(|h| disp_w(h) + disp_w(hint_sep)).unwrap_or(0);
 
-    // ---- Chips: "<glyph> <name>[·task][ done/total]" ----
+    // ---- Chips: "<glyph> <name>[ · model effort][·task][ done/total]" ----
     // Task labels are additive: chips are fitted by their base width (glyph +
     // name + todo) so a long task can never hide other agents; leftover line
     // width is then shared out to task labels (see below).
     struct Chip {
         glyph: String,
         name: String,
+        runtime: Option<String>,
         task: Option<String>,
         todo: Option<String>,
         color: Color,
@@ -620,6 +621,16 @@ pub fn render_swarm_strip(
         .map(|(idx, m)| Chip {
             glyph: status_glyph(&m.status, spinner_frame).to_string(),
             name: m.label.clone(),
+            runtime: (is_active_status(&m.status)
+                && (m.selected_model.is_some() || m.model.is_some()))
+            .then(|| {
+                format_worker_runtime(
+                    m.selected_model.as_deref(),
+                    m.model.as_deref(),
+                    m.effort.as_deref(),
+                )
+            })
+            .flatten(),
             task: m
                 .task
                 .as_deref()
@@ -631,7 +642,11 @@ pub fn render_swarm_strip(
         })
         .collect();
     let chip_w = |c: &Chip| -> usize {
-        disp_w(&c.glyph) + 1 + disp_w(&c.name) + c.todo.as_ref().map(|t| disp_w(t) + 1).unwrap_or(0)
+        disp_w(&c.glyph)
+            + 1
+            + disp_w(&c.name)
+            + c.runtime.as_ref().map(|r| disp_w(r) + 3).unwrap_or(0)
+            + c.todo.as_ref().map(|t| disp_w(t) + 1).unwrap_or(0)
     };
 
     // Fit as many chips as possible into `budget`, collapsing overflow into a
@@ -743,6 +758,13 @@ pub fn render_swarm_strip(
                 style = style.add_modifier(Modifier::BOLD);
             }
             spans.push(Span::styled(format!("{} {}", chip.glyph, chip.name), style));
+            if let Some(runtime) = &chip.runtime {
+                spans.push(Span::styled(" · ", Style::default().fg(rgb(80, 80, 90))));
+                spans.push(Span::styled(
+                    runtime.clone(),
+                    Style::default().fg(rgb(150, 150, 160)),
+                ));
+            }
             if per_task_w > 0
                 && let Some(task) = &chip.task
             {
@@ -1336,6 +1358,26 @@ pub fn render_swarm_compact(
         ),
     ];
     let mut used: usize = spans.iter().map(|s| disp_w(&s.content)).sum();
+    for member in members.iter().filter(|m| {
+        is_active_status(&m.status) && (m.selected_model.is_some() || m.model.is_some())
+    }) {
+        let Some(runtime) = format_worker_runtime(
+            member.selected_model.as_deref(),
+            member.model.as_deref(),
+            member.effort.as_deref(),
+        ) else {
+            continue;
+        };
+        if used + 3 + disp_w(&runtime) > width {
+            continue;
+        }
+        used += 3 + disp_w(&runtime);
+        spans.push(Span::styled(" · ", sep_style));
+        spans.push(Span::styled(
+            runtime,
+            Style::default().fg(rgb(150, 150, 160)),
+        ));
+    }
     if let Some((done, _running, total)) = plan {
         let text = format!("nodes {done}/{total}");
         if used + 3 + disp_w(&text) <= width {
@@ -2670,7 +2712,7 @@ mod tests {
         // Wide: selected route fits. Narrow: route drops before status, while
         // the label always survives. Provider/auth never render for workers.
         let wide = plain_line(&render_swarm_chat_cards(std::slice::from_ref(&worker), 100)[0]);
-        assert!(wide.contains("Working · Sol"), "{wide}");
+        assert!(wide.contains("Working · gpt-5.6-sol"), "{wide}");
         assert!(
             !wide.contains("OpenAI") && !wide.contains("OAuth"),
             "{wide}"
@@ -2684,7 +2726,7 @@ mod tests {
         let mut bare = member("plain", "running", None, &[]);
         bare.icon = Some("🦕".to_string());
         let bare_line = plain_line(&render_swarm_chat_cards(std::slice::from_ref(&bare), 100)[0]);
-        assert_eq!(bare_line.trim(), "🦕 ● plain · Working");
+        assert_eq!(bare_line.trim(), "🦕 ● plain · Working · unknown");
     }
 
     #[test]
@@ -2891,6 +2933,47 @@ mod tests {
         let hint = plain_line(lines.last().unwrap());
         assert!(hint.contains("pop out"), "got: {hint}");
         assert!(hint.contains("select"), "got: {hint}");
+    }
+
+    #[test]
+    fn active_horizontal_strip_variants_show_canonical_runtime_without_provider_auth() {
+        let mut terra = member("terra", "running", None, &[]);
+        terra.selected_model = Some("openai-api:gpt-5.6-terra".into());
+        terra.model = Some("provider-reported-model".into());
+        terra.effort = Some("medium".into());
+        terra.provider = Some("OpenAI API".into());
+        terra.auth_method = Some("service-account".into());
+        let mut astra = member("astra", "thinking", None, &[]);
+        astra.selected_model = Some("openai/oauth:gpt-6-astra[web]".into());
+        astra.model = Some("provider-reported-web-model".into());
+        astra.effort = Some("high".into());
+        astra.provider = Some("OpenAI OAuth".into());
+        astra.auth_method = Some("browser-auth".into());
+        let mut completed = member("completed", "completed", None, &[]);
+        completed.selected_model = Some("openai-api:gpt-5.6-terra".into());
+        completed.effort = Some("medium".into());
+
+        for focused in [false, true] {
+            let lines = render_swarm_strip(
+                &[terra.clone(), astra.clone(), completed.clone()],
+                0,
+                focused,
+                &hints(),
+                None,
+                0,
+                160,
+                12,
+            );
+            let chips = plain_line(&lines[0]);
+            assert!(chips.contains("terra"), "got: {chips}");
+            assert!(chips.contains("astra"), "got: {chips}");
+            assert!(chips.contains("gpt-5.6-terra medium"), "got: {chips}");
+            assert!(chips.contains("gpt-6-astra[web]"), "got: {chips}");
+            assert!(!chips.contains("gpt-6-astra[web] high"), "got: {chips}");
+            assert!(!chips.contains("OpenAI"), "got: {chips}");
+            assert!(!chips.contains("auth"), "got: {chips}");
+            assert!(!chips.contains("completed · gpt-5.6-terra"), "got: {chips}");
+        }
     }
 
     #[test]
@@ -3184,6 +3267,38 @@ mod tests {
         }
         assert_eq!(bar.spans[0].style.fg, Some(rgb(100, 200, 100)));
         assert_eq!(bar.spans[1].style.fg, Some(rgb(255, 200, 100)));
+    }
+
+    #[test]
+    fn compact_shows_active_canonical_runtime_without_provider_auth() {
+        let mut terra = member("terra", "running", None, &[]);
+        terra.selected_model = Some("openai-api:gpt-5.6-terra".into());
+        terra.model = Some("provider-reported-model".into());
+        terra.effort = Some("medium".into());
+        terra.provider = Some("OpenAI API".into());
+        terra.auth_method = Some("service-account".into());
+        let mut astra = member("astra", "thinking", None, &[]);
+        astra.selected_model = Some("openai/oauth:gpt-6-astra[web]".into());
+        astra.model = Some("provider-reported-web-model".into());
+        astra.effort = Some("high".into());
+        astra.provider = Some("OpenAI OAuth".into());
+        astra.auth_method = Some("browser-auth".into());
+        let mut completed = member("completed", "completed", None, &[]);
+        completed.selected_model = Some("openai-api:gpt-5.6-terra".into());
+        completed.effort = Some("medium".into());
+
+        let lines = render_swarm_compact(&[terra, astra, completed], None, 120, 2);
+        let header = plain_line(&lines[0]);
+        assert!(header.contains("2/3 agents"), "got: {header}");
+        assert!(header.contains("gpt-5.6-terra medium"), "got: {header}");
+        assert!(header.contains("gpt-6-astra[web]"), "got: {header}");
+        assert!(!header.contains("gpt-6-astra[web] high"), "got: {header}");
+        assert!(!header.contains("OpenAI"), "got: {header}");
+        assert!(!header.contains("auth"), "got: {header}");
+        assert!(
+            !header.contains("completed · gpt-5.6-terra"),
+            "got: {header}"
+        );
     }
 
     #[test]
