@@ -132,30 +132,63 @@ fn format_model(model: &str) -> String {
     }
 }
 
-/// Render a canonical worker selection without losing a named route after the
-/// provider reports its resolved base model. This uses the structural
-/// `base-route` relation, not a list of worker names.
-fn format_worker_model(selected: Option<&str>, actual: Option<&str>) -> Option<String> {
-    let selected = selected.map(str::trim).filter(|value| !value.is_empty());
-    let actual = actual.map(str::trim).filter(|value| !value.is_empty());
-    if let (Some(selected), Some(actual)) = (selected, actual) {
-        let selected = selected.rsplit([':', '/']).next().unwrap_or(selected);
-        let actual = actual.rsplit([':', '/']).next().unwrap_or(actual);
-        if let Some(route) = selected.strip_prefix(&format!("{actual}-"))
-            && route
-                .chars()
-                .all(|character| character.is_ascii_alphabetic())
-            && !route.is_empty()
-        {
-            let mut chars = route.chars();
-            let first = chars
-                .next()
-                .expect("nonempty checked route")
-                .to_ascii_uppercase();
-            return Some(format!("{first}{}", chars.as_str().to_ascii_lowercase()));
-        }
+/// Format the named worker route from a canonical selected route. Provider
+/// state can report a differently cased base model, so normalize case and
+/// provider separators before deriving the public worker label.
+fn short_worker_route(model: &str) -> Option<String> {
+    let model = model
+        .trim()
+        .rsplit([':', '/'])
+        .next()
+        .unwrap_or(model)
+        .to_ascii_lowercase()
+        .replace('_', "-");
+    let (model, transport) = match model.strip_suffix("[web]") {
+        Some(model) => (model, Some("web")),
+        None => (model.as_str(), None),
+    };
+    let (_, route) = model.rsplit_once('-')?;
+    if !model.starts_with("gpt-")
+        || route.is_empty()
+        || !route.chars().all(|c| c.is_ascii_alphabetic())
+    {
+        return None;
     }
-    selected.or(actual).map(format_model)
+    let mut chars = route.chars();
+    let first = chars.next()?.to_ascii_uppercase();
+    let mut label = format!("{first}{}", chars.as_str());
+    if let Some(transport) = transport {
+        label.push(' ');
+        label.push_str(transport);
+    }
+    Some(label)
+}
+
+/// Render a canonical worker selection without exposing the resolved base
+/// model, provider, or authentication route. A selected named route always
+/// takes precedence over the provider's actual base model.
+fn format_worker_model(selected: Option<&str>, actual: Option<&str>) -> Option<String> {
+    selected
+        .and_then(short_worker_route)
+        .or_else(|| actual.and_then(short_worker_route))
+        .or_else(|| selected.or(actual).map(format_model))
+}
+
+/// Render worker metadata through one shared path so every worker surface uses
+/// the selected short route and the runtime's actual effort consistently.
+fn format_worker_runtime(
+    selected: Option<&str>,
+    actual: Option<&str>,
+    effort: Option<&str>,
+) -> Option<String> {
+    let route = format_worker_model(selected, actual);
+    let effort = effort.map(str::trim).filter(|value| !value.is_empty());
+    match (route, effort) {
+        (Some(route), Some(effort)) => Some(format!("{route} {effort}")),
+        (Some(route), None) => Some(route),
+        (None, Some(effort)) => Some(effort.to_string()),
+        (None, None) => None,
+    }
 }
 
 /// Sort rank for stable placement: coordinator first, then everything else.
@@ -269,9 +302,17 @@ pub fn members_to_tiles(members: &[GalleryMember]) -> Vec<SwarmTile> {
     sort_members_for_display(members)
         .into_iter()
         .map(|m| {
+            let mut body = m.body.clone();
+            if let Some(runtime) = format_worker_runtime(
+                m.selected_model.as_deref(),
+                m.model.as_deref(),
+                m.effort.as_deref(),
+            ) {
+                body.push(runtime);
+            }
             let mut tile =
                 SwarmTile::new(m.label.clone(), m.status.clone(), status_accent(&m.status))
-                    .with_body(m.body.clone());
+                    .with_body(body);
             if let Some(glyph) = role_glyph(m.role.as_deref()) {
                 tile = tile.with_role_glyph(glyph);
             }
@@ -340,10 +381,12 @@ pub fn render_swarm_chat_cards(members: &[GalleryMember], width: usize) -> Vec<L
         // and authentication details belong only to main-session auth UI.
         // Drop trailing pieces first when width is tight.
         let mut metadata = vec![card_status_label(&member.status).to_string()];
-        if let Some(model) =
-            format_worker_model(member.selected_model.as_deref(), member.model.as_deref())
-        {
-            metadata.push(model);
+        if let Some(runtime) = format_worker_runtime(
+            member.selected_model.as_deref(),
+            member.model.as_deref(),
+            member.effort.as_deref(),
+        ) {
+            metadata.push(runtime);
         }
         let mut tail = format!(" · {}", metadata.join(" · "));
         while metadata.len() > 1 && disp_w(&lead) + disp_w(&label) + disp_w(&tail) > width {
@@ -389,17 +432,12 @@ pub fn render_swarm_live_card(
     if let Some(elapsed) = member.elapsed_secs {
         metadata.push(format_elapsed(elapsed));
     }
-    if let Some(model) =
-        format_worker_model(member.selected_model.as_deref(), member.model.as_deref())
-    {
-        metadata.push(model);
-    }
-    if let Some(effort) = member
-        .effort
-        .as_deref()
-        .filter(|effort| !effort.trim().is_empty())
-    {
-        metadata.push(effort.to_string());
+    if let Some(runtime) = format_worker_runtime(
+        member.selected_model.as_deref(),
+        member.model.as_deref(),
+        member.effort.as_deref(),
+    ) {
+        metadata.push(runtime);
     }
 
     let lead = format!(
@@ -995,10 +1033,12 @@ pub fn render_swarm_strip_vertical(
             if let Some(elapsed) = m.elapsed_secs {
                 metadata.push(format_elapsed(elapsed));
             }
-            if let Some(model) =
-                format_worker_model(m.selected_model.as_deref(), m.model.as_deref())
-            {
-                metadata.push(model);
+            if let Some(runtime) = format_worker_runtime(
+                m.selected_model.as_deref(),
+                m.model.as_deref(),
+                m.effort.as_deref(),
+            ) {
+                metadata.push(runtime);
             }
 
             let mut tail = metadata.join(" · ");
@@ -1044,17 +1084,12 @@ pub fn render_swarm_strip_vertical(
         // The persistent panel identifies the selected worker route and actual
         // effort, but never repeats provider/auth metadata. Model and effort
         // take precedence over task when a narrow row sheds optional detail.
-        let runtime = [
-            format_worker_model(m.selected_model.as_deref(), m.model.as_deref()),
-            m.effort
-                .as_deref()
-                .filter(|effort| !effort.trim().is_empty())
-                .map(str::to_string),
-        ]
-        .into_iter()
-        .flatten()
-        .collect::<Vec<_>>()
-        .join(" ");
+        let runtime = format_worker_runtime(
+            m.selected_model.as_deref(),
+            m.model.as_deref(),
+            m.effort.as_deref(),
+        )
+        .unwrap_or_default();
         if !runtime.is_empty() {
             let avail = body_budget.saturating_sub(used + todo_w + disp_w(" · "));
             if avail >= 4 {
@@ -1995,33 +2030,40 @@ mod tests {
     }
 
     #[test]
-    fn selected_worker_route_label_beats_resolved_base_model_without_provider() {
-        for (selected, expected) in [
-            ("gpt-5.6-sol", "Sol"),
-            ("gpt-5.6-terra", "Terra"),
-            ("gpt-5.6-luna", "Luna"),
-            ("gpt-6-astra", "Astra"),
+    fn worker_runtime_uses_normalized_selected_route_and_actual_effort() {
+        for (selected, actual, effort, expected) in [
+            ("gpt-5.6-sol", "GPT-5.6", "high", "Sol high"),
+            (
+                "openai-api:GPT_5.6_TERRA",
+                "gpt-5.6",
+                "medium",
+                "Terra medium",
+            ),
+            ("openai/gpt-5.6-luna", "GPT-5.6", "low", "Luna low"),
+            ("gpt-6-astra[web]", "gpt-6", "high", "Astra web high"),
         ] {
             assert_eq!(
-                format_worker_model(
-                    Some(selected),
-                    Some(
-                        selected
-                            .trim_end_matches(|c: char| c.is_ascii_alphabetic())
-                            .trim_end_matches('-')
-                    )
-                )
-                .as_deref(),
-                Some(expected)
+                format_worker_runtime(Some(selected), Some(actual), Some(effort)).as_deref(),
+                Some(expected),
+                "selected={selected:?}, actual={actual:?}"
             );
         }
+
+        // A selected named route wins even if a provider reports a different
+        // named route. The effort comes from the worker runtime, not its route.
         assert_eq!(
-            format_worker_model(None, Some("gpt-5.6")).as_deref(),
-            Some("GPT-5.6")
+            format_worker_runtime(Some("gpt-5.6-sol"), Some("gpt-5.6-terra"), Some("low"))
+                .as_deref(),
+            Some("Sol low")
         );
         assert_eq!(
-            format_worker_model(Some("gpt-5.6-sol"), Some("gpt-5.6")).as_deref(),
-            Some("Sol")
+            format_worker_runtime(
+                Some("openai-api:gpt-5.6-sol"),
+                Some("GPT-5.6"),
+                Some("high")
+            )
+            .as_deref(),
+            Some("Sol high")
         );
     }
 
@@ -2109,6 +2151,20 @@ mod tests {
         for line in &lines {
             assert!(line.width() <= 80);
         }
+    }
+
+    #[test]
+    fn full_gallery_uses_short_worker_runtime_without_provider() {
+        let mut worker = member("astra-worker", "running", None, &[]);
+        worker.selected_model = Some("openai:gpt-6-astra[web]".into());
+        worker.model = Some("GPT-6".into());
+        worker.effort = Some("high".into());
+        worker.provider = Some("OpenAI".into());
+        worker.auth_method = Some("OAuth".into());
+
+        let text = members_to_tiles(&[worker])[0].body.join("\n");
+        assert_eq!(text, "Astra web high");
+        assert!(!text.contains("GPT") && !text.contains("OpenAI") && !text.contains("OAuth"));
     }
 
     #[test]
@@ -2499,7 +2555,7 @@ mod tests {
             "assigned agent emoji missing: {all}"
         );
         assert!(
-            all.contains("reviewer · Working · Sol"),
+            all.contains("reviewer · Working · Sol high"),
             "stable status/worker-route metadata missing: {all}"
         );
         assert!(
@@ -2523,7 +2579,7 @@ mod tests {
             .collect::<Vec<_>>()
             .join("\n");
         assert!(
-            live.contains("reviewer · 00:18 · Sol · high"),
+            live.contains("reviewer · 00:18 · Sol high"),
             "live header metadata missing: {live}"
         );
         assert!(
