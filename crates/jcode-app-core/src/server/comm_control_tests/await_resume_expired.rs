@@ -29,6 +29,7 @@ async fn resume_background_awaits_cancels_expired_background_state_without_deliv
             background: true,
             notify: true,
             wake: true,
+            request_generation: 1,
             final_response: None,
         },
     );
@@ -119,6 +120,7 @@ async fn resume_background_awaits_cancels_orphaned_requester_without_wake() {
             background: true,
             notify: true,
             wake: true,
+            request_generation: 1,
             final_response: None,
         },
     );

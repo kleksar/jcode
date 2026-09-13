@@ -26,6 +26,7 @@ fn pending_await_state(
         notify,
         wake,
     )
+    .expect("initial await generation should be available")
 }
 
 fn completed_member(peer: &str) -> AwaitedMemberStatus {
@@ -439,4 +440,9 @@ async fn await_members_background_to_blocking_disconnect_cleans_active_state() {
         "disconnect must clean the active semantic key after background-to-blocking downgrade"
     );
     await_runtime.clear_active(&key).await;
+    assert_eq!(
+        await_runtime.transaction_registry_len(),
+        0,
+        "disconnected cancellation must release its transaction registry entry"
+    );
 }

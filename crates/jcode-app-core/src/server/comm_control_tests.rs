@@ -8,7 +8,7 @@ use crate::server::await_members_state::{
     AwaitTransactionOperation, ensure_pending_state, load_state, request_key,
 };
 use crate::server::comm_await::{
-    CommAwaitMembersContext, finalize_await, handle_comm_await_members,
+    CommAwaitMembersContext, finalize_await, handle_comm_await_members, resume_background_awaits,
 };
 use crate::server::{
     AwaitMembersRuntime, SwarmEvent, SwarmEventType, SwarmMember, SwarmMutationRuntime,
@@ -168,6 +168,7 @@ include!("comm_control_tests/await_resume_expired.rs");
 include!("comm_control_tests/await_background_expired.rs");
 include!("comm_control_tests/await_upgrade_background.rs");
 include!("comm_control_tests/await_linearization.rs");
+include!("comm_control_tests/await_generation_cleanup.rs");
 include!("comm_control_tests/dag_e2e.rs");
 include!("comm_control_tests/auto_worker_filter.rs");
 include!("comm_control_tests/client_attached_dispatch.rs");

@@ -185,7 +185,6 @@ async fn claim_terminal_response(
     let _transaction = runtime.transaction_for_finalize(&state.key).await;
     let pending = load_state(&state.key).filter(PersistedAwaitMembersState::is_pending)?;
     let committed = persist_final_response(&pending, completed, members, summary);
-    runtime.forget_transaction(&state.key).await;
     Some(committed)
 }
 
@@ -200,7 +199,6 @@ async fn cancel_disconnected_blocking_await(
     let _transaction = runtime.transaction_for_cancel(&state.key).await;
     let Some(current) = load_state(&state.key) else {
         runtime.clear_active(&state.key).await;
-        runtime.forget_transaction(&state.key).await;
         return true;
     };
     if !current.is_pending() {
@@ -218,7 +216,6 @@ async fn cancel_disconnected_blocking_await(
     );
     let _ = runtime.take_waiters(&state.key).await;
     runtime.clear_active(&state.key).await;
-    runtime.forget_transaction(&state.key).await;
     true
 }
 
@@ -367,7 +364,6 @@ pub(super) async fn spawn_or_resume_await_members(
                         Err(broadcast::error::RecvError::Closed) => {
                             let _transaction = await_members_runtime.transaction_for_cancel(&key).await;
                             await_members_runtime.clear_active(&key).await;
-                            await_members_runtime.forget_transaction(&key).await;
                             return;
                         }
                     }
@@ -452,7 +448,6 @@ pub(super) async fn handle_comm_await_members(
                         summary: final_response.summary,
                         background_started: false,
                     });
-                ctx.await_members_runtime.forget_transaction(&key).await;
                 return;
             }
 
@@ -501,7 +496,7 @@ pub(super) async fn handle_comm_await_members(
         // Re-enter the state upsert even when the semantic key already exists:
         // its active delivery policy belongs to the latest retry, while the
         // original deadline and sole watcher remain unchanged.
-        let state = ensure_pending_state(
+        let state = match ensure_pending_state(
             &key,
             &req_session_id,
             &swarm_id,
@@ -512,7 +507,20 @@ pub(super) async fn handle_comm_await_members(
             background,
             notify,
             wake,
-        );
+        ) {
+            Ok(state) => state,
+            Err(_) => {
+                // Refuse the retry instead of wrapping its persisted fence and
+                // allowing an old reload snapshot to impersonate it.
+                let _ = ctx.client_event_tx.send(ServerEvent::Error {
+                    id,
+                    message: "Await request generation exhausted; start a new semantic await."
+                        .to_string(),
+                    retry_after_secs: None,
+                });
+                return;
+            }
+        };
 
         let already_expired = state.deadline_unix_ms
             <= SystemTime::now()
@@ -708,14 +716,39 @@ pub(super) async fn resume_background_awaits(
     swarm_event_tx: &broadcast::Sender<SwarmEvent>,
     await_members_runtime: &AwaitMembersRuntime,
 ) {
-    let pending = all_pending_await_members_including_expired();
+    #[derive(Clone)]
+    struct ReloadOrphanSnapshot {
+        key: String,
+        request_generation: u64,
+        requester_session_id: String,
+    }
+
+    // Snapshot the durable fence before any asynchronous cleanup. A new retry
+    // keeps the semantic key but advances its generation before releasing that
+    // key's transaction, so this stale snapshot cannot cancel it.
+    let pending: Vec<ReloadOrphanSnapshot> = all_pending_await_members_including_expired()
+        .into_iter()
+        .map(|state| ReloadOrphanSnapshot {
+            key: state.key,
+            request_generation: state.request_generation,
+            requester_session_id: state.session_id,
+        })
+        .collect();
+    await_members_runtime
+        .wait_after_reload_orphan_snapshot()
+        .await;
     let _ = (swarm_members, swarms_by_id, swarm_event_tx);
     let mut cancelled_orphans = 0usize;
-    for state in pending {
+    for snapshot in pending {
         let _transaction = await_members_runtime
-            .transaction_for_cancel(&state.key)
+            .transaction_for_cancel(&snapshot.key)
             .await;
-        if let Some(pending) = load_state(&state.key).filter(PersistedAwaitMembersState::is_pending)
+        if let Some(pending) = load_state(&snapshot.key)
+            .filter(PersistedAwaitMembersState::is_pending)
+            .filter(|current| {
+                current.request_generation == snapshot.request_generation
+                    && current.session_id == snapshot.requester_session_id
+            })
         {
             let _ = persist_non_replayable_final_response(
                 &pending,
@@ -724,7 +757,6 @@ pub(super) async fn resume_background_awaits(
                 "Await cancelled because reload orphaned its watcher. Rerun the await if it is still needed; the retry uses current member state and a fresh timeout."
                     .to_string(),
             );
-            await_members_runtime.forget_transaction(&state.key).await;
             cancelled_orphans += 1;
         }
     }
