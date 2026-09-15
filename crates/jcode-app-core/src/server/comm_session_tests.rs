@@ -506,6 +506,7 @@ async fn register_visible_spawned_member_marks_startup_as_running() {
     let member = members.get("child-1").expect("spawned member should exist");
     assert_eq!(member.status, "running");
     assert_eq!(member.detail.as_deref(), Some("startup queued"));
+    assert_eq!(member.runtime.effort, None);
     assert_eq!(member.swarm_id.as_deref(), Some("swarm-1"));
     assert_eq!(
         member.runtime.selected_model.as_deref(),

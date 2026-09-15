@@ -777,6 +777,9 @@ fn collect_worktree_changes(working_dir: &Path) -> Option<WorktreeChangesSnapsho
         command_output(&root, &["ls-files", "--others", "--exclude-standard", "-z"])
             .map(|output| nul_paths(&output).into_iter().collect())
             .unwrap_or_default();
+    // Git represents a linked worktree below this root as an untracked
+    // directory. The Diff pane can only render files, and attempting to read
+    // that directory produces a misleading "new unreadable file" entry.
     untracked.retain(|path| {
         std::fs::symlink_metadata(root.join(path))
             .map(|metadata| !metadata.file_type().is_dir())
@@ -2416,6 +2419,57 @@ mod tests {
         assert_eq!(snapshot.files.len(), 1);
         assert_eq!(snapshot.additions, 2);
         assert_eq!(snapshot.files[0].path, "new.txt");
+    }
+
+    #[test]
+    fn linked_worktree_directory_is_omitted_while_its_changes_are_rendered() {
+        let dir = tempfile::tempdir().unwrap();
+        Command::new("git")
+            .current_dir(dir.path())
+            .args(["init", "-q"])
+            .status()
+            .unwrap();
+        std::fs::write(dir.path().join("base.txt"), "base\n").unwrap();
+        Command::new("git")
+            .current_dir(dir.path())
+            .args([
+                "-c",
+                "user.email=test@example.invalid",
+                "-c",
+                "user.name=Test User",
+                "add",
+                "base.txt",
+            ])
+            .status()
+            .unwrap();
+        Command::new("git")
+            .current_dir(dir.path())
+            .args([
+                "-c",
+                "user.email=test@example.invalid",
+                "-c",
+                "user.name=Test User",
+                "commit",
+                "-qm",
+                "base",
+            ])
+            .status()
+            .unwrap();
+        Command::new("git")
+            .current_dir(dir.path())
+            .args(["worktree", "add", "-q", "-b", "linked", ".worktrees/linked"])
+            .status()
+            .unwrap();
+
+        let parent_snapshot = collect_worktree_changes(dir.path()).unwrap();
+        assert!(parent_snapshot.files.is_empty());
+
+        let linked = dir.path().join(".worktrees/linked");
+        std::fs::write(linked.join("new.txt"), "from linked worktree\n").unwrap();
+        let linked_snapshot = collect_worktree_changes(&linked).unwrap();
+        assert_eq!(linked_snapshot.files.len(), 1);
+        assert_eq!(linked_snapshot.files[0].path, "new.txt");
+        assert_eq!(linked_snapshot.additions, 1);
     }
 
     #[test]

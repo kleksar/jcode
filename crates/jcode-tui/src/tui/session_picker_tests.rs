@@ -536,6 +536,34 @@ fn test_batch_restore_detection_excludes_already_recovered_parent_sessions() {
 }
 
 #[test]
+fn batch_restore_excludes_durable_and_legacy_workers_but_keeps_user_forks() {
+    let crash = |id: &str| {
+        make_session(
+            id,
+            id,
+            false,
+            SessionStatus::Crashed {
+                message: Some("boom".to_string()),
+            },
+        )
+    };
+    let durable_worker = with_worker_origin(crash("durable-worker"));
+    let mut legacy_worker = crash("legacy-worker");
+    legacy_worker.is_debug = true;
+    legacy_worker.parent_id = Some("root".to_string());
+    let mut user_fork = crash("user-fork");
+    user_fork.parent_id = Some("root".to_string());
+
+    let picker = SessionPicker::new(vec![durable_worker, legacy_worker, user_fork]);
+
+    let crashed = picker
+        .crashed_sessions
+        .expect("user fork remains recoverable");
+    assert_eq!(crashed.session_ids, vec!["user-fork"]);
+    assert_eq!(crashed.display_names, vec!["user-fork"]);
+}
+
+#[test]
 fn test_grouped_batch_restore_uses_last_active_at_and_includes_debug_sessions() {
     let now = Utc::now();
 
@@ -1063,7 +1091,7 @@ fn session_picker_ctrl_x_refuses_working_closed_and_external_rows() {
 }
 
 #[test]
-fn test_active_filter_shows_only_live_sessions_ready_before_working() {
+fn test_active_filter_shows_only_live_sessions_in_display_name_order() {
     let live_working = make_session("session_working", "alpha", false, SessionStatus::Active);
     let live_ready = make_session("session_ready", "beta", false, SessionStatus::Active);
     let dead = make_session("session_dead", "dead", false, SessionStatus::Closed);
@@ -1079,8 +1107,8 @@ fn test_active_filter_shows_only_live_sessions_ready_before_working() {
         .visible_session_iter()
         .map(|session| session.id.as_str())
         .collect();
-    // Only live sessions appear; the ready one is triaged above the working one.
-    assert_eq!(visible, vec!["session_ready", "session_working"]);
+    // Only live sessions appear, ordered by their displayed names.
+    assert_eq!(visible, vec!["session_working", "session_ready"]);
 
     let ready = picker
         .visible_session_iter()
@@ -1093,6 +1121,46 @@ fn test_active_filter_shows_only_live_sessions_ready_before_working() {
     assert!(!picker.session_is_streaming(ready));
     assert!(picker.session_is_streaming(working));
     assert!(picker.session_streaming_duration(working).is_some());
+}
+
+#[test]
+fn picker_orders_displayed_titles_case_insensitively_with_id_tiebreak() {
+    let mut title_z = make_session("z-id", "short-z", false, SessionStatus::Closed);
+    title_z.title = "zulu".to_string();
+    let mut title_a = make_session("b-id", "short-b", false, SessionStatus::Closed);
+    title_a.title = "Alpha".to_string();
+    let mut tied = make_session("a-id", "short-a", false, SessionStatus::Closed);
+    tied.title = "alpha".to_string();
+    let short_name = make_session("short-id", "Bravo", false, SessionStatus::Closed);
+    let mut worker = make_session("worker-id", "aardvark", true, SessionStatus::Active);
+    worker.parent_id = Some("root".to_string());
+    worker.origin = SessionOrigin::SwarmWorker;
+
+    let mut picker = SessionPicker::new(vec![title_z, title_a, tied, short_name, worker]);
+    for mode in [SessionFilterMode::All, SessionFilterMode::Active] {
+        if mode == SessionFilterMode::Active {
+            picker.activate_active_filter();
+            picker.set_live_presence_for_test(vec![
+                live_presence("z-id", false),
+                live_presence("b-id", false),
+                live_presence("a-id", false),
+                live_presence("short-id", false),
+                live_presence("worker-id", false),
+            ]);
+        } else {
+            picker.filter_mode = mode;
+            picker.rebuild_items();
+        }
+        let visible: Vec<&str> = picker
+            .visible_session_iter()
+            .map(|session| session.id.as_str())
+            .collect();
+        assert_eq!(visible, vec!["a-id", "b-id", "short-id", "z-id"]);
+        assert_eq!(
+            picker.hidden_test_count, 0,
+            "workers are excluded, not counted as hidden tests"
+        );
+    }
 }
 
 #[test]
@@ -3331,10 +3399,13 @@ fn live_identity_visibility_matrix_matches_cached_rows() {
                             picker.show_test_sessions = show_debug;
                             picker.rebuild_items();
                         }
+                        let legacy_worker =
+                            origin == SessionOrigin::Unknown && debug && parent.is_some();
+                        let worker = origin == SessionOrigin::SwarmWorker || legacy_worker;
                         let expected = usize::from(
-                            show_debug
-                                || (origin == SessionOrigin::Unknown
-                                    && (!debug
+                            !worker
+                                && (show_debug
+                                    || (!debug
                                         || (mode == SessionFilterMode::Active
                                             && parent.is_none()))),
                         );
@@ -3343,8 +3414,9 @@ fn live_identity_visibility_matrix_matches_cached_rows() {
                         assert_eq!(synthetic.all_sessions[0].parent_id.as_deref(), parent);
                         assert_eq!(synthetic.all_sessions[0].is_debug, debug);
                         assert_eq!(synthetic.all_sessions[0].origin, origin);
-                        assert_eq!(synthetic.hidden_test_count, 1 - expected);
-                        assert_eq!(cached.hidden_test_count, 1 - expected);
+                        let hidden_debug = usize::from(!show_debug && !worker && expected == 0);
+                        assert_eq!(synthetic.hidden_test_count, hidden_debug);
+                        assert_eq!(cached.hidden_test_count, hidden_debug);
                     }
                 }
             }
@@ -3575,21 +3647,21 @@ fn worker_origin_policy_matrix_flat_grouped_orphan_and_toggle() {
                             1,
                             "{grouped} {parent:?} {debug} {saved} {mode:?}"
                         );
-                        assert_eq!(picker.hidden_test_count, 2);
+                        assert_eq!(picker.hidden_test_count, 0);
                         assert_eq!(picker.selected_session().unwrap().id, "ordinary");
                         picker.toggle_test_sessions();
-                        assert_eq!(picker.visible_session_count(), 3);
+                        assert_eq!(picker.visible_session_count(), 1);
                         assert_eq!(picker.hidden_test_count, 0);
                         picker.toggle_test_sessions();
                         assert_eq!(picker.visible_session_count(), 1);
-                        assert_eq!(picker.hidden_test_count, 2);
+                        assert_eq!(picker.hidden_test_count, 0);
                     }
                     picker.search_query = "worker".into();
                     picker.rebuild_items();
                     assert_eq!(picker.visible_session_count(), 0);
-                    assert_eq!(picker.hidden_test_count, 1);
+                    assert_eq!(picker.hidden_test_count, 0);
                     picker.toggle_test_sessions();
-                    assert_eq!(picker.visible_session_count(), 1);
+                    assert_eq!(picker.visible_session_count(), 0);
                     picker.filter_mode = SessionFilterMode::Active;
                     picker.set_live_presence_for_test(vec![live_presence("ordinary", false)]);
                     picker.rebuild_items();
@@ -3636,7 +3708,7 @@ fn worker_origin_synthetic_arrival_replacement_and_immutable_cache() {
             "bounded refresh retries unavailable identity"
         );
         assert_eq!(picker.selected_session().unwrap().id, "ordinary");
-        assert_eq!(picker.hidden_test_count, 1);
+        assert_eq!(picker.hidden_test_count, 0);
         assert_eq!(
             picker
                 .all_sessions
@@ -3674,9 +3746,9 @@ fn worker_origin_synthetic_arrival_replacement_and_immutable_cache() {
         hydrate_live_identity_fixture(&mut picker, dir.path(), presences);
         assert_eq!(picker.visible_session_count(), 1);
         assert_eq!(picker.selected_session().unwrap().id, "ordinary");
-        assert_eq!(picker.hidden_test_count, 1);
+        assert_eq!(picker.hidden_test_count, 0);
         picker.toggle_test_sessions();
-        assert_eq!(picker.visible_session_count(), 2);
+        assert_eq!(picker.visible_session_count(), 1);
     }
 }
 

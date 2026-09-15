@@ -33,6 +33,10 @@ fn create_scroll_test_app(
     crate::tui::mermaid::clear_streaming_preview_diagram();
 
     let mut app = create_test_app();
+    // These scroll fixtures exercise the legacy elastic overscroll behavior.
+    // Keep that opt-in local to the fixture now that the user-facing default
+    // is Off, rather than masking the new default in create_test_app.
+    app.overscroll_status_mode = crate::config::OverscrollStatusMode::Overscroll;
     if diagrams == 0 {
         // Process-global diagrams can be registered by sibling tests after the
         // clear above. Keep text-only geometry deterministic at the App level.
@@ -1214,6 +1218,22 @@ fn test_chat_overscroll_reveals_status_line_then_rebounds() {
     assert!(
         !app.chat_overscroll_active(),
         "scrolling up should cancel the overscroll line"
+    );
+}
+
+#[test]
+fn test_overscroll_is_off_by_default_and_reserves_no_status_rows() {
+    let _lock = scroll_render_test_lock();
+    let mut app = create_test_app();
+    assert_eq!(
+        app.overscroll_status_mode,
+        crate::config::OverscrollStatusMode::Off
+    );
+
+    app.register_chat_overscroll();
+    assert!(
+        !app.chat_overscroll_active(),
+        "Off mode must not activate or reserve overscroll chrome"
     );
 }
 
