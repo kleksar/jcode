@@ -1706,6 +1706,18 @@ fn resolve_optional_target_session(target: Option<String>, current_session: &str
     resolve_optional_comm_target_session(target, current_session)
 }
 
+fn required_target_session(params: &CommunicateInput, action: &str) -> Result<String> {
+    params
+        .target_session
+        .clone()
+        .or_else(|| params.to_session.clone())
+        .map(|target| target.trim().to_string())
+        .filter(|target| !target.is_empty())
+        .ok_or_else(|| {
+            anyhow::anyhow!("'target_session' (or 'to_session') is required for {action} action")
+        })
+}
+
 fn format_awaited_members_with_reports(
     completed: bool,
     summary: &str,
@@ -2954,9 +2966,7 @@ impl Tool for CommunicateTool {
             }
 
             "summary" => {
-                let target = params.target_session.ok_or_else(|| {
-                    anyhow::anyhow!("'target_session' is required for summary action")
-                })?;
+                let target = required_target_session(&params, "summary")?;
 
                 let request = Request::CommSummary {
                     id: REQUEST_ID,
@@ -2979,9 +2989,7 @@ impl Tool for CommunicateTool {
 
             "read_context" => {
                 validate_read_context_limit(params.limit)?;
-                let target = params.target_session.ok_or_else(|| {
-                    anyhow::anyhow!("'target_session' is required for read_context action")
-                })?;
+                let target = required_target_session(&params, "read_context")?;
 
                 let request = Request::CommReadContext {
                     id: REQUEST_ID,

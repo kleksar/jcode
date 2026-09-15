@@ -1169,12 +1169,12 @@ async fn spawn_bootstraps_coordinator_when_swarm_has_none() {
 }
 
 #[tokio::test]
-async fn nested_agent_cannot_spawn_when_root_is_light_or_normal() {
-    // Both explicit light-swarm effort and ordinary ad hoc swarm use are
-    // one-level fan-out. A spawned child cannot grow another generation.
+async fn nested_agent_cannot_spawn_even_when_root_is_deep() {
+    // Worker spawning is root-only for every swarm mode.
     for (root_id, effort) in [
         ("light-root-no-recursion", Some("swarm")),
         ("normal-root-no-recursion", None),
+        ("deep-root-no-recursion", Some("swarm-deep")),
     ] {
         crate::session_effort::forget_session_effort(root_id);
         crate::session_effort::record_session_effort(root_id, effort);
@@ -1232,14 +1232,14 @@ async fn nested_agent_cannot_spawn_when_root_is_light_or_normal() {
         assert!(matches!(
             client_event_rx.recv().await,
             Some(ServerEvent::Error { message, .. })
-                if message.contains("Recursive swarm spawning is disabled")
-                    && message.contains(&format!("Only the root session ({root_id}) may spawn agents"))
+                if message.contains("Only the root session")
+                    && message.contains("Worker sessions cannot spawn")
         ));
     }
 }
 
 #[tokio::test]
-async fn nested_agent_can_spawn_when_root_is_deep() {
+async fn nested_agent_cannot_spawn_when_root_is_deep() {
     let root_id = "deep-root-recursive";
     crate::session_effort::record_session_effort(root_id, Some("swarm-deep"));
 
@@ -1262,7 +1262,7 @@ async fn nested_agent_can_spawn_when_root_is_deep() {
     drop(members);
     let (client_event_tx, mut client_event_rx) = mpsc::unbounded_channel();
 
-    let allowed = ensure_spawn_coordinator_swarm(
+    let refused = ensure_spawn_coordinator_swarm(
         3,
         "deep-child",
         &client_event_tx,
@@ -1275,13 +1275,16 @@ async fn nested_agent_can_spawn_when_root_is_deep() {
     .await;
 
     crate::session_effort::forget_session_effort(root_id);
-    assert_eq!(allowed.as_deref(), Some("swarm-deep"));
-    assert!(client_event_rx.try_recv().is_err());
+    assert!(refused.is_none());
+    assert!(matches!(
+        client_event_rx.recv().await,
+        Some(ServerEvent::Error { message, .. })
+            if message.contains("Worker sessions cannot spawn")
+    ));
 }
 
 #[tokio::test]
-async fn spawn_allowed_at_arbitrary_depth_without_depth_cap() {
-    // Deep-swarm mode still allows recursive decomposition at arbitrary depth.
+async fn spawn_rejected_at_arbitrary_worker_depth() {
     let root_id = "deep-root-arbitrary-depth";
     crate::session_effort::record_session_effort(root_id, Some("swarm-deep"));
     let swarm_members = Arc::new(RwLock::new(HashMap::new()));
@@ -1311,9 +1314,8 @@ async fn spawn_allowed_at_arbitrary_depth_without_depth_cap() {
     }
     let (client_event_tx, _client_event_rx) = mpsc::unbounded_channel();
 
-    // `f` is deeply nested but the swarm is far below the member cap, so spawning
-    // is allowed.
-    let allowed = ensure_spawn_coordinator_swarm(
+    // `f` is deeply nested, but workers cannot spawn regardless of mode or depth.
+    let refused = ensure_spawn_coordinator_swarm(
         7,
         "f",
         &client_event_tx,
@@ -1325,7 +1327,7 @@ async fn spawn_allowed_at_arbitrary_depth_without_depth_cap() {
     )
     .await;
     crate::session_effort::forget_session_effort(root_id);
-    assert_eq!(allowed.as_deref(), Some("swarm-1"));
+    assert!(refused.is_none());
 }
 
 #[tokio::test]

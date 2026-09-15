@@ -405,6 +405,28 @@ async fn resolve_task_ids(
     }
 }
 
+async fn missing_task_error(
+    manager: &background::BackgroundTaskManager,
+    task_id: &str,
+) -> anyhow::Error {
+    let is_swarm_session = manager
+        .list()
+        .await
+        .iter()
+        .any(|task| task.session_id == task_id);
+    if is_swarm_session {
+        anyhow::anyhow!(
+            "'{}' is a swarm session ID, not a background task ID. Use `swarm` actions such as `status`, `read_context`, or `plan_status` for that session, or pass the background task's `task_id` from `bg action=\"list\"`.",
+            task_id
+        )
+    } else {
+        anyhow::anyhow!(
+            "Background task '{}' was not found. Use `bg action=\"list\"` or `latest=true` to select a valid task_id.",
+            task_id
+        )
+    }
+}
+
 async fn wait_many_polling(
     manager: &background::BackgroundTaskManager,
     task_ids: &[String],
@@ -566,10 +588,9 @@ impl Tool for BgTool {
                 let mut tasks = Vec::new();
                 let mut output = String::new();
                 for task_id in task_ids {
-                    let task = manager
-                        .status(&task_id)
-                        .await
-                        .ok_or_else(|| anyhow::anyhow!("Task not found: {}", task_id))?;
+                    let Some(task) = manager.status(&task_id).await else {
+                        return Err(missing_task_error(manager, &task_id).await);
+                    };
                     if !output.is_empty() {
                         output.push_str("\n---\n");
                     }
@@ -606,12 +627,9 @@ impl Tool for BgTool {
                 } else {
                     params.tail_lines.or(params.lines)
                 };
-                let output = manager.output(&task_id).await.ok_or_else(|| {
-                    anyhow::anyhow!(
-                        "Output not found for task: {}. Task may not exist or output file was deleted.",
-                        task_id
-                    )
-                })?;
+                let Some(output) = manager.output(&task_id).await else {
+                    return Err(missing_task_error(manager, &task_id).await);
+                };
                 let (rendered, truncated) = output_preview(&output, tail);
                 let status = manager.status(&task_id).await;
                 Ok(ToolOutput::new(rendered)
@@ -634,10 +652,7 @@ impl Tool for BgTool {
                     true => Ok(ToolOutput::new(format!("Task {} cancelled.", task_id))
                         .with_title(format!("bg cancel {}", task_id))
                         .with_metadata(json!({"task_id": task_id, "cancelled": true, "graceful_timeout_ms": grace.as_millis()}))),
-                    false => Err(anyhow::anyhow!(
-                        "Task {} not found or already completed.",
-                        task_id
-                    )),
+                    false => Err(missing_task_error(manager, &task_id).await),
                 }
             }
 
@@ -700,7 +715,7 @@ impl Tool for BgTool {
                             "stall_wake_seconds": stall_armed,
                         })))
                     }
-                    None => Err(anyhow::anyhow!("Task not found: {}", task_id)),
+                    None => Err(missing_task_error(manager, &task_id).await),
                 }
             }
 
@@ -898,5 +913,20 @@ mod tests {
             "err={err:?}"
         );
         Ok(())
+    }
+
+    #[tokio::test]
+    async fn missing_task_error_distinguishes_swarm_session_ids() {
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let manager = crate::background::BackgroundTaskManager::with_output_dir(dir.path().into());
+        let info = manager
+            .spawn_with_notify("swarm", None, "session-worker", false, false, |_| async {
+                Ok(crate::background::TaskResult::completed(Some(0)))
+            })
+            .await;
+
+        let error = missing_task_error(&manager, "session-worker").await;
+        assert!(error.to_string().contains("swarm session ID"));
+        assert!(error.to_string().contains(&info.task_id));
     }
 }
