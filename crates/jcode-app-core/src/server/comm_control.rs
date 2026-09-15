@@ -2557,22 +2557,15 @@ pub(super) fn handle_client_debug_response(
 ///
 /// Light mode keeps the single-coordinator rule: a coordinator is the one driver,
 /// which matches the cheap fan-out preset. Deep mode follows the task-DAG
-/// ownership model (see `docs/SWARM_TASK_GRAPH.md` section 2): the plan is a tree
-/// of ownership over a graph, and the agent that seeded/participates in the graph
-/// must be able to dispatch it even when another session already holds the
-/// swarm-level coordinator slot. Without this, a deep-mode agent that joins a
-/// shared swarm can seed a graph but is then blocked from spawning/assigning any
-/// of it, so nothing ever runs.
-///
-/// Returns the swarm id when the caller is the coordinator, or (deep mode only) a
-/// participant of the swarm's plan.
+/// Returns the swarm id only when the caller is the swarm coordinator. Worker
+/// sessions may report and inspect state, but cannot mutate task ownership.
 async fn require_plan_driver_swarm(
     id: u64,
     req_session_id: &str,
     permission_error: &str,
     client_event_tx: &mpsc::UnboundedSender<ServerEvent>,
     swarm_members: &Arc<RwLock<HashMap<String, SwarmMember>>>,
-    swarm_plans: &Arc<RwLock<HashMap<String, VersionedPlan>>>,
+    _swarm_plans: &Arc<RwLock<HashMap<String, VersionedPlan>>>,
     swarm_coordinators: &Arc<RwLock<HashMap<String, String>>>,
 ) -> Option<String> {
     let swarm_id = {
@@ -2598,21 +2591,6 @@ async fn require_plan_driver_swarm(
             .unwrap_or(false)
     };
     if is_coordinator {
-        return Some(swarm_id);
-    }
-
-    // Deep mode: any participant of the plan may drive its own task graph.
-    let is_deep_participant = {
-        let plans = swarm_plans.read().await;
-        plans
-            .get(&swarm_id)
-            .map(|plan| {
-                jcode_plan::bridge::parse_mode(&plan.mode) == jcode_plan::dag::Mode::Deep
-                    && plan.participants.contains(req_session_id)
-            })
-            .unwrap_or(false)
-    };
-    if is_deep_participant {
         return Some(swarm_id);
     }
 

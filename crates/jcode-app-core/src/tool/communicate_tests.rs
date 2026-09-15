@@ -966,6 +966,19 @@ fn resolve_optional_target_session_defaults_to_current() {
 }
 
 #[test]
+fn read_context_accepts_to_session_as_target_alias() {
+    let params: super::CommunicateInput = serde_json::from_value(json!({
+        "action": "read_context",
+        "to_session": "worker-1"
+    }))
+    .expect("communicate input");
+    assert_eq!(
+        super::required_target_session(&params, "read_context").unwrap(),
+        "worker-1"
+    );
+}
+
+#[test]
 fn schema_still_requires_action() {
     let schema = CommunicateTool::new().parameters_schema();
     assert_eq!(schema["required"], json!(["action"]));

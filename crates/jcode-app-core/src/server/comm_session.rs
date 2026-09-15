@@ -1457,24 +1457,18 @@ async fn ensure_spawn_coordinator_swarm(
         return None;
     };
 
-    // Light and ad hoc swarms are deliberately one-level fan-out: only the root
-    // session may create workers. Recursive spawning is an explicit deep-swarm
-    // capability, keyed from the root's effort rather than the requesting
-    // child's effort so a worker cannot opt itself into unbounded growth.
+    // Worker sessions never create additional workers. Keeping this capability
+    // root-only prevents a delegated worker from expanding the swarm regardless
+    // of the root's mode or the worker's reported effort.
     if !is_root {
-        let root_is_deep = crate::session_effort::session_effort(&root_session_id)
-            .as_deref()
-            .is_some_and(crate::prompt::is_deep_swarm_effort);
-        if !root_is_deep {
-            let _ = client_event_tx.send(ServerEvent::Error {
-                id,
-                message: format!(
-                    "Recursive swarm spawning is disabled for light and ad hoc swarms. Only the root session ({root_session_id}) may spawn agents unless that root is running in swarm-deep mode."
-                ),
-                retry_after_secs: None,
-            });
-            return None;
-        }
+        let _ = client_event_tx.send(ServerEvent::Error {
+            id,
+            message: format!(
+                "Only the root session ({root_session_id}) may spawn agents. Worker sessions cannot spawn additional workers."
+            ),
+            retry_after_secs: None,
+        });
+        return None;
     }
 
     // Keep an absolute hard ceiling even when the configurable limit is disabled.

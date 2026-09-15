@@ -1040,13 +1040,10 @@ async fn e2e_seed_does_not_displace_live_coordinator() {
     );
 }
 
-/// Regression for the deep-swarm drive gap: a deep-mode plan participant that is
-/// **not** the swarm coordinator must still be able to dispatch the graph it owns.
-/// Before this, `assign_task` was hard-gated to the coordinator, so a deep agent
-/// joining a shared swarm (where another session already coordinates) could seed a
-/// graph but never spawn/assign any of it, and nothing ran.
+/// Worker sessions cannot mutate task ownership, even when they participate in a
+/// deep-mode plan. Assignment remains a root/coordinator capability.
 #[tokio::test]
-async fn e2e_deep_participant_can_assign_without_being_coordinator() {
+async fn e2e_deep_participant_cannot_assign_without_being_coordinator() {
     let (_env, _runtime) = RuntimeEnvGuard::new();
     let mut fx = graph_fixture().await;
     // `coord` is the swarm coordinator; `worker` is a plain agent. Seed a deep
@@ -1060,8 +1057,7 @@ async fn e2e_deep_participant_can_assign_without_being_coordinator() {
         plan.participants.insert(fx.worker.clone());
     }
 
-    // The worker (a non-coordinator deep participant) assigns the ready node to a
-    // distinct swarm member (`coord` here stands in for any other worker).
+    // The worker attempts to assign the ready node to another swarm member.
     handle_comm_assign_task(
         2,
         fx.worker.clone(),
@@ -1089,10 +1085,13 @@ async fn e2e_deep_participant_can_assign_without_being_coordinator() {
         .iter()
         .find(|i| i.id == "explore")
         .unwrap();
-    assert_eq!(
-        explore.assigned_to.as_deref(),
-        Some(fx.coord.as_str()),
-        "a deep-mode plan participant should be able to assign even without the coordinator slot"
+    assert!(explore.assigned_to.is_none());
+    let events: Vec<_> = std::iter::from_fn(|| fx.client_rx.try_recv().ok()).collect();
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, ServerEvent::CommAssignTaskResponse { .. })),
+        "worker assignment must not emit a successful assignment response: {events:?}"
     );
 }
 

@@ -284,6 +284,15 @@ fn merge_goals(stored: &[TodoGoal], incoming: Option<Vec<TodoGoal>>) -> Vec<Todo
                 goal.stopping_evidence = prev.stopping_evidence.clone();
             }
         }
+        // `outcome_reached` is an acceptance claim, not a progress label. Do
+        // not persist it when the goal's delivery and feedback evidence still
+        // fail the completion bar. Keep the goal active at the explicit
+        // pre-terminal state so the next turn can supply the missing evidence.
+        if goal.iteration_maturity == Some(crate::todo::IterationMaturity::OutcomeReached)
+            && !crate::todo::delivery_state_passes(&goal)
+        {
+            goal.iteration_maturity = Some(crate::todo::IterationMaturity::PlateauUnproven);
+        }
         record_score_observation(
             &mut goal.closed_feedback_loop_history,
             goal.closed_feedback_loop,
@@ -2004,6 +2013,23 @@ mod tests {
             Some(value) => crate::env::set_var("JCODE_HOME", value),
             None => crate::env::remove_var("JCODE_HOME"),
         }
+    }
+
+    #[test]
+    fn unresolved_acceptance_downgrades_outcome_reached() {
+        let goal = TodoGoal {
+            group: Some("release".to_string()),
+            iteration_maturity: Some(crate::todo::IterationMaturity::OutcomeReached),
+            delivery_state: Some(crate::todo::DeliveryState::Integrated),
+            ..Default::default()
+        };
+
+        let merged = merge_goals(&[], Some(vec![goal]));
+
+        assert_eq!(
+            merged[0].iteration_maturity,
+            Some(crate::todo::IterationMaturity::PlateauUnproven)
+        );
     }
 
     #[test]
