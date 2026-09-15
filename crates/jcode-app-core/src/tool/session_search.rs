@@ -47,12 +47,12 @@ const MAX_DESERIALIZE: usize = 500;
 const SCAN_THREADS: usize = 8;
 
 const DEFAULT_LIMIT: usize = 10;
-const MAX_LIMIT: usize = 50;
+const MAX_LIMIT: usize = 100;
 const DEFAULT_MAX_PER_SESSION: usize = 1;
 const MAX_MAX_PER_SESSION: usize = 20;
 const DEFAULT_MAX_SCAN_SESSIONS: usize = 1000;
 const MAX_MAX_SCAN_SESSIONS: usize = 10_000;
-const MAX_CONTEXT_MESSAGES: usize = 5;
+const MAX_CONTEXT_MESSAGES: usize = 8;
 const INDEX_SCORE_CANDIDATE_MULTIPLIER: usize = 2;
 /// Legacy JSON index file superseded by the binary token-hash indexes.
 const LEGACY_INDEX_FILE_NAME: &str = "session_search_recent_index_v1.json";

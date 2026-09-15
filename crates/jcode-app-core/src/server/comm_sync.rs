@@ -219,21 +219,13 @@ pub(super) async fn handle_comm_summary(
     }
 
     let limit = limit.unwrap_or(10);
-    let agent_sessions = sessions.read().await;
-    if let Some(agent) = agent_sessions.get(&target_session) {
-        let tool_calls = if let Ok(agent) = agent.try_lock() {
-            agent.get_tool_call_summaries(limit)
-        } else {
-            let _ = client_event_tx.send(ServerEvent::Error {
-                id,
-                message: format!(
-                    "Session '{}' is busy; try summary again shortly",
-                    target_session
-                ),
-                retry_after_secs: Some(1),
-            });
-            return;
-        };
+    let agent = sessions.read().await.get(&target_session).cloned();
+    if let Some(agent) = agent {
+        // A terminal swarm status can be broadcast just before the worker's
+        // turn lock is released. Wait for that lock instead of exposing a
+        // spurious "busy" response to the coordinator's immediate summary.
+        let agent = agent.lock().await;
+        let tool_calls = agent.get_tool_call_summaries(limit);
         let _ = client_event_tx.send(ServerEvent::CommSummaryResponse {
             id,
             session_id: target_session,
@@ -358,21 +350,12 @@ pub(super) async fn handle_comm_read_context(
         return;
     }
 
-    let agent_sessions = sessions.read().await;
-    if let Some(agent) = agent_sessions.get(&target_session) {
-        let messages = if let Ok(agent) = agent.try_lock() {
-            agent.get_history()
-        } else {
-            let _ = client_event_tx.send(ServerEvent::Error {
-                id,
-                message: format!(
-                    "Session '{}' is busy; try read_context again shortly",
-                    target_session
-                ),
-                retry_after_secs: Some(1),
-            });
-            return;
-        };
+    let agent = sessions.read().await.get(&target_session).cloned();
+    if let Some(agent) = agent {
+        // See summary above. The terminal status event may win the race with
+        // lock release, but the history is stable once this lock is acquired.
+        let agent = agent.lock().await;
+        let messages = agent.get_history();
         let _ = client_event_tx.send(ServerEvent::CommContextHistory {
             id,
             session_id: target_session,

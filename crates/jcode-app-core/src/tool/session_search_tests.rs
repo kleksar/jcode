@@ -667,4 +667,18 @@ fn limit_validation_reports_friendly_errors() {
     let err = validate_bounded_usize(Some(-1), DEFAULT_LIMIT, 1, MAX_LIMIT, "limit")
         .expect_err("negative limit should be rejected");
     assert!(err.contains("received -1"));
+    assert_eq!(
+        validate_bounded_usize(Some(100), DEFAULT_LIMIT, 1, MAX_LIMIT, "limit").unwrap(),
+        100
+    );
+    let err = validate_bounded_usize(Some(101), DEFAULT_LIMIT, 1, MAX_LIMIT, "limit")
+        .expect_err("limit above the maximum should be rejected");
+    assert!(err.contains("between 1 and 100"));
+    assert_eq!(
+        validate_bounded_usize(Some(8), 0, 0, MAX_CONTEXT_MESSAGES, "context_before").unwrap(),
+        8
+    );
+    let err = validate_bounded_usize(Some(9), 0, 0, MAX_CONTEXT_MESSAGES, "context_before")
+        .expect_err("context_before above the maximum should be rejected");
+    assert!(err.contains("between 0 and 8"));
 }
