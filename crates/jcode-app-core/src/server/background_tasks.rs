@@ -705,7 +705,6 @@ mod tests {
                 todo_progress: None,
                 todo_items: Vec::new(),
                 runtime: crate::protocol::SwarmMemberRuntime {
-                    selected_model: None,
                     model: Some("old-model".to_string()),
                     effort: Some("low".to_string()),
                     ..Default::default()

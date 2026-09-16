@@ -506,7 +506,6 @@ async fn register_visible_spawned_member(
     session_id: &str,
     swarm_id: &str,
     working_dir: Option<&str>,
-    selected_model: Option<&str>,
     has_startup_message: bool,
     report_back_to_session_id: Option<&str>,
     swarm_members: &Arc<RwLock<HashMap<String, SwarmMember>>>,
@@ -550,10 +549,11 @@ async fn register_visible_spawned_member(
                 output_tail: None,
                 todo_progress: None,
                 todo_items: Vec::new(),
-                runtime: crate::protocol::SwarmMemberRuntime {
-                    selected_model: selected_model.map(str::to_string),
-                    ..Default::default()
-                },
+                // The headed client's attach path fills runtime metadata from
+                // its initialized provider. Do not show the requested spawn
+                // effort here: provider normalization or unsupported efforts
+                // can make it differ from the effective value.
+                runtime: crate::protocol::SwarmMemberRuntime::default(),
             },
         );
     }
@@ -773,7 +773,6 @@ pub(super) async fn spawn_swarm_agent(
             &new_session_id,
             swarm_id,
             resolved_working_dir.as_deref(),
-            spawn_model.as_deref(),
             startup_message.is_some(),
             Some(req_session_id),
             swarm_members,

@@ -491,7 +491,6 @@ async fn register_visible_spawned_member_marks_startup_as_running() {
         "child-1",
         "swarm-1",
         Some("/tmp/worktree"),
-        Some("gpt-5.6-sol"),
         true,
         Some("owner"),
         &swarm_members,
@@ -508,10 +507,7 @@ async fn register_visible_spawned_member_marks_startup_as_running() {
     assert_eq!(member.detail.as_deref(), Some("startup queued"));
     assert_eq!(member.runtime.effort, None);
     assert_eq!(member.swarm_id.as_deref(), Some("swarm-1"));
-    assert_eq!(
-        member.runtime.selected_model.as_deref(),
-        Some("gpt-5.6-sol")
-    );
+    assert_eq!(member.runtime.selected_model, None);
     assert_eq!(
         member.working_dir.as_deref(),
         Some(std::path::Path::new("/tmp/worktree"))
