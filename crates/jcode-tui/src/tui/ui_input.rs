@@ -2514,7 +2514,6 @@ fn compact_worker_model_label(selected: Option<&str>, actual: Option<&str>) -> O
     }
     selected.or(actual).map(str::to_string)
 }
-
 /// Truncate a list of spans to at most `max_width` display columns, appending a
 /// single-cell ellipsis when content is dropped. Preserves per-span styling.
 fn overscroll_truncate_spans(spans: Vec<Span<'static>>, max_width: usize) -> Vec<Span<'static>> {

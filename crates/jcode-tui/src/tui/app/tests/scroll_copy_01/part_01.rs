@@ -1240,11 +1240,7 @@ fn test_overscroll_is_off_by_default_and_reserves_no_status_rows() {
 #[test]
 fn test_overscroll_lists_every_active_managed_agent_in_one_row() {
     let _lock = scroll_render_test_lock();
-    // This regression exercises the optional elastic surface, while the user
-    // configuration may keep it Off. Opt in at the fixture instead of relying
-    // on the process-global default.
-    let (mut app, mut terminal) = create_scroll_test_app(110, 48, 0, 36);
-    app.overscroll_status_mode = crate::config::OverscrollStatusMode::Overscroll;
+    let (mut app, mut terminal) = create_scroll_test_app(110, 30, 0, 36);
     app.swarm_enabled = true;
     let coordinator = app.session.id.clone();
     let member = |index: usize, status: &str| crate::protocol::SwarmMemberStatus {
