@@ -1,0 +1,13 @@
+# Inactive roster-routing checkpoint for restoration only.
+# Preserve all unrelated live configuration and authentication data separately.
+# This file intentionally excludes credentials, accounts, paths, hotkeys, MCP,
+# environment, tokens, endpoints, and every other unrelated configuration value.
+# [agents.astra_first] is intentionally absent.
+
+[provider]
+default_model = "gpt-5.6-terra"
+openai_reasoning_effort = "high"
+
+[agents]
+swarm_model = "gpt-5.6-luna"
+swarm_effort = "low"
