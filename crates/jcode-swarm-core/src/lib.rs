@@ -6,6 +6,7 @@ use std::path::PathBuf;
 
 pub const MAX_SWARM_COMPLETION_REPORT_CHARS: usize = 4000;
 pub const SWARM_COMPLETION_REPORT_MARKER: &str = "SWARM COMPLETION REPORT REQUIRED";
+pub const SWARM_WORKER_IDENTITY_MARKER: &str = "SWARM DELEGATED WORKER IDENTITY REQUIRED";
 
 /// Message/report bodies longer than this require a sender-provided `tldr`
 /// so receiving UIs can render them collapsed to one line with an expand
@@ -353,24 +354,19 @@ impl ChannelIndex {
 }
 
 pub fn append_swarm_completion_report_instructions(message: &str) -> String {
-    if message.contains(SWARM_COMPLETION_REPORT_MARKER) {
-        return message.to_string();
-    }
-
     let mut out = message.trim_end().to_string();
-    if !out.is_empty() {
-        out.push_str("\n\n");
+    if !message.contains(SWARM_COMPLETION_REPORT_MARKER) {
+        if !out.is_empty() { out.push_str("\n\n"); }
+        out.push_str("<system-reminder>\n");
+        out.push_str(SWARM_COMPLETION_REPORT_MARKER);
+        out.push_str("\nBefore finishing, call the swarm tool with action=\"report\" to submit your completion report. Include a concise message, validation/tests performed, and blockers or follow-ups. After the report tool succeeds, also write a brief final assistant response. Do not finish with only tool output, a lifecycle status change, or no final response. Do not send a separate DM for the final report unless you need interactive coordination before finishing.\n</system-reminder>");
     }
-    out.push_str("<system-reminder>\n");
-    out.push_str(SWARM_COMPLETION_REPORT_MARKER);
-    out.push_str(
-        "\nBefore finishing, call the swarm tool with action=\"report\" to submit your completion report. \
-Include a concise message, validation/tests performed, and blockers or follow-ups. \
-After the report tool succeeds, also write a brief final assistant response. \
-Do not finish with only tool output, a lifecycle status change, or no final response. \
-Do not send a separate DM for the final report unless you need interactive coordination before finishing.\n",
-    );
-    out.push_str("</system-reminder>");
+    if !out.contains(SWARM_WORKER_IDENTITY_MARKER) {
+        if !out.is_empty() { out.push_str("\n\n"); }
+        out.push_str("<system-reminder>\n");
+        out.push_str(SWARM_WORKER_IDENTITY_MARKER);
+        out.push_str("\nYou are a delegated worker executing your assigned bounded task. Perform the assigned bounded local reads directly; the root-only local-read restriction does not apply to you. In normal/light mode, do not spawn children. In explicit deep mode, follow the deep-mode assignment contract and its permitted child-spawning exception.\n</system-reminder>");
+    }
     out
 }
 
@@ -690,10 +686,15 @@ mod tests {
         let prompt = "Do work";
         let with_instructions = append_swarm_completion_report_instructions(prompt);
         assert!(with_instructions.contains(SWARM_COMPLETION_REPORT_MARKER));
+        assert!(with_instructions.contains(SWARM_WORKER_IDENTITY_MARKER));
         assert_eq!(
             append_swarm_completion_report_instructions(&with_instructions),
             with_instructions
         );
+        let legacy = format!("{prompt}\n{SWARM_COMPLETION_REPORT_MARKER}");
+        let upgraded = append_swarm_completion_report_instructions(&legacy);
+        assert!(upgraded.contains(SWARM_WORKER_IDENTITY_MARKER));
+        assert_eq!(append_swarm_completion_report_instructions(&upgraded), upgraded);
     }
 
     #[test]

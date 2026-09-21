@@ -1,6 +1,7 @@
 #![allow(clippy::await_holding_lock)]
 
 use super::*;
+use crate::server::SessionAgentEntry;
 use crate::protocol::ServerEvent;
 use crate::provider::{EventStream, Provider};
 use crate::session::{Session, SessionStatus};
@@ -100,7 +101,13 @@ impl Fixture {
                 runtime: Default::default(),
             },
         )])));
-        let sessions = Arc::new(RwLock::new(HashMap::from([(id.clone(), agent.clone())])));
+        let sessions = Arc::new(RwLock::new(HashMap::from([(
+            id.clone(),
+            SessionAgentEntry::new(
+                agent.clone(),
+                crate::server::RuntimeFastState::invalid(id.clone()),
+            ),
+        )])));
         let connections = Arc::new(RwLock::new(HashMap::from([(
             "original".into(),
             connection("original", &id),

@@ -32,9 +32,21 @@ async fn handle_resume_session_allows_same_client_instance_takeover_without_loca
         Vec::new(),
     )));
 
-    let sessions = Arc::new(RwLock::new(HashMap::from([
-        (target_session_id.to_string(), Arc::clone(&existing_agent)),
-        (temp_session_id.to_string(), Arc::clone(&new_agent)),
+    let sessions = Arc::new(RwLock::new(HashMap::<String, crate::server::SessionAgentEntry>::from([
+        (
+            target_session_id.to_string(),
+            crate::server::SessionAgentEntry::new(
+                Arc::clone(&existing_agent),
+                crate::server::RuntimeFastState::invalid(target_session_id.to_string()),
+            ),
+        ),
+        (
+            temp_session_id.to_string(),
+            crate::server::SessionAgentEntry::new(
+                Arc::clone(&new_agent),
+                crate::server::RuntimeFastState::invalid(temp_session_id.to_string()),
+            ),
+        ),
     ])));
     let shutdown_signals = Arc::new(RwLock::new(HashMap::<String, InterruptSignal>::new()));
     let soft_interrupt_queues: SessionInterruptQueues = Arc::new(RwLock::new(HashMap::new()));

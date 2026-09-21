@@ -669,7 +669,10 @@ mod debug_execution_tests {
         };
         let sessions = Arc::new(RwLock::new(HashMap::from([(
             session_id.clone(),
-            agent.clone(),
+            crate::server::SessionAgentEntry::new(
+                agent.clone(),
+                crate::server::RuntimeFastState::invalid(session_id.clone()),
+            ),
         )])));
         let current = Arc::new(RwLock::new(String::new()));
 
@@ -691,7 +694,10 @@ mod debug_execution_tests {
         };
         let sessions = Arc::new(RwLock::new(HashMap::from([(
             session_id.clone(),
-            agent.clone(),
+            crate::server::SessionAgentEntry::new(
+                agent.clone(),
+                crate::server::RuntimeFastState::invalid(session_id.clone()),
+            ),
         )])));
         let current = Arc::new(RwLock::new(session_id.clone()));
 
@@ -712,7 +718,10 @@ mod debug_execution_tests {
         };
         let sessions = Arc::new(RwLock::new(HashMap::from([(
             session_id.clone(),
-            agent.clone(),
+            crate::server::SessionAgentEntry::new(
+                agent.clone(),
+                crate::server::RuntimeFastState::invalid(session_id.clone()),
+            ),
         )])));
         let current = Arc::new(RwLock::new(String::new()));
 
@@ -737,8 +746,20 @@ mod debug_execution_tests {
         };
 
         let sessions = Arc::new(RwLock::new(HashMap::from([
-            (id_a.clone(), agent_a),
-            (id_b.clone(), agent_b),
+            (
+                id_a.clone(),
+                crate::server::SessionAgentEntry::new(
+                    agent_a,
+                    crate::server::RuntimeFastState::invalid(id_a.clone()),
+                ),
+            ),
+            (
+                id_b.clone(),
+                crate::server::SessionAgentEntry::new(
+                    agent_b,
+                    crate::server::RuntimeFastState::invalid(id_b.clone()),
+                ),
+            ),
         ])));
         let current = Arc::new(RwLock::new(String::new()));
 

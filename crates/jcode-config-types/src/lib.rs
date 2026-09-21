@@ -539,6 +539,27 @@ pub struct AuthConfig {
     pub trusted_external_source_paths: Vec<String>,
 }
 
+/// Explicit model and effort for the optional Astra-first admission analyst.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct AstraFirstConfig {
+    /// Explicit analyst model or model/route selector. Empty values are rejected
+    /// at admission rather than falling back to the swarm model.
+    pub model: String,
+    /// Explicit analyst reasoning effort. Empty values are rejected at admission
+    /// rather than inheriting the coordinator's effort.
+    pub effort: String,
+}
+
+impl Default for AstraFirstConfig {
+    fn default() -> Self {
+        Self {
+            model: String::new(),
+            effort: String::new(),
+        }
+    }
+}
+
 /// Agent-specific model defaults.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -561,6 +582,10 @@ pub struct AgentsConfig {
     /// call does not pass an explicit `effort`. Leave unset to let workers
     /// inherit the provider-wide reasoning effort.
     pub swarm_effort: Option<String>,
+    /// Optional Astra-first admission wrapper. This remains disabled unless
+    /// explicitly configured, and its model/effort are never inherited from
+    /// the swarm defaults.
+    pub astra_first: Option<AstraFirstConfig>,
     /// Default terminal mode for swarm-created agents.
     pub swarm_spawn_mode: SwarmSpawnMode,
     /// Maximum percentage (1-90) of the chat column height the inline swarm
@@ -664,6 +689,7 @@ impl Default for AgentsConfig {
             enforce_delegated_swarm_root_read_boundary: false,
             swarm_model: None,
             swarm_effort: None,
+            astra_first: None,
             swarm_spawn_mode: SwarmSpawnMode::default(),
             swarm_gallery_max_pct: None,
             swarm_strip_layout: SwarmStripLayout::default(),
@@ -1611,5 +1637,20 @@ mod reasoning_display_defaults_tests {
         display.set_reasoning_display(ReasoningDisplayMode::Off);
         assert!(display.has_explicit_reasoning_display());
         assert!(!display.show_thinking);
+    }
+
+    #[test]
+    fn astra_first_defaults_off_and_keeps_explicit_settings_separate() {
+        let defaults = AgentsConfig::default();
+        assert!(defaults.astra_first.is_none());
+
+        let configured = AstraFirstConfig {
+            model: "gpt-6-astra[web]".to_string(),
+            effort: "high".to_string(),
+        };
+        assert_eq!(configured.model, "gpt-6-astra[web]");
+        assert_eq!(configured.effort, "high");
+        assert_eq!(defaults.swarm_model, None);
+        assert_eq!(defaults.swarm_effort, None);
     }
 }

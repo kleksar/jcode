@@ -26,7 +26,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::{Mutex, RwLock, broadcast, mpsc};
 
-type SessionAgents = Arc<RwLock<HashMap<String, Arc<Mutex<Agent>>>>>;
+type SessionAgents = super::SessionAgents;
 type ChannelSubscriptions = Arc<RwLock<HashMap<String, HashMap<String, HashSet<String>>>>>;
 const RELOAD_RESTORE_MARKER_MAX_AGE: Duration = Duration::from_secs(60);
 
@@ -195,11 +195,23 @@ pub(super) async fn handle_clear_session(
     let mut agent_guard = agent.lock().await;
     *agent_guard = new_agent;
     drop(agent_guard);
+    let fast_state = {
+        let agent_guard = agent.lock().await;
+        super::RuntimeFastState::from_provider(new_id.clone(), agent_guard.provider_handle().as_ref())
+    };
 
     {
         let mut sessions_guard = sessions.write().await;
+        if let Some(old_entry) = sessions_guard.get(client_session_id)
+            && old_entry.fast_state.owner_root_session_id() == client_session_id
+        {
+            old_entry.fast_state.invalidate();
+        }
         sessions_guard.remove(client_session_id);
-        sessions_guard.insert(new_id.clone(), Arc::clone(agent));
+        sessions_guard.insert(
+            new_id.clone(),
+            super::SessionAgentEntry::new(Arc::clone(agent), fast_state),
+        );
     }
     crate::runtime_memory_log::emit_event(
         crate::runtime_memory_log::RuntimeMemoryLogEvent::new(
@@ -1208,6 +1220,11 @@ async fn remove_detached_source_if_unclaimed(
         .map(|existing| Arc::ptr_eq(existing, source_agent))
         .unwrap_or(false);
     if owns_source {
+        if let Some(old_entry) = sessions_guard.get(old_session_id)
+            && old_entry.fast_state.owner_root_session_id() == old_session_id
+        {
+            old_entry.fast_state.invalidate();
+        }
         sessions_guard.remove(old_session_id);
     }
     owns_source
@@ -1230,8 +1247,8 @@ async fn claim_live_target_agent(
     let sessions_guard = sessions.read().await;
     let target = sessions_guard
         .get(session_id)
-        .filter(|existing| !Arc::ptr_eq(existing, source_agent))
-        .cloned()?;
+        .filter(|existing| !Arc::ptr_eq(&existing.agent, source_agent))
+        .map(|entry| entry.agent())?;
 
     let info = connections.get_mut(client_connection_id)?;
     info.session_id = session_id.to_string();
@@ -1462,7 +1479,7 @@ pub(super) async fn handle_resume_session(
             &session_id,
             false,
             live_target_agent,
-            provider,
+            &provider,
             sessions,
             client_connections,
             client_count,
@@ -1666,10 +1683,61 @@ pub(super) async fn handle_resume_session(
             let old_session_id = client_session_id.clone();
             *client_session_id = session_id.clone();
 
+            let (session_snapshot, provider) = {
+                let agent_guard = agent.lock().await;
+                (
+                    agent_guard.session_for_split().clone(),
+                    agent_guard.provider_handle(),
+                )
+            };
+            let inherited_fast_state = if session_snapshot.origin()
+                == crate::session::SessionOrigin::SwarmWorker
+            {
+                let sessions_guard = sessions.read().await;
+                session_snapshot.parent_id.as_deref().and_then(|parent_id| {
+                    sessions_guard
+                        .get(parent_id)
+                        .map(|entry| entry.fast_state())
+                })
+            } else {
+                None
+            };
+            let fast_state = if session_snapshot.origin() == crate::session::SessionOrigin::SwarmWorker
+            {
+                if let Err(error) = super::apply_runtime_fast_policy(
+                    provider.as_ref(),
+                    &session_snapshot,
+                    inherited_fast_state.as_deref(),
+                ) {
+                    crate::logging::warn(&format!(
+                        "Worker {} fast policy unavailable during resume: {}",
+                        session_id, error
+                    ));
+                    super::RuntimeFastState::invalid(session_id.clone())
+                } else {
+                    inherited_fast_state
+                        .unwrap_or_else(|| super::RuntimeFastState::invalid(session_id.clone()))
+                }
+            } else {
+                let _ = super::apply_runtime_fast_policy(
+                    provider.as_ref(),
+                    &session_snapshot,
+                    None,
+                );
+                super::RuntimeFastState::from_provider(session_id.clone(), provider.as_ref())
+            };
             {
                 let mut sessions_guard = sessions.write().await;
+                if let Some(old_entry) = sessions_guard.get(&old_session_id)
+                    && old_entry.fast_state.owner_root_session_id() == old_session_id
+                {
+                    old_entry.fast_state.invalidate();
+                }
                 sessions_guard.remove(&old_session_id);
-                sessions_guard.insert(session_id.clone(), Arc::clone(agent));
+                sessions_guard.insert(
+                    session_id.clone(),
+                    super::SessionAgentEntry::new(Arc::clone(agent), fast_state),
+                );
             }
             crate::runtime_memory_log::emit_event(
                 crate::runtime_memory_log::RuntimeMemoryLogEvent::new(
@@ -1748,7 +1816,7 @@ pub(super) async fn handle_resume_session(
                 &session_id,
                 false,
                 agent,
-                provider,
+                &provider,
                 sessions,
                 client_connections,
                 client_count,
@@ -1777,7 +1845,7 @@ pub(super) async fn handle_resume_session(
                     mcp_working_dir,
                 )
                 .await;
-            spawn_model_prefetch_update(Arc::clone(provider), Arc::clone(agent));
+            spawn_model_prefetch_update(Arc::clone(&provider), Arc::clone(agent));
             crate::logging::event_info(
                 "SESSION_LIFECYCLE",
                 vec![

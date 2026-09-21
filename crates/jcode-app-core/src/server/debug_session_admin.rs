@@ -10,7 +10,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use tokio::sync::{Mutex, RwLock, broadcast};
 
-type SessionAgents = Arc<RwLock<HashMap<String, Arc<Mutex<Agent>>>>>;
+type SessionAgents = super::SessionAgents;
 
 fn parse_create_session_command(cmd: &str) -> Option<(Option<String>, bool)> {
     if cmd == "create_session" {
@@ -91,6 +91,7 @@ pub(super) async fn maybe_handle_session_admin_command(
             None,
             super::headless::HeadlessMemoryScope::IsolatedTest,
             crate::session::SessionOrigin::Unknown,
+            None,
         )
         .await?;
         if let Ok(value) = serde_json::from_str::<serde_json::Value>(&created)

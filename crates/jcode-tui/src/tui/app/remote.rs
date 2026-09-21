@@ -1204,7 +1204,7 @@ pub(super) async fn handle_remote_event<B: Backend>(
             Ok((RemoteEventOutcome::Continue, needs_redraw))
         }
         RemoteRead::Event(server_event) => {
-            let needs_redraw = handle_server_event(app, server_event, remote);
+            let mut needs_redraw = handle_server_event(app, server_event, remote);
             process_remote_followups(app, remote).await;
             Ok((RemoteEventOutcome::Continue, needs_redraw))
         }

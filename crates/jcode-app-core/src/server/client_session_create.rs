@@ -22,7 +22,7 @@ use super::{
     SessionInterruptQueues, register_background_tool_signal, register_session_interrupt_queue,
 };
 
-type SessionAgents = Arc<RwLock<HashMap<String, Arc<Mutex<Agent>>>>>;
+type SessionAgents = super::SessionAgents;
 
 pub(super) const MAX_RECENT_WORKING_DIRS: usize = 5;
 const RECENT_METADATA_SCAN_LIMIT: usize = MAX_RECENT_WORKING_DIRS * 4;
@@ -451,6 +451,7 @@ pub(super) async fn handle_create_session(
     let soft_interrupt_queue = agent.soft_interrupt_queue();
     let background_tool_signal = agent.background_tool_signal();
     agent.prewarm_provider_idle().await;
+    let fast_state = super::RuntimeFastState::from_provider(session_id.clone(), agent.provider_handle().as_ref());
     let agent = Arc::new(Mutex::new(agent));
     {
         let mut signals = shutdown_signals.write().await;
@@ -461,7 +462,10 @@ pub(super) async fn handle_create_session(
     register_background_tool_signal(&session_id, background_tool_signal);
     {
         let mut live = sessions.write().await;
-        live.insert(session_id.clone(), agent);
+        live.insert(
+            session_id.clone(),
+            super::SessionAgentEntry::new(agent, fast_state),
+        );
     }
 
     let _ = client_event_tx.send(ServerEvent::SessionCreated {

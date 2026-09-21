@@ -19,7 +19,7 @@ use std::time::Instant;
 use tokio::process::Command;
 use tokio::sync::{Mutex, RwLock, broadcast, mpsc};
 
-type SessionAgents = Arc<RwLock<HashMap<String, Arc<Mutex<Agent>>>>>;
+type SessionAgents = super::SessionAgents;
 type ChannelSubscriptions = Arc<RwLock<HashMap<String, HashMap<String, HashSet<String>>>>>;
 
 const INPUT_SHELL_MAX_OUTPUT_LEN: usize = 30_000;
@@ -322,6 +322,7 @@ pub(super) fn handle_run_subagent(
             stdin_request_tx: None,
             graceful_shutdown_signal: None,
             execution_mode: crate::tool::ToolExecutionMode::Direct,
+            inline_swarm_await: None,
         };
 
         let started = Instant::now();
@@ -972,7 +973,7 @@ pub(super) async fn handle_resume_all_sessions(
     for session_id in live_session_ids {
         let agent = {
             let guard = sessions.read().await;
-            guard.get(&session_id).cloned()
+            guard.get(&session_id).map(|entry| entry.agent())
         };
         let Some(agent) = agent else {
             continue;
@@ -1014,6 +1015,7 @@ pub(super) async fn handle_resume_all_sessions(
 
         super::live_turn::spawn_tracked_live_turn(
             &session_id,
+            sessions,
             agent_guard,
             String::new(),
             Some(reminder),

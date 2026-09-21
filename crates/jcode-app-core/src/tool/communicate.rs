@@ -20,6 +20,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
+use std::sync::atomic::Ordering;
 
 const REQUEST_ID: u64 = 1;
 
@@ -1757,6 +1758,106 @@ async fn fetch_awaited_member_reports(
     reports
 }
 
+async fn fetch_awaited_member_reports_scoped(
+    ctx: &ToolContext,
+    members: &[AwaitedMemberStatus],
+) -> Result<HashMap<String, String>> {
+    let mut reports = HashMap::new();
+    for member in members.iter().filter(|member| member.done) {
+        let request = Request::CommReadContext {
+            id: REQUEST_ID,
+            session_id: ctx.session_id.clone(),
+            target_session: member.session_id.clone(),
+        };
+        let response = send_request(request).await.map_err(|error| {
+            anyhow::anyhow!(
+                "Scoped inline swarm await could not fetch report for {}: {}",
+                member.session_id,
+                error
+            )
+        })?;
+        match response {
+            ServerEvent::CommContextHistory { messages, .. } => {
+                if let Some(report) = latest_assistant_report(&messages) {
+                    reports.insert(member.session_id.clone(), report);
+                }
+            }
+            ServerEvent::Error { message, .. } => {
+                anyhow::bail!(
+                    "Scoped inline swarm await could not fetch report for {}: {}",
+                    member.session_id,
+                    message
+                );
+            }
+            response => {
+                anyhow::bail!(
+                    "Scoped inline swarm await received an unexpected report response for {}: {:?}",
+                    member.session_id,
+                    response
+                );
+            }
+        }
+    }
+    Ok(reports)
+}
+
+async fn run_scoped_await_members(
+    ctx: &ToolContext,
+    request: Request,
+    socket_timeout: std::time::Duration,
+) -> Result<ToolOutput> {
+    let await_and_fetch = async {
+        let response = send_request_with_timeout(request, Some(socket_timeout))
+            .await
+            .map_err(|error| anyhow::anyhow!("Scoped inline swarm await failed: {}", error))?;
+        let (completed, members, summary) = match response {
+            ServerEvent::CommAwaitMembersResponse {
+                completed,
+                members,
+                summary,
+                background_started,
+                ..
+            } if !background_started => (completed, members, summary),
+            ServerEvent::CommAwaitMembersResponse {
+                background_started: true,
+                ..
+            } => {
+                anyhow::bail!(
+                    "Scoped inline swarm await was unexpectedly handed off to background"
+                );
+            }
+            ServerEvent::Error { message, .. } => {
+                anyhow::bail!("Scoped inline swarm await server error: {}", message);
+            }
+            response => {
+                anyhow::bail!(
+                    "Scoped inline swarm await received an unexpected response: {:?}",
+                    response
+                );
+            }
+        };
+        if !completed {
+            anyhow::bail!("Scoped inline swarm await timed out: {}", summary);
+        }
+        let reports = fetch_awaited_member_reports_scoped(ctx, &members).await?;
+        Ok(format_awaited_members_with_reports(
+            completed, &summary, &members, &reports,
+        ))
+    };
+    tokio::pin!(await_and_fetch);
+
+    if let Some(shutdown_signal) = ctx.graceful_shutdown_signal.clone() {
+        tokio::select! {
+            result = &mut await_and_fetch => result,
+            _ = shutdown_signal.notified() => Err(anyhow::anyhow!(
+                "Scoped inline swarm await cancelled by graceful shutdown; unresolved await retained"
+            )),
+        }
+    } else {
+        await_and_fetch.await
+    }
+}
+
 fn default_await_target_statuses() -> Vec<String> {
     default_comm_await_target_statuses()
 }
@@ -3347,14 +3448,23 @@ impl Tool for CommunicateTool {
                 }
                 let timeout_minutes = params.timeout_minutes.unwrap_or(60);
                 let timeout_secs = timeout_minutes * 60;
+                let scoped_inline_await = ctx.inline_swarm_await.clone();
                 // Public member waits are always asynchronous. The blocking
                 // CommAwaitMembers protocol remains available internally for the
-                // run_plan coordination loop, but agents must not park an entire
-                // turn waiting on a worker or a long-lived socket.
+                // run_plan coordination loop and this narrowly scoped Astra-first
+                // root flow, but ordinary agents must not park an entire turn.
                 let blocking_was_requested = params.background == Some(false);
-                let background = true;
-                let notify = params.notify.unwrap_or(true);
-                let wake = params.wake.unwrap_or(true);
+                let background = scoped_inline_await.is_none();
+                let notify = if background {
+                    params.notify.unwrap_or(true)
+                } else {
+                    false
+                };
+                let wake = if background {
+                    params.wake.unwrap_or(true)
+                } else {
+                    false
+                };
 
                 let request = Request::CommAwaitMembers {
                     id: REQUEST_ID,
@@ -3375,6 +3485,19 @@ impl Tool for CommunicateTool {
                 } else {
                     std::time::Duration::from_secs(timeout_secs + 30)
                 };
+
+                if let Some(counter) = scoped_inline_await.as_ref() {
+                    counter.fetch_add(1, Ordering::AcqRel);
+                    let result = run_scoped_await_members(&ctx, request, socket_timeout).await;
+                    return match result {
+                        Ok(output) => {
+                            let previous = counter.fetch_sub(1, Ordering::AcqRel);
+                            debug_assert!(previous > 0);
+                            Ok(output)
+                        }
+                        Err(error) => Err(error),
+                    };
+                }
 
                 match send_request_with_timeout(request, Some(socket_timeout)).await {
                     Ok(ServerEvent::CommAwaitMembersResponse {

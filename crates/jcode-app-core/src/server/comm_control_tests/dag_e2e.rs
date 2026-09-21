@@ -51,8 +51,8 @@ async fn graph_fixture_named(swarm_id: &str, coord: &str, worker: &str) -> Graph
     let worker = worker.to_string();
     let (client_tx, client_rx) = mpsc::unbounded_channel();
     let sessions = Arc::new(RwLock::new(HashMap::from([
-        (coord.clone(), test_agent().await),
-        (worker.clone(), test_agent().await),
+        session_entry(coord.clone(), test_agent().await),
+        session_entry(worker.clone(), test_agent().await),
     ])));
     let swarm_members = Arc::new(RwLock::new(HashMap::from([
         (coord.clone(), {
@@ -790,8 +790,20 @@ async fn e2e_composite_rewake_prefers_planner_via_assign_next() {
             .unwrap()
             .extend([planner.clone(), other.clone()]);
         let mut sessions = fx.sessions.write().await;
-        sessions.insert(planner.clone(), test_agent().await);
-        sessions.insert(other.clone(), test_agent().await);
+        sessions.insert(
+            planner.clone(),
+            crate::server::SessionAgentEntry::new(
+                test_agent().await,
+                crate::server::RuntimeFastState::invalid(planner.clone()),
+            ),
+        );
+        sessions.insert(
+            other.clone(),
+            crate::server::SessionAgentEntry::new(
+                test_agent().await,
+                crate::server::RuntimeFastState::invalid(other.clone()),
+            ),
+        );
     }
 
     fx.seed("light", vec![node_spec("root", "explore", &[])])
@@ -881,8 +893,8 @@ async fn e2e_solo_seeder_is_elected_coordinator_and_can_assign() {
     let worker = "worker".to_string();
     let (client_tx, _client_rx) = mpsc::unbounded_channel();
     let sessions: crate::server::SessionAgents = Arc::new(RwLock::new(HashMap::from([
-        (seeder.clone(), test_agent().await),
-        (worker.clone(), test_agent().await),
+        session_entry(seeder.clone(), test_agent().await),
+        session_entry(worker.clone(), test_agent().await),
     ])));
     let swarm_members = Arc::new(RwLock::new(HashMap::from([
         (seeder.clone(), member(&seeder, &swarm_id, "ready")),

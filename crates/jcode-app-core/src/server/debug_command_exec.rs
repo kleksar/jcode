@@ -12,7 +12,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{Mutex, RwLock};
 
-type SessionAgents = Arc<RwLock<HashMap<String, Arc<Mutex<Agent>>>>>;
+type SessionAgents = super::SessionAgents;
 
 #[derive(Clone)]
 pub(super) struct DebugInterruptContext {
@@ -60,7 +60,7 @@ pub(super) async fn resolve_debug_session(
     if let Some(id) = target {
         let agent = sessions_guard
             .get(&id)
-            .cloned()
+            .map(|entry| entry.agent())
             .ok_or_else(|| anyhow::anyhow!("Unknown session_id '{}'", id))?;
         return Ok((id, agent));
     }
@@ -68,7 +68,7 @@ pub(super) async fn resolve_debug_session(
     if sessions_guard.len() == 1
         && let Some((id, agent)) = sessions_guard.iter().next()
     {
-        return Ok((id.clone(), Arc::clone(agent)));
+        return Ok((id.clone(), agent.agent()));
     }
 
     Err(anyhow::anyhow!(

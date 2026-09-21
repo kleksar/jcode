@@ -1,4 +1,5 @@
 use super::*;
+use std::sync::atomic::Ordering;
 
 /// Largest byte index `<= index` that is a UTF-8 char boundary in `text`.
 /// Equivalent to the unstable `str::floor_char_boundary`, reimplemented so the
@@ -849,6 +850,7 @@ impl Agent {
                             stdin_request_tx: self.stdin_request_tx.clone(),
                             graceful_shutdown_signal: Some(self.graceful_shutdown.clone()),
                             execution_mode: ToolExecutionMode::AgentTurn,
+                            inline_swarm_await: crate::agent::astra_inline_swarm_await(),
                         };
                         crate::telemetry::record_tool_call();
                         let tool_result = self
@@ -1372,6 +1374,7 @@ impl Agent {
                     stdin_request_tx: self.stdin_request_tx.clone(),
                     graceful_shutdown_signal: Some(self.graceful_shutdown.clone()),
                     execution_mode: ToolExecutionMode::AgentTurn,
+                    inline_swarm_await: crate::agent::astra_inline_swarm_await(),
                 };
 
                 if trace {
@@ -1393,6 +1396,10 @@ impl Agent {
                 let registry_clone = self.registry.clone();
                 let tool_name_for_spawn = tc.name.clone();
                 let tool_input_for_spawn = tc.input.clone();
+                let scoped_inline_await_tool = ctx.inline_swarm_await.is_some()
+                    && crate::tool::Registry::resolve_tool_name(&tc.name) == "swarm"
+                    && tc.input.get("action").and_then(serde_json::Value::as_str)
+                        == Some("await_members");
                 let tool_handle = tokio::spawn(async move {
                     registry_clone
                         .execute(&tool_name_for_spawn, tool_input_for_spawn, ctx)
@@ -1521,6 +1528,11 @@ impl Agent {
                         tc.name,
                         tool_elapsed.as_secs_f64()
                     ));
+                    if scoped_inline_await_tool {
+                        if let Some(aborted) = crate::agent::astra_inline_swarm_await_aborted() {
+                            aborted.store(true, Ordering::Release);
+                        }
+                    }
                     tool_handle.abort();
 
                     // For selfdev reload and wait-like tools, the interruption is expected:
@@ -1564,6 +1576,34 @@ impl Agent {
                     }
                     self.session.save()?;
                     return Ok(());
+                } else if scoped_inline_await_tool {
+                    // A scoped await owns root finalization evidence and must
+                    // never be adopted by Alt+B. Abort it and fail closed so
+                    // Astra-first cannot publish a partial or detached result,
+                    // even if the tool has not reached communicate yet.
+                    if let Some(aborted) = crate::agent::astra_inline_swarm_await_aborted() {
+                        aborted.store(true, Ordering::Release);
+                    }
+                    tool_handle.abort();
+                    let error_msg =
+                        "Scoped inline swarm await cannot be moved to background; orchestration is unresolved";
+                    let _ = event_tx.send(ServerEvent::ToolDone {
+                        id: tc.id.clone(),
+                        name: tc.name.clone(),
+                        output: error_msg.to_string(),
+                        error: Some(error_msg.to_string()),
+                    });
+                    self.add_message_with_duration(
+                        Role::User,
+                        vec![ContentBlock::ToolResult {
+                            tool_use_id: tc.id.clone(),
+                            content: error_msg.to_string(),
+                            is_error: Some(true),
+                        }],
+                        Some(tool_elapsed.as_millis() as u64),
+                    );
+                    self.session.save()?;
+                    return Err(anyhow::anyhow!(error_msg));
                 } else {
                     // User pressed Alt+B — move tool to background
                     logging::info(&format!(

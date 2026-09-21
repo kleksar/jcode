@@ -1,3 +1,4 @@
+use super::astra_first;
 use super::available_models_dedup::available_models_dedup_key;
 use super::client_actions::{
     AgentTaskContext, NotifySessionContext, handle_agent_task, handle_compact, handle_input_shell,
@@ -39,7 +40,7 @@ use super::comm_control::{
 use super::comm_plan::{
     handle_comm_approve_plan, handle_comm_propose_plan, handle_comm_reject_plan,
 };
-use super::comm_session::{handle_comm_spawn, handle_comm_stop};
+use super::comm_session::{AstraFirstSpawnContext, handle_comm_spawn, handle_comm_stop};
 use super::comm_sync::{
     CommResyncPlanContext, handle_comm_plan_status, handle_comm_read_context,
     handle_comm_resync_plan, handle_comm_status, handle_comm_summary,
@@ -78,10 +79,22 @@ use std::time::{Duration, Instant};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::sync::{Mutex, RwLock, broadcast, mpsc};
 
-type SessionAgents = Arc<RwLock<HashMap<String, Arc<Mutex<Agent>>>>>;
+type SessionAgents = super::SessionAgents;
 type ChannelSubscriptions = Arc<RwLock<HashMap<String, HashMap<String, HashSet<String>>>>>;
 const RELOAD_STARTING_GUARD_MAX_AGE: Duration = Duration::from_secs(30);
 const REQUEST_HANDLER_STALL_THRESHOLDS_MS: [u64; 3] = [2_000, 10_000, 60_000];
+
+async fn owning_main_fast_state(
+    sessions: &SessionAgents,
+    session_id: &str,
+) -> Option<Arc<super::RuntimeFastState>> {
+    let state = sessions
+        .read()
+        .await
+        .get(session_id)
+        .map(|entry| entry.fast_state())?;
+    (state.owner_root_session_id() == session_id).then_some(state)
+}
 
 fn required_subscribe_working_dir(working_dir: Option<&str>) -> std::result::Result<&str, String> {
     let working_dir = working_dir
@@ -127,7 +140,7 @@ async fn resolve_target_subscribe_working_dir(
     if working_dir.is_some() {
         return Ok(());
     }
-    let live = sessions.read().await.get(target).cloned();
+    let live = sessions.read().await.get(target).map(|entry| entry.agent());
     let resolved = if let Some(live) = live {
         let idle_cwd = live
             .try_lock()
@@ -625,6 +638,22 @@ pub(super) async fn handle_client(
         client_start.elapsed().as_millis()
     ));
     let mut client_session_id = new_agent.session_id().to_string();
+    let mut astra_first_state = new_agent.astra_first_state_handle();
+    let astra_first_context = AstraFirstSpawnContext {
+        sessions: Arc::clone(&sessions),
+        global_session_id: Arc::clone(&global_session_id),
+        provider_template: Arc::clone(&provider_template),
+        swarm_members: Arc::clone(&swarm_members),
+        swarms_by_id: Arc::clone(&swarms_by_id),
+        swarm_coordinators: Arc::clone(&swarm_coordinators),
+        swarm_plans: Arc::clone(&swarm_plans),
+        event_history: Arc::clone(&event_history),
+        event_counter: Arc::clone(&event_counter),
+        swarm_event_tx: swarm_event_tx.clone(),
+        mcp_pool: Arc::clone(&mcp_pool),
+        soft_interrupt_queues: soft_interrupt_queues.clone(),
+        client_connections: Arc::clone(&client_connections),
+    };
     let friendly_name = new_agent.session_short_name().map(|s| s.to_string());
     let client_connection_id = id::new_id("conn");
     let connected_at = Instant::now();
@@ -681,10 +710,17 @@ pub(super) async fn handle_client(
     )
     .await;
 
+    let fast_state = super::RuntimeFastState::from_provider(
+        client_session_id.clone(),
+        new_agent.provider_handle().as_ref(),
+    );
     let mut agent = Arc::new(Mutex::new(new_agent));
     {
         let mut sessions_guard = sessions.write().await;
-        sessions_guard.insert(client_session_id.clone(), Arc::clone(&agent));
+        sessions_guard.insert(
+            client_session_id.clone(),
+            super::SessionAgentEntry::new(Arc::clone(&agent), fast_state),
+        );
     }
     crate::runtime_memory_log::emit_event(
         crate::runtime_memory_log::RuntimeMemoryLogEvent::new(
@@ -1056,6 +1092,11 @@ pub(super) async fn handle_client(
                 request_decoded_at.elapsed().as_millis()
             ));
             let cancel_dispatch_start = Instant::now();
+            let astra_cancelled = astra_first::request_cancel(&astra_first_state).await;
+            crate::logging::info(&format!(
+                "SERVER_INTERRUPT_CANCEL_ASTRA_DISPATCH id={} session={} astra_cancelled={}",
+                id, client_session_id, astra_cancelled
+            ));
             cancel_processing_message(
                 &mut ProcessingState {
                     client_is_processing: &mut client_is_processing,
@@ -1187,6 +1228,17 @@ pub(super) async fn handle_client(
             });
             continue;
         }
+        if astra_first::is_enabled(&astra_first_state).await
+            && matches!(&request, Request::Message { no_reply: true, .. })
+        {
+            let id = request.id();
+            let _ = client_event_tx.send(ServerEvent::Error {
+                id,
+                message: "Astra-first does not support no_reply messages; resend the same content as a normal Message without no_reply.".to_string(),
+                retry_after_secs: None,
+            });
+            continue;
+        }
         match request {
             Request::Message {
                 id,
@@ -1216,11 +1268,6 @@ pub(super) async fn handle_client(
                     if continue_on_disconnect && let Ok(mut agent) = agent.try_lock() {
                         agent.set_stdin_request_tx(stdin_req_tx.clone());
                     }
-                    let mut connections = client_connections.write().await;
-                    if let Some(info) = connections.get_mut(&client_connection_id) {
-                        info.is_processing = true;
-                        info.current_tool_name = None;
-                    }
                 }
                 start_processing_message(
                     ProcessingMessage {
@@ -1239,6 +1286,7 @@ pub(super) async fn handle_client(
                         task: &mut processing_task,
                     },
                     &agent,
+                    Some(&sessions),
                     &client_event_tx,
                     &processing_done_tx,
                     active_terminal_env.clone(),
@@ -1250,6 +1298,9 @@ pub(super) async fn handle_client(
                         event_counter: &event_counter,
                         event_tx: &swarm_event_tx,
                     },
+                    Some(&astra_first_state),
+                    Some(&astra_first_context),
+                    Some(stdin_req_tx.clone()),
                 )
                 .await;
             }
@@ -1335,6 +1386,7 @@ pub(super) async fn handle_client(
                             task: &mut processing_task,
                         },
                         &agent,
+                        Some(&sessions),
                         &client_event_tx,
                         &processing_done_tx,
                         active_terminal_env.clone(),
@@ -1345,8 +1397,11 @@ pub(super) async fn handle_client(
                             event_history: &event_history,
                             event_counter: &event_counter,
                             event_tx: &swarm_event_tx,
-                        },
-                    )
+                    },
+                    Some(&astra_first_state),
+                    Some(&astra_first_context),
+                    Some(stdin_req_tx.clone()),
+                )
                     .await;
                     if !client_is_processing {
                         let mut connections = client_connections.write().await;
@@ -1355,15 +1410,23 @@ pub(super) async fn handle_client(
                         }
                     }
                 } else {
-                    queue_soft_interrupt(
-                        id,
-                        content,
-                        images,
-                        urgent,
-                        SoftInterruptSource::User,
-                        &session_control,
-                        &client_event_tx,
-                    );
+                    if astra_first::is_enabled(&astra_first_state).await {
+                        let _ = client_event_tx.send(ServerEvent::Error {
+                            id,
+                            message: "Astra-first turn is busy; cancel it before resending the message.".to_string(),
+                            retry_after_secs: None,
+                        });
+                    } else {
+                        queue_soft_interrupt(
+                            id,
+                            content,
+                            images,
+                            urgent,
+                            SoftInterruptSource::User,
+                            &session_control,
+                            &client_event_tx,
+                        );
+                    }
                 }
             }
 
@@ -1376,6 +1439,16 @@ pub(super) async fn handle_client(
             }
 
             Request::Clear { id } => {
+                if astra_first::is_busy(&astra_first_state).await {
+                    let _ = client_event_tx.send(ServerEvent::Error {
+                        id,
+                        message:
+                            "Cannot clear the session while an Astra-first turn is active. Cancel it first."
+                                .to_string(),
+                        retry_after_secs: Some(1),
+                    });
+                    continue;
+                }
                 if reject_if_agent_busy_for_request(
                     id,
                     "clear",
@@ -1413,6 +1486,7 @@ pub(super) async fn handle_client(
                     ),
                 )
                 .await;
+                astra_first_state = agent.lock().await.astra_first_state_handle();
                 session_control = refresh_session_control_handle(
                     &client_session_id,
                     &agent,
@@ -1621,6 +1695,44 @@ pub(super) async fn handle_client(
                     }
                 }
                 if let Some(target_session_id) = target_session_id {
+                    if astra_first::is_busy(&astra_first_state).await {
+                        let _ = client_event_tx.send(ServerEvent::Error {
+                            id,
+                            message:
+                                "Cannot change the Astra-first session attachment while a turn is active. Cancel it first."
+                                    .to_string(),
+                            retry_after_secs: Some(1),
+                        });
+                        continue;
+                    }
+                    let target_astra_state = if crate::config::config().agents.astra_first.is_some()
+                    {
+                        let target_agent = {
+                            sessions
+                                .read()
+                                .await
+                                .get(&target_session_id)
+                                .map(|entry| entry.agent())
+                        };
+                        match target_agent {
+                            Some(target_agent) => match target_agent.try_lock() {
+                                Ok(target_guard) => {
+                                    Some(target_guard.astra_first_state_handle())
+                                }
+                                Err(_) => {
+                                    let _ = client_event_tx.send(ServerEvent::Error {
+                                        id,
+                                        message: "Cannot change the Astra-first attachment while the target session is busy; retry after it finishes.".to_string(),
+                                        retry_after_secs: Some(1),
+                                    });
+                                    continue;
+                                }
+                            },
+                            None => None,
+                        }
+                    } else {
+                        None
+                    };
                     // A brand-new desktop panel has no transcript on disk until
                     // its first prompt. Its creator connection can detach before
                     // the panel connection arrives, while the live agent is
@@ -1672,6 +1784,11 @@ pub(super) async fn handle_client(
                             ),
                         )
                         .await?;
+                        astra_first_state = if let Some(target_astra_state) = target_astra_state {
+                            target_astra_state
+                        } else {
+                            agent.lock().await.astra_first_state_handle()
+                        };
                         session_control = refresh_session_control_handle(
                             &client_session_id,
                             &agent,
@@ -1912,6 +2029,41 @@ pub(super) async fn handle_client(
                 client_has_local_history,
                 allow_session_takeover,
             } => {
+                if astra_first::is_busy(&astra_first_state).await {
+                    let _ = client_event_tx.send(ServerEvent::Error {
+                        id,
+                        message:
+                            "Cannot change the Astra-first session attachment while a turn is active. Cancel it first."
+                                .to_string(),
+                        retry_after_secs: Some(1),
+                    });
+                    continue;
+                }
+                let target_astra_state = if crate::config::config().agents.astra_first.is_some() {
+                    let target_agent = {
+                        sessions
+                            .read()
+                            .await
+                            .get(&session_id)
+                            .map(|entry| entry.agent())
+                    };
+                    match target_agent {
+                        Some(target_agent) => match target_agent.try_lock() {
+                            Ok(target_guard) => Some(target_guard.astra_first_state_handle()),
+                            Err(_) => {
+                                let _ = client_event_tx.send(ServerEvent::Error {
+                                    id,
+                                    message: "Cannot change the Astra-first attachment while the target session is busy; retry after it finishes.".to_string(),
+                                    retry_after_secs: Some(1),
+                                });
+                                continue;
+                            }
+                        },
+                        None => None,
+                    }
+                } else {
+                    None
+                };
                 let pre_resume_session_id = client_session_id.clone();
                 let member_working_dir = swarm_members
                     .read()
@@ -1971,6 +2123,11 @@ pub(super) async fn handle_client(
                 if client_session_id != pre_resume_session_id {
                     provisional_session = false;
                 }
+                astra_first_state = if let Some(target_astra_state) = target_astra_state {
+                    target_astra_state
+                } else {
+                    agent.lock().await.astra_first_state_handle()
+                };
                 session_control = refresh_session_control_handle(
                     &client_session_id,
                     &agent,
@@ -2068,7 +2225,13 @@ pub(super) async fn handle_client(
                 target_session_id,
             } => {
                 if let Some(target_session_id) = target_session_id {
-                    let target_agent = { sessions.read().await.get(&target_session_id).cloned() };
+                    let target_agent = {
+                        sessions
+                            .read()
+                            .await
+                            .get(&target_session_id)
+                            .map(|entry| entry.agent())
+                    };
                     if let Some(target_agent) = target_agent {
                         handle_set_reasoning_effort(id, effort, &target_agent, &client_event_tx)
                             .await;
@@ -2085,7 +2248,19 @@ pub(super) async fn handle_client(
             }
 
             Request::SetServiceTier { id, service_tier } => {
-                handle_set_service_tier(id, service_tier, &agent, &client_event_tx).await;
+                // Only the actual owning-main entry may publish the shared
+                // root snapshot. Worker entries intentionally carry that same
+                // Arc for reads, but must not write root state through this
+                // request path, including deferred provider operations.
+                let fast_state = owning_main_fast_state(&sessions, &client_session_id).await;
+                handle_set_service_tier(
+                    id,
+                    service_tier,
+                    &agent,
+                    fast_state,
+                    &client_event_tx,
+                )
+                .await;
             }
 
             Request::SetTransport { id, transport } => {
@@ -3272,11 +3447,15 @@ async fn start_processing_message(
     client_connection_id: &str,
     state: &mut ProcessingState<'_>,
     agent: &Arc<Mutex<Agent>>,
+    sessions: Option<&SessionAgents>,
     client_event_tx: &mpsc::UnboundedSender<ServerEvent>,
     processing_done_tx: &mpsc::UnboundedSender<(u64, Result<()>, Option<String>)>,
     client_terminal_env: Vec<(String, String)>,
     client_connections: &Arc<RwLock<HashMap<String, ClientConnectionInfo>>>,
     swarm: &SwarmStatusRefs<'_>,
+    astra_first_state: Option<&crate::agent::AstraFirstStateHandle>,
+    astra_first_context: Option<&AstraFirstSpawnContext>,
+    stdin_req_tx: Option<mpsc::UnboundedSender<crate::tool::StdinInputRequest>>,
 ) {
     let ProcessingMessage {
         id,
@@ -3303,6 +3482,28 @@ async fn start_processing_message(
         return;
     }
 
+    let astra_generation = if let Some(astra_first_state) = astra_first_state {
+        if astra_first::is_enabled(astra_first_state).await {
+            match astra_first::try_begin_generation(astra_first_state).await {
+                Some(generation) => Some(generation),
+                None => {
+                    let _ = client_event_tx.send(ServerEvent::Error {
+                        id,
+                        message:
+                            "Astra-first turn is busy; cancel it before resending the message."
+                                .to_string(),
+                        retry_after_secs: None,
+                    });
+                    return;
+                }
+            }
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
     if matches!(
         agent.lock().await.session_for_split().status,
         crate::session::SessionStatus::Closed
@@ -3310,6 +3511,44 @@ async fn start_processing_message(
         let _ = client_event_tx.send(ServerEvent::Error {
             id,
             message: "Session is closed".to_string(),
+            retry_after_secs: None,
+        });
+        if let (Some(astra_first_state), Some(generation)) = (astra_first_state, astra_generation) {
+            astra_first::finish_generation(astra_first_state, generation).await;
+        }
+        return;
+    }
+
+    let runtime_fast_state = if let Some(sessions) = sessions {
+        sessions
+            .read()
+            .await
+            .get(client_session_id)
+            .map(|entry| entry.fast_state())
+    } else {
+        None
+    };
+    let fast_policy_result = {
+        let agent_guard = agent.lock().await;
+        let provider = agent_guard.provider_handle();
+        let session = agent_guard.session_for_split();
+        let is_worker = session.origin() == crate::session::SessionOrigin::SwarmWorker;
+        let result = super::apply_runtime_fast_policy(
+            provider.as_ref(),
+            session,
+            runtime_fast_state.as_deref(),
+        );
+        if result.is_ok() && !is_worker {
+            if let Some(fast_state) = runtime_fast_state.as_ref() {
+                fast_state.publish_from_provider(provider.as_ref());
+            }
+        }
+        result
+    };
+    if let Err(error) = fast_policy_result {
+        let _ = client_event_tx.send(ServerEvent::Error {
+            id,
+            message: format!("Scoped fast worker dispatch rejected: {error}"),
             retry_after_secs: None,
         });
         return;
@@ -3326,12 +3565,22 @@ async fn start_processing_message(
             message: format!("Skill '{skill_name}' is not installed on the server"),
             retry_after_secs: None,
         });
+        if let (Some(astra_first_state), Some(generation)) = (astra_first_state, astra_generation) {
+            astra_first::finish_generation(astra_first_state, generation).await;
+        }
         return;
     }
 
     *state.client_is_processing = true;
     *state.message_id = Some(id);
     *state.session_id = Some(client_session_id.to_string());
+    {
+        let mut connections = client_connections.write().await;
+        if let Some(info) = connections.get_mut(client_connection_id) {
+            info.is_processing = true;
+            info.current_tool_name = None;
+        }
+    }
 
     if let Some(reminder) = system_reminder.as_deref()
         && let Err(error) = super::reload_recovery::mark_delivered_if_matching_continuation(
@@ -3372,17 +3621,52 @@ async fn start_processing_message(
         Arc::clone(client_connections),
     );
     let done_tx = processing_done_tx.clone();
+    let astra_state = astra_first_state.map(Arc::clone);
+    let astra_context = astra_first_context.cloned();
+    let astra_root_session_id = client_session_id.to_string();
     crate::logging::info(&format!("Processing message id={} spawning task", id));
     *state.task = Some(tokio::spawn(async move {
         let event_tx = tx.clone();
-        let result = match std::panic::AssertUnwindSafe(crate::hooks::with_client_terminal_env(
+        let outcome = match std::panic::AssertUnwindSafe(crate::hooks::with_client_terminal_env(
             client_terminal_env,
-            process_message_streaming_mpsc(agent, &content, images, system_reminder, event_tx),
+            async move {
+                if let Some(generation) = astra_generation {
+                    match astra_first::run_astra_first_task(
+                        generation,
+                        astra_state.expect("Astra-first generation requires state"),
+                        Arc::clone(&agent),
+                        id,
+                        astra_root_session_id,
+                        content,
+                        images,
+                        system_reminder,
+                        event_tx.clone(),
+                        astra_context.expect("Astra-first generation requires context"),
+                    )
+                    .await
+                    {
+                        Ok(final_text) => (Ok(()), Some(final_text)),
+                        Err(error) => (Err(error), None),
+                    }
+                } else {
+                    (
+                        process_message_streaming_mpsc(
+                            agent,
+                            &content,
+                            images,
+                            system_reminder,
+                            event_tx,
+                        )
+                        .await,
+                        None,
+                    )
+                }
+            },
         ))
         .catch_unwind()
         .await
         {
-            Ok(result) => result,
+            Ok(outcome) => outcome,
             Err(panic_payload) => {
                 let msg = if let Some(text) = panic_payload.downcast_ref::<&str>() {
                     text.to_string()
@@ -3395,9 +3679,13 @@ async fn start_processing_message(
                     "Processing task PANICKED for message id={}: {}",
                     id, msg
                 ));
-                Err(anyhow::anyhow!("Processing task panicked: {}", msg))
+                (
+                    Err(anyhow::anyhow!("Processing task panicked: {}", msg)),
+                    None,
+                )
             }
         };
+        let (result, astra_completion_report) = outcome;
         match &result {
             Ok(()) => crate::logging::info(&format!(
                 "Processing task completed OK for message id={}",
@@ -3408,7 +3696,9 @@ async fn start_processing_message(
                 id, error
             )),
         }
-        let completion_report = if result.is_ok() {
+        let completion_report = if astra_completion_report.is_some() {
+            astra_completion_report
+        } else if result.is_ok() {
             let agent = report_agent.lock().await;
             agent.latest_assistant_text_after(start_message_index)
         } else {

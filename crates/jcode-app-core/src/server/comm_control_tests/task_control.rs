@@ -6,8 +6,8 @@ async fn task_control_wake_returns_structured_response_with_plan_summary() {
     let worker = "worker";
     let (client_tx, mut client_rx) = mpsc::unbounded_channel();
     let worker_agent = test_agent().await;
-    let sessions = Arc::new(RwLock::new(HashMap::from([(
-        worker.to_string(),
+    let sessions = Arc::new(RwLock::new(HashMap::from([session_entry(
+        worker,
         worker_agent,
     )])));
     let soft_interrupt_queues = Arc::new(RwLock::new(HashMap::new()));
@@ -99,7 +99,10 @@ async fn task_control_resume_without_task_id_uses_unique_target_assignment() {
     let worker_agent = test_agent().await;
     let sessions = Arc::new(RwLock::new(HashMap::from([(
         worker.to_string(),
-        worker_agent,
+        crate::server::SessionAgentEntry::new(
+            worker_agent,
+            crate::server::RuntimeFastState::invalid(worker),
+        ),
     )])));
     let soft_interrupt_queues = Arc::new(RwLock::new(HashMap::new()));
     let client_connections = Arc::new(RwLock::new(HashMap::new()));
@@ -185,7 +188,7 @@ async fn task_control_without_task_id_rejects_ambiguous_target_assignments() {
     let requester = "coord";
     let worker = "worker";
     let (client_tx, mut client_rx) = mpsc::unbounded_channel();
-    let sessions = Arc::new(RwLock::new(HashMap::new()));
+    let sessions: crate::server::SessionAgents = Arc::new(RwLock::new(HashMap::new()));
     let soft_interrupt_queues = Arc::new(RwLock::new(HashMap::new()));
     let client_connections = Arc::new(RwLock::new(HashMap::new()));
     let swarm_members = Arc::new(RwLock::new(HashMap::from([
@@ -270,8 +273,8 @@ async fn task_control_resume_busy_agent_rejects_without_mutating_plan() {
     let worker = "worker";
     let (client_tx, mut client_rx) = mpsc::unbounded_channel();
     let worker_agent = test_agent().await;
-    let sessions = Arc::new(RwLock::new(HashMap::from([(
-        worker.to_string(),
+    let sessions = Arc::new(RwLock::new(HashMap::from([session_entry(
+        worker,
         Arc::clone(&worker_agent),
     )])));
     let soft_interrupt_queues = Arc::new(RwLock::new(HashMap::new()));
@@ -479,7 +482,10 @@ async fn task_control_retry_re_dispatches_after_recent_identical_retry() {
     let worker_agent = test_agent().await;
     let sessions = Arc::new(RwLock::new(HashMap::from([(
         worker.to_string(),
-        worker_agent,
+        crate::server::SessionAgentEntry::new(
+            worker_agent,
+            crate::server::RuntimeFastState::invalid(worker),
+        ),
     )])));
     let soft_interrupt_queues = Arc::new(RwLock::new(HashMap::new()));
     let client_connections = Arc::new(RwLock::new(HashMap::new()));

@@ -10,7 +10,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use tokio::sync::{Mutex, RwLock, broadcast, mpsc};
 
-type SessionAgents = Arc<RwLock<HashMap<String, Arc<Mutex<Agent>>>>>;
+type SessionAgents = super::SessionAgents;
 
 pub(super) struct CommResyncPlanContext<'a> {
     pub(super) client_event_tx: &'a mpsc::UnboundedSender<ServerEvent>,
@@ -219,7 +219,11 @@ pub(super) async fn handle_comm_summary(
     }
 
     let limit = limit.unwrap_or(10);
-    let agent = sessions.read().await.get(&target_session).cloned();
+    let agent = sessions
+        .read()
+        .await
+        .get(&target_session)
+        .map(|entry| entry.agent());
     if let Some(agent) = agent {
         // A terminal swarm status can be broadcast just before the worker's
         // turn lock is released. Wait for that lock instead of exposing a
@@ -350,7 +354,11 @@ pub(super) async fn handle_comm_read_context(
         return;
     }
 
-    let agent = sessions.read().await.get(&target_session).cloned();
+    let agent = sessions
+        .read()
+        .await
+        .get(&target_session)
+        .map(|entry| entry.agent());
     if let Some(agent) = agent {
         // See summary above. The terminal status event may win the race with
         // lock release, but the history is stable once this lock is acquired.

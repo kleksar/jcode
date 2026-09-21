@@ -164,6 +164,7 @@ async fn the_write_tool_reports_config_changes_end_to_end() {
         stdin_request_tx: None,
         graceful_shutdown_signal: None,
         execution_mode: crate::tool::ToolExecutionMode::Direct,
+        inline_swarm_await: None,
     };
 
     let output = crate::tool::write::WriteTool
@@ -214,6 +215,7 @@ async fn apply_patch_reports_config_changes() {
         stdin_request_tx: None,
         graceful_shutdown_signal: None,
         execution_mode: crate::tool::ToolExecutionMode::Direct,
+        inline_swarm_await: None,
     };
 
     let patch_text = format!(

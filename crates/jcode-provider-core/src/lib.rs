@@ -299,6 +299,25 @@ pub trait Provider: Send + Sync {
         ))
     }
 
+    /// Whether this provider instance supports the native Luna/Astra scoped
+    /// service-tier override used by worker dispatch.
+    fn supports_scoped_service_tier_override(&self) -> bool {
+        false
+    }
+
+    /// Set or clear a native Luna/Astra service-tier override on this provider
+    /// instance. `None` clears the override, `Some(None)` forces ordinary, and
+    /// `Some(Some("priority"))` forces priority. Providers outside that
+    /// scoped surface retain their existing behavior.
+    fn set_scoped_service_tier_override(
+        &self,
+        _override_tier: Option<Option<String>>,
+    ) -> Result<()> {
+        Err(anyhow::anyhow!(
+            "This provider does not support scoped service tier overrides"
+        ))
+    }
+
     /// Get ordered list of available service tiers.
     fn available_service_tiers(&self) -> Vec<&'static str> {
         vec![]

@@ -2573,6 +2573,28 @@ impl Provider for MultiProvider {
         }
     }
 
+    fn supports_scoped_service_tier_override(&self) -> bool {
+        matches!(self.active_provider(), ActiveProvider::OpenAI)
+            && self
+                .openai_provider()
+                .is_some_and(|provider| provider.supports_scoped_service_tier_override())
+    }
+
+    fn set_scoped_service_tier_override(
+        &self,
+        override_tier: Option<Option<String>>,
+    ) -> Result<()> {
+        match self.active_provider() {
+            ActiveProvider::OpenAI => self
+                .openai_provider()
+                .ok_or_else(|| anyhow::anyhow!("OpenAI provider not available"))?
+                .set_scoped_service_tier_override(override_tier),
+            _ => Err(anyhow::anyhow!(
+                "Scoped service tier overrides are only supported for native OpenAI models"
+            )),
+        }
+    }
+
     fn available_service_tiers(&self) -> Vec<&'static str> {
         match self.active_provider() {
             ActiveProvider::Claude if !self.use_claude_cli => self

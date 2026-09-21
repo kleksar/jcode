@@ -126,7 +126,7 @@ fn double_assign_fixture(
     contested: PlanItem,
     progress: crate::server::SwarmTaskProgress,
 ) -> (
-    Arc<RwLock<HashMap<String, Arc<Mutex<Agent>>>>>,
+    crate::server::SessionAgents,
     Arc<RwLock<HashMap<String, SwarmMember>>>,
     Arc<RwLock<HashMap<String, HashSet<String>>>>,
     Arc<RwLock<HashMap<String, VersionedPlan>>>,
@@ -165,7 +165,7 @@ fn double_assign_fixture(
         swarm_id.to_string(),
         requester.to_string(),
     )])));
-    let sessions = Arc::new(RwLock::new(HashMap::new()));
+    let sessions: crate::server::SessionAgents = Arc::new(RwLock::new(HashMap::new()));
     (
         sessions,
         swarm_members,
@@ -207,7 +207,13 @@ async fn assign_task_rejects_double_assignment_of_actively_worked_task() {
     sessions
         .write()
         .await
-        .insert(intruder.to_string(), test_agent().await);
+        .insert(
+            intruder.to_string(),
+            crate::server::SessionAgentEntry::new(
+                test_agent().await,
+                crate::server::RuntimeFastState::invalid(intruder),
+            ),
+        );
     let (client_tx, mut client_rx) = mpsc::unbounded_channel();
     let soft_interrupt_queues = Arc::new(RwLock::new(HashMap::new()));
     let client_connections = Arc::new(RwLock::new(HashMap::new()));
@@ -291,7 +297,13 @@ async fn assign_task_allows_taking_over_stale_assignment() {
     sessions
         .write()
         .await
-        .insert(intruder.to_string(), test_agent().await);
+        .insert(
+            intruder.to_string(),
+            crate::server::SessionAgentEntry::new(
+                test_agent().await,
+                crate::server::RuntimeFastState::invalid(intruder),
+            ),
+        );
     let (client_tx, mut client_rx) = mpsc::unbounded_channel();
     let soft_interrupt_queues = Arc::new(RwLock::new(HashMap::new()));
     let client_connections = Arc::new(RwLock::new(HashMap::new()));
@@ -376,11 +388,23 @@ async fn task_control_reassign_tells_displaced_worker_to_stand_down() {
     sessions
         .write()
         .await
-        .insert(holder.to_string(), test_agent().await);
+        .insert(
+            holder.to_string(),
+            crate::server::SessionAgentEntry::new(
+                test_agent().await,
+                crate::server::RuntimeFastState::invalid(holder),
+            ),
+        );
     sessions
         .write()
         .await
-        .insert(intruder.to_string(), test_agent().await);
+        .insert(
+            intruder.to_string(),
+            crate::server::SessionAgentEntry::new(
+                test_agent().await,
+                crate::server::RuntimeFastState::invalid(intruder),
+            ),
+        );
     let (client_tx, mut client_rx) = mpsc::unbounded_channel();
     let soft_interrupt_queues = Arc::new(RwLock::new(HashMap::new()));
     let client_connections = Arc::new(RwLock::new(HashMap::new()));

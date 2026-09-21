@@ -77,7 +77,13 @@ async fn target_subscribe_uses_live_unsaved_root_without_changing_it() {
     let _home = Home::new();
     let id = "session_live_empty_attach";
     let agent = live_agent(id, "/workspace/live-original").await;
-    let sessions = Arc::new(RwLock::new(HashMap::from([(id.into(), agent.clone())])));
+    let sessions = Arc::new(RwLock::new(HashMap::from([(
+        id.into(),
+        crate::server::SessionAgentEntry::new(
+            agent.clone(),
+            crate::server::RuntimeFastState::invalid(id),
+        ),
+    )])));
     let members = Arc::new(RwLock::new(HashMap::new()));
     let mut request = subscribe(id);
     resolve_target_subscribe_working_dir(&mut request, &sessions, &members)
@@ -123,7 +129,13 @@ async fn target_subscribe_live_root_wins_over_stale_persisted_root() {
     session.working_dir = Some("/workspace/stale".into());
     session.save().unwrap();
     let agent = live_agent(&session.id, "/workspace/live").await;
-    let sessions = Arc::new(RwLock::new(HashMap::from([(session.id.clone(), agent)])));
+    let sessions = Arc::new(RwLock::new(HashMap::from([(
+        session.id.clone(),
+        crate::server::SessionAgentEntry::new(
+            agent,
+            crate::server::RuntimeFastState::invalid(session.id.clone()),
+        ),
+    )])));
     let mut request = subscribe(&session.id);
     resolve_target_subscribe_working_dir(
         &mut request,
@@ -144,7 +156,13 @@ async fn target_subscribe_busy_live_agent_uses_member_root_without_waiting() {
     let _home = Home::new();
     let id = "session_busy_empty_attach";
     let agent = live_agent(id, "/workspace/busy-original").await;
-    let sessions = Arc::new(RwLock::new(HashMap::from([(id.into(), agent.clone())])));
+    let sessions = Arc::new(RwLock::new(HashMap::from([(
+        id.into(),
+        crate::server::SessionAgentEntry::new(
+            agent.clone(),
+            crate::server::RuntimeFastState::invalid(id),
+        ),
+    )])));
     let (event_tx, _) = mpsc::unbounded_channel();
     let now = std::time::Instant::now();
     let members = Arc::new(RwLock::new(HashMap::from([(

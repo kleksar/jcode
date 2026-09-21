@@ -241,6 +241,19 @@ impl Tool for BatchTool {
             }
         }
 
+        if ctx.inline_swarm_await.is_some()
+            && params.tool_calls.iter().cloned().any(|tc| {
+                let (tool_name, parameters) = tc.resolved_parameters();
+                Registry::resolve_tool_name(&tool_name) == "swarm"
+                    && parameters.get("action").and_then(Value::as_str)
+                        == Some("await_members")
+            })
+        {
+            return Err(anyhow::anyhow!(
+                "Scoped inline swarm await cannot be used inside batch; refusing to detach or run it concurrently"
+            ));
+        }
+
         // Execute all tools in parallel, emitting progress events as each completes
         let num_tools = params.tool_calls.len();
         use futures::StreamExt;

@@ -6,7 +6,7 @@ async fn assign_next_prefers_worker_with_dependency_context() {
     let context_worker = "worker-context";
     let other_worker = "worker-other";
     let (client_tx, mut client_rx) = mpsc::unbounded_channel();
-    let sessions = Arc::new(RwLock::new(HashMap::new()));
+    let sessions: crate::server::SessionAgents = Arc::new(RwLock::new(HashMap::new()));
     let soft_interrupt_queues = Arc::new(RwLock::new(HashMap::new()));
     let client_connections = Arc::new(RwLock::new(HashMap::new()));
     let swarm_members = Arc::new(RwLock::new(HashMap::from([

@@ -108,7 +108,7 @@ async fn assign_task_does_not_stack_on_busy_worker() {
     let requester = "coord";
     let busy_worker = "worker-busy-solo";
     let (client_tx, mut client_rx) = mpsc::unbounded_channel();
-    let sessions = Arc::new(RwLock::new(HashMap::new()));
+    let sessions: crate::server::SessionAgents = Arc::new(RwLock::new(HashMap::new()));
     let soft_interrupt_queues = Arc::new(RwLock::new(HashMap::new()));
     let client_connections = Arc::new(RwLock::new(HashMap::new()));
     let swarm_members = Arc::new(RwLock::new(HashMap::from([

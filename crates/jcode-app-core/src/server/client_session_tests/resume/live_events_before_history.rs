@@ -22,9 +22,12 @@ async fn handle_resume_session_registers_live_events_before_history_replay() -> 
         Vec::new(),
     )));
 
-    let sessions = Arc::new(RwLock::new(HashMap::from([(
+    let sessions = Arc::new(RwLock::new(HashMap::<String, crate::server::SessionAgentEntry>::from([(
         temp_session_id.to_string(),
-        Arc::clone(&agent),
+        crate::server::SessionAgentEntry::new(
+            Arc::clone(&agent),
+            crate::server::RuntimeFastState::invalid(temp_session_id.to_string()),
+        ),
     )])));
     let shutdown_signals = Arc::new(RwLock::new(HashMap::<String, InterruptSignal>::new()));
     let soft_interrupt_queues: SessionInterruptQueues = Arc::new(RwLock::new(HashMap::new()));

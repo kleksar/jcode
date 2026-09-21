@@ -386,6 +386,16 @@ fn test_load_swarm_sessions_discovers_related_sessions() {
     let _home = EnvVarGuard::set("JCODE_HOME", temp_home.path().as_os_str());
 
     let mut seed = Session::create_with_id("session_seed".to_string(), None, None);
+    let seed_gate = serde_json::json!({
+        "saved": seed.saved,
+        "messages": seed.messages.len(),
+        "custom_title": seed.custom_title,
+        "title": seed.title,
+        "parent_id": seed.parent_id,
+        "delegated_swarm_root_read_boundary": seed.delegated_swarm_root_read_boundary,
+    });
+    eprintln!("replay seed pre-save gate: {seed_gate}");
+    seed.saved = true;
     seed.working_dir = Some("/tmp/repo".to_string());
     seed.record_swarm_status_event(vec![SwarmMemberStatus {
         session_id: "session_seed".to_string(),
@@ -405,12 +415,15 @@ fn test_load_swarm_sessions_discovers_related_sessions() {
         runtime: crate::protocol::SwarmMemberRuntime::default(),
     }]);
     seed.save().unwrap();
+    let seed_path = crate::session::session_path(&seed.id).unwrap();
+    assert!(seed_path.is_file(), "seed snapshot missing: {}", seed_path.display());
 
     let mut child = Session::create_with_id(
         "session_child".to_string(),
         Some(seed.id.clone()),
         Some("child".to_string()),
     );
+    child.saved = true;
     child.working_dir = Some("/tmp/repo".to_string());
     child.record_swarm_plan_event(
         "swarm_x".to_string(),
@@ -429,10 +442,28 @@ fn test_load_swarm_sessions_discovers_related_sessions() {
         None,
     );
     child.save().unwrap();
+    let child_path = crate::session::session_path(&child.id).unwrap();
+    assert!(child_path.is_file(), "child snapshot missing: {}", child_path.display());
 
     let mut unrelated = Session::create_with_id("session_other".to_string(), None, None);
+    let unrelated_gate = serde_json::json!({
+        "saved": unrelated.saved,
+        "messages": unrelated.messages.len(),
+        "custom_title": unrelated.custom_title,
+        "title": unrelated.title,
+        "parent_id": unrelated.parent_id,
+        "delegated_swarm_root_read_boundary": unrelated.delegated_swarm_root_read_boundary,
+    });
+    eprintln!("replay unrelated pre-save gate: {unrelated_gate}");
+    unrelated.saved = true;
     unrelated.working_dir = Some("/tmp/other".to_string());
     unrelated.save().unwrap();
+    let unrelated_path = crate::session::session_path(&unrelated.id).unwrap();
+    assert!(
+        unrelated_path.is_file(),
+        "unrelated snapshot missing: {}",
+        unrelated_path.display()
+    );
 
     let loaded = load_swarm_sessions("session_seed", false).unwrap();
     let ids: Vec<_> = loaded.iter().map(|s| s.session.id.as_str()).collect();

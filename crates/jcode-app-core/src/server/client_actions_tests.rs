@@ -8,17 +8,47 @@ use crate::agent::Agent;
 use crate::message::{ContentBlock, Message, Role, StreamEvent, ToolDefinition};
 use crate::protocol::{FeatureToggle, ServerEvent};
 use crate::provider::{EventStream, Provider};
-use crate::server::{ClientConnectionInfo, SwarmMember};
+use crate::server::{ClientConnectionInfo, SessionAgentEntry, SwarmMember};
 use crate::tool::Registry;
 use anyhow::Result;
 use async_stream::stream;
 use async_trait::async_trait;
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::ffi::OsString;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Instant;
 use tokio::sync::{Mutex, RwLock, mpsc};
 use tokio::time::{Duration, timeout};
+
+struct ScopedEnvVar {
+    key: &'static str,
+    previous: Option<OsString>,
+}
+
+impl ScopedEnvVar {
+    fn set(key: &'static str, value: impl AsRef<std::ffi::OsStr>) -> Self {
+        let previous = std::env::var_os(key);
+        crate::env::set_var(key, value);
+        Self { key, previous }
+    }
+
+    fn unset(key: &'static str) -> Self {
+        let previous = std::env::var_os(key);
+        crate::env::remove_var(key);
+        Self { key, previous }
+    }
+}
+
+impl Drop for ScopedEnvVar {
+    fn drop(&mut self) {
+        if let Some(value) = self.previous.take() {
+            crate::env::set_var(self.key, value);
+        } else {
+            crate::env::remove_var(self.key);
+        }
+    }
+}
 
 #[allow(clippy::type_complexity)]
 fn empty_swarm_status_state() -> (
@@ -419,6 +449,8 @@ fn split_corrupt_persisted_parent_is_not_hidden_by_live_fallback() {
 
 #[tokio::test]
 async fn enabling_swarm_does_not_auto_elect_coordinator() {
+    let _env_lock = crate::storage::lock_test_env();
+    let _swarm_id = ScopedEnvVar::unset("JCODE_SWARM_ID");
     let provider: Arc<dyn Provider> = Arc::new(MockProvider);
     let registry = Registry::new(provider.clone()).await;
     let agent = Arc::new(Mutex::new(Agent::new(provider, registry)));
@@ -491,7 +523,7 @@ async fn enabling_swarm_does_not_auto_elect_coordinator() {
             .get(session_id)
             .and_then(|member| member.swarm_id.clone())
             .as_deref(),
-        Some("/tmp/jcode-passive-swarm")
+        Some("session:session_test_swarm_toggle")
     );
     assert_eq!(
         swarm_members
@@ -613,9 +645,12 @@ async fn notify_session_runs_scheduled_task_immediately_for_idle_live_session() 
     let registry = Registry::new(provider_dyn.clone()).await;
     let agent = Arc::new(Mutex::new(Agent::new(provider_dyn, registry)));
     let session_id = agent.lock().await.session_id().to_string();
-    let sessions = Arc::new(RwLock::new(HashMap::<String, Arc<Mutex<Agent>>>::from([(
+    let sessions = Arc::new(RwLock::new(HashMap::<String, SessionAgentEntry>::from([(
         session_id.clone(),
-        agent.clone(),
+        SessionAgentEntry::new(
+            agent.clone(),
+            crate::server::RuntimeFastState::invalid(session_id.clone()),
+        ),
     )])));
     let soft_interrupt_queues = Arc::new(RwLock::new(HashMap::new()));
     let client_connections = Arc::new(RwLock::new(HashMap::from([(
@@ -728,9 +763,12 @@ async fn notify_session_queues_soft_interrupt_when_live_session_is_busy() {
     let session_id = agent.lock().await.session_id().to_string();
     let queue = agent.lock().await.soft_interrupt_queue();
 
-    let sessions = Arc::new(RwLock::new(HashMap::<String, Arc<Mutex<Agent>>>::from([(
+    let sessions = Arc::new(RwLock::new(HashMap::<String, SessionAgentEntry>::from([(
         session_id.clone(),
-        agent.clone(),
+        SessionAgentEntry::new(
+            agent.clone(),
+            crate::server::RuntimeFastState::invalid(session_id.clone()),
+        ),
     )])));
     let soft_interrupt_queues = Arc::new(RwLock::new(HashMap::from([(
         session_id.clone(),
@@ -894,9 +932,12 @@ async fn resume_all_continues_interrupted_idle_live_session() {
         guard.session_id().to_string()
     };
 
-    let sessions = Arc::new(RwLock::new(HashMap::<String, Arc<Mutex<Agent>>>::from([(
+    let sessions = Arc::new(RwLock::new(HashMap::<String, SessionAgentEntry>::from([(
         session_id.clone(),
-        agent.clone(),
+        SessionAgentEntry::new(
+            agent.clone(),
+            crate::server::RuntimeFastState::invalid(session_id.clone()),
+        ),
     )])));
     let (member, mut attach_rx) = live_member(&session_id);
     let swarm_members = Arc::new(RwLock::new(HashMap::from([(session_id.clone(), member)])));
@@ -996,9 +1037,12 @@ async fn resume_all_skips_session_with_completed_turn() {
         guard.session_id().to_string()
     };
 
-    let sessions = Arc::new(RwLock::new(HashMap::<String, Arc<Mutex<Agent>>>::from([(
+    let sessions = Arc::new(RwLock::new(HashMap::<String, SessionAgentEntry>::from([(
         session_id.clone(),
-        agent.clone(),
+        SessionAgentEntry::new(
+            agent.clone(),
+            crate::server::RuntimeFastState::invalid(session_id.clone()),
+        ),
     )])));
     let (member, _attach_rx) = live_member(&session_id);
     let swarm_members = Arc::new(RwLock::new(HashMap::from([(session_id.clone(), member)])));

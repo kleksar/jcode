@@ -43,6 +43,7 @@ use std::hash::{Hash, Hasher};
 use std::io::{self, Write};
 use std::path::PathBuf;
 use std::sync::{Arc, LazyLock, Mutex as StdMutex};
+use std::sync::atomic::{AtomicBool, AtomicUsize};
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 
@@ -68,6 +69,57 @@ static JCODE_REPO_SOURCE_STATE: LazyLock<(Option<String>, Option<bool>)> = LazyL
 static WORKING_GIT_STATE_CACHE: LazyLock<StdMutex<HashMap<PathBuf, Option<GitState>>>> =
     LazyLock::new(|| StdMutex::new(HashMap::new()));
 const STREAM_KEEPALIVE_PONG_ID: u64 = 0;
+
+tokio::task_local! {
+    /// Counter for inline native `swarm await_members` calls owned by the
+    /// current Astra-first root process stream. Task-local scope prevents the
+    /// handle from reaching the persistent analyst or independently spawned
+    /// workers; streaming tool contexts copy the value explicitly before their
+    /// tool task is spawned.
+    static ASTRA_INLINE_SWARM_AWAIT: Option<Arc<AtomicUsize>>;
+    /// Set when the root streaming loop aborts a scoped await before the tool
+    /// can claim the unresolved counter. This keeps cancellation fail-closed
+    /// even when a pre_tool gate or an unpolled tool task is interrupted.
+    static ASTRA_INLINE_SWARM_AWAIT_ABORTED: Option<Arc<AtomicBool>>;
+}
+
+pub(crate) fn astra_inline_swarm_await() -> Option<Arc<AtomicUsize>> {
+    ASTRA_INLINE_SWARM_AWAIT
+        .try_with(Clone::clone)
+        .ok()
+        .flatten()
+}
+
+pub(crate) fn astra_inline_swarm_await_aborted() -> Option<Arc<AtomicBool>> {
+    ASTRA_INLINE_SWARM_AWAIT_ABORTED
+        .try_with(Clone::clone)
+        .ok()
+        .flatten()
+}
+
+pub(crate) fn scope_astra_inline_swarm_await<F>(
+    handle: Arc<AtomicUsize>,
+    future: F,
+) -> impl std::future::Future<Output = F::Output>
+where
+    F: std::future::Future,
+{
+    ASTRA_INLINE_SWARM_AWAIT.scope(Some(handle), future)
+}
+
+pub(crate) fn scope_astra_inline_swarm_await_with_abort<F>(
+    handle: Arc<AtomicUsize>,
+    aborted: Arc<AtomicBool>,
+    future: F,
+) -> impl std::future::Future<Output = F::Output>
+where
+    F: std::future::Future,
+{
+    ASTRA_INLINE_SWARM_AWAIT.scope(
+        Some(handle),
+        ASTRA_INLINE_SWARM_AWAIT_ABORTED.scope(Some(aborted), future),
+    )
+}
 
 fn stable_hash_str(value: &str) -> u64 {
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
@@ -178,6 +230,46 @@ struct RewindUndoSnapshot {
     visible_message_count: usize,
 }
 
+/// Per-root coordination state for the optional Astra-first ingress wrapper.
+///
+/// Client lifecycle tasks clone the handle, so busy admission and cancellation
+/// never need to wait for the root Agent mutex held by an ordinary turn.
+pub(crate) struct AstraFirstState {
+    pub(crate) session_id: String,
+    pub(crate) generation: u64,
+    pub(crate) analyst_id: Option<String>,
+    pub(crate) analyst_model: Option<String>,
+    pub(crate) analyst_route: Option<String>,
+    pub(crate) analyst_effort: Option<String>,
+    pub(crate) busy: bool,
+    pub(crate) cancelled: bool,
+    pub(crate) active_child: Option<crate::server::SessionControlHandle>,
+    pub(crate) cancel_notify: Arc<tokio::sync::Notify>,
+    pub(crate) enabled: bool,
+}
+
+pub(crate) type AstraFirstStateHandle = Arc<tokio::sync::Mutex<AstraFirstState>>;
+
+impl AstraFirstState {
+    fn for_session(session: &Session) -> Self {
+        Self {
+            session_id: session.id.clone(),
+            generation: 0,
+            analyst_id: None,
+            analyst_model: None,
+            analyst_route: None,
+            analyst_effort: None,
+            busy: false,
+            cancelled: false,
+            active_child: None,
+            cancel_notify: Arc::new(tokio::sync::Notify::new()),
+            enabled: crate::config::config().agents.astra_first.is_some()
+                && session.parent_id.is_none()
+                && session.origin() != crate::session::SessionOrigin::SwarmWorker,
+        }
+    }
+}
+
 pub struct Agent {
     provider: Arc<dyn Provider>,
     registry: Registry,
@@ -264,9 +356,47 @@ pub struct Agent {
     /// One logical runtime session, independent of the process-global legacy
     /// telemetry slot and of any TUI clients viewing this agent.
     concurrency_session: Option<crate::telemetry::ConcurrencySession>,
+    /// Shared root-local Astra-first lifecycle state. Worker Agents carry an
+    /// inert handle so generic Agent paths remain unchanged.
+    astra_first_state: AstraFirstStateHandle,
 }
 
 impl Agent {
+    /// Clone the root-local Astra-first state without retaining the Agent lock.
+    pub(crate) fn astra_first_state_handle(&self) -> AstraFirstStateHandle {
+        Arc::clone(&self.astra_first_state)
+    }
+
+    /// Rebind the analyst's owned tool policy before its first turn. This is a
+    /// real registry/policy restriction, not a prompt-only prohibition.
+    pub(crate) fn restrict_tools_for_astra_first(&mut self) {
+        self.allowed_tools = Some(HashSet::new());
+        self.disabled_tools.clear();
+        self._tool_policy_registration = crate::tool::register_session_tool_policy(
+            &self.session.id,
+            self.allowed_tools.clone(),
+            self.disabled_tools.clone(),
+        );
+        self.locked_tools = None;
+        self.mcp_late_register_resolved = false;
+        self.cache_tracker.reset();
+    }
+
+    /// Reset the shared handle when a live Agent is cleared into a new session.
+    pub(crate) fn reset_astra_first_state(&mut self) {
+        self.astra_first_state = Arc::new(tokio::sync::Mutex::new(AstraFirstState::for_session(
+            &self.session,
+        )));
+    }
+
+    /// Keep the shared Astra handle when a restore reopens the same runtime
+    /// session. Create a fresh handle only when restore changes identity.
+    pub(crate) fn reset_astra_first_state_if_session_changed(&mut self, previous_session_id: &str) {
+        if previous_session_id != self.session.id {
+            self.reset_astra_first_state();
+        }
+    }
+
     /// Flush the latest live policy after a busy turn releases this agent.
     /// Read the current value, not a queued request's potentially stale value.
     pub(crate) fn persist_live_delegated_swarm_read_boundary(&mut self) -> Result<()> {
@@ -327,6 +457,9 @@ impl Agent {
         let working_dir = session.working_dir.as_deref().map(std::path::Path::new);
         let agents_md_snapshot = crate::prompt::load_agents_md_files_from_dir(working_dir);
         let initial_provider_model = provider.model();
+        let astra_first_state = Arc::new(tokio::sync::Mutex::new(AstraFirstState::for_session(
+            &session,
+        )));
         let tool_policy_registration = crate::tool::register_session_tool_policy(
             &session.id,
             allowed_tools.clone(),
@@ -372,6 +505,7 @@ impl Agent {
             inline_tail: inline_tail::InlineTailBuffer::default(),
             transcript_telemetry_sent: false,
             concurrency_session: None,
+            astra_first_state,
         }
     }
 

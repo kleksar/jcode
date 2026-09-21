@@ -279,6 +279,7 @@ async fn apply_patch_refuses_to_delete_a_protected_path() {
                 stdin_request_tx: None,
                 graceful_shutdown_signal: None,
                 execution_mode: crate::tool::ToolExecutionMode::Direct,
+                inline_swarm_await: None,
             },
         )
         .await;
@@ -321,6 +322,7 @@ async fn apply_patch_still_deletes_ordinary_files() {
                 stdin_request_tx: None,
                 graceful_shutdown_signal: None,
                 execution_mode: crate::tool::ToolExecutionMode::Direct,
+                inline_swarm_await: None,
             },
         )
         .await

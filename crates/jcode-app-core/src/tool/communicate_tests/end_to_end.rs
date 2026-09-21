@@ -1,6 +1,7 @@
 #[tokio::test]
 async fn communicate_list_and_await_members_work_end_to_end() {
     let _env_lock = crate::storage::lock_test_env();
+    let _swarm_id = EnvGuard::set("JCODE_SWARM_ID", "r5-communicate-list-await");
     let runtime_dir = tempfile::TempDir::new().expect("runtime tempdir");
     let repo_dir = std::env::current_dir().expect("repo cwd");
     let socket_path = runtime_dir.path().join("jcode.sock");
@@ -124,11 +125,18 @@ async fn communicate_list_and_await_members_work_end_to_end() {
     assert_eq!(ready_peer.status.as_deref(), Some("ready"));
 
     server_task.abort();
+    match server_task.await {
+        Ok(Ok(())) => {}
+        Ok(Err(error)) => panic!("communicate list server failed during teardown: {error:?}"),
+        Err(error) if error.is_cancelled() => {}
+        Err(error) => panic!("communicate list server teardown failed: {error}"),
+    }
 }
 
 #[tokio::test]
 async fn communicate_await_members_background_returns_immediately_and_notifies() {
     let _env_lock = crate::storage::lock_test_env();
+    let _swarm_id = EnvGuard::set("JCODE_SWARM_ID", "r2-communicate-shared");
     let runtime_dir = tempfile::TempDir::new().expect("runtime tempdir");
     let repo_dir = std::env::current_dir().expect("repo cwd");
     let socket_path = runtime_dir.path().join("jcode.sock");
@@ -287,6 +295,7 @@ async fn communicate_run_plan_with_empty_plan_returns_inline_even_in_background_
 #[tokio::test]
 async fn communicate_status_returns_busy_snapshot_for_running_member() {
     let _env_lock = crate::storage::lock_test_env();
+    let _swarm_id = EnvGuard::set("JCODE_SWARM_ID", "r5-communicate-status");
     let runtime_dir = tempfile::TempDir::new().expect("runtime tempdir");
     let repo_dir = std::env::current_dir().expect("repo cwd");
     let socket_path = runtime_dir.path().join("jcode.sock");
@@ -364,6 +373,12 @@ async fn communicate_status_returns_busy_snapshot_for_running_member() {
         .expect("peer message should finish");
 
     server_task.abort();
+    match server_task.await {
+        Ok(Ok(())) => {}
+        Ok(Err(error)) => panic!("communicate status server failed during teardown: {error:?}"),
+        Err(error) if error.is_cancelled() => {}
+        Err(error) => panic!("communicate status server teardown failed: {error}"),
+    }
 }
 
 #[tokio::test]
@@ -549,6 +564,7 @@ async fn communicate_spawn_with_prompt_and_summary_work_end_to_end() {
 #[tokio::test]
 async fn communicate_message_routes_as_dm_while_broadcast_targets_swarm() {
     let _env_lock = crate::storage::lock_test_env();
+    let _swarm_id = EnvGuard::set("JCODE_SWARM_ID", "r5-communicate-message");
     let runtime_dir = tempfile::TempDir::new().expect("runtime tempdir");
     let repo_dir = std::env::current_dir().expect("repo cwd");
     let socket_path = runtime_dir.path().join("jcode.sock");
@@ -667,4 +683,10 @@ async fn communicate_message_routes_as_dm_while_broadcast_targets_swarm() {
     );
 
     server_task.abort();
+    match server_task.await {
+        Ok(Ok(())) => {}
+        Ok(Err(error)) => panic!("communicate message server failed during teardown: {error:?}"),
+        Err(error) if error.is_cancelled() => {}
+        Err(error) => panic!("communicate message server teardown failed: {error}"),
+    }
 }

@@ -24,6 +24,20 @@ use std::sync::atomic::AtomicU64;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::sync::{Mutex, RwLock, broadcast, mpsc};
 
+fn session_entry(
+    session_id: impl Into<String>,
+    agent: Arc<Mutex<Agent>>,
+) -> (String, crate::server::SessionAgentEntry) {
+    let session_id = session_id.into();
+    (
+        session_id.clone(),
+        crate::server::SessionAgentEntry::new(
+            agent,
+            crate::server::RuntimeFastState::invalid(session_id),
+        ),
+    )
+}
+
 struct RuntimeEnvGuard {
     _guard: std::sync::MutexGuard<'static, ()>,
     prev_runtime: Option<std::ffi::OsString>,

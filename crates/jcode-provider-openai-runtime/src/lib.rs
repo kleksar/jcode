@@ -49,6 +49,11 @@ pub(crate) fn is_chatgpt_web_model(model: &str) -> bool {
     jcode_provider_core::is_chatgpt_web_model(model)
 }
 
+pub(crate) fn is_native_luna_astra_model(model: &str) -> bool {
+    let model = model.trim();
+    matches!(model, "gpt-6-astra" | "gpt-5.6-luna")
+}
+
 /// Whether the hosted `image_generation` tool can be attached for `model_id`.
 ///
 /// The Responses backend only exposes `image_generation` to general
@@ -713,6 +718,10 @@ pub struct OpenAIProvider {
     /// Immutable, exact-model overrides from configuration. The mutable
     /// `service_tier` remains session-local and is used only as a fallback.
     model_service_tiers: Arc<HashMap<String, Option<String>>>,
+    /// Per-provider-instance runtime override. The outer `None` means no
+    /// override, `Some(None)` forces ordinary, and `Some(Some("priority"))`
+    /// forces priority for the native Luna/Astra model scope only.
+    scoped_service_tier_override: Arc<StdRwLock<Option<Option<String>>>>,
     native_compaction_mode: OpenAINativeCompactionMode,
     native_compaction_threshold_tokens: usize,
     transport_mode: Arc<RwLock<OpenAITransportMode>>,
@@ -865,6 +874,7 @@ impl OpenAIProvider {
             model_reasoning_efforts: Arc::new(StdRwLock::new(model_reasoning_efforts)),
             service_tier: Arc::new(StdRwLock::new(service_tier)),
             model_service_tiers: Arc::new(model_service_tiers),
+            scoped_service_tier_override: Arc::new(StdRwLock::new(None)),
             native_compaction_mode,
             native_compaction_threshold_tokens,
             transport_mode: Arc::new(RwLock::new(transport_mode)),
@@ -1167,6 +1177,16 @@ impl OpenAIProvider {
     }
 
     fn service_tier_for_model(&self, model_id: &str) -> Option<String> {
+        if is_native_luna_astra_model(model_id) {
+            let override_value = self
+                .scoped_service_tier_override
+                .read()
+                .map(|guard| guard.clone())
+                .unwrap_or_else(|poisoned| poisoned.into_inner().clone());
+            if let Some(override_value) = override_value {
+                return override_value;
+            }
+        }
         self.model_service_tiers
             .get(model_id)
             .cloned()

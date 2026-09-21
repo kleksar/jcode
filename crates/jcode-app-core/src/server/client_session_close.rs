@@ -1,4 +1,4 @@
-use super::{ClientConnectionInfo, SessionAgents, SwarmMember, remove_session_entry};
+use super::{ClientConnectionInfo, SessionAgents, SwarmMember, remove_session_agent_entry};
 use crate::protocol::ServerEvent;
 use anyhow::Result;
 use std::collections::HashMap;
@@ -33,7 +33,11 @@ pub(super) async fn handle_close_session(
     // Keep the same connections -> sessions lock order as live resume so no new
     // attachment can commit between our snapshot and session removal.
     let connections = client_connections.write().await;
-    let target_agent = sessions.read().await.get(target_session_id).cloned();
+    let target_agent = sessions
+        .read()
+        .await
+        .get(target_session_id)
+        .map(|entry| entry.agent());
     let Some(target_agent) = target_agent else {
         let Ok(mut persisted) = crate::session::Session::load(target_session_id) else {
             refuse(id, "Unknown session", client_event_tx);
@@ -87,7 +91,7 @@ pub(super) async fn handle_close_session(
     }
     drop(agent);
 
-    remove_session_entry(sessions, target_session_id).await;
+    remove_session_agent_entry(sessions, target_session_id).await;
     swarm_members.write().await.remove(target_session_id);
     for connection in target_connections {
         let _ = connection.disconnect_tx.send(());

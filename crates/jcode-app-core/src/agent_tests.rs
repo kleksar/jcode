@@ -1170,7 +1170,23 @@ async fn restore_session_resets_runtime_interrupt_and_queue_state() {
         None,
         None,
     );
+    let pre_save_gate = serde_json::json!({
+        "saved": restored_session.saved,
+        "messages": restored_session.messages.len(),
+        "custom_title": restored_session.custom_title,
+        "title": restored_session.title,
+        "parent_id": restored_session.parent_id,
+        "delegated_swarm_root_read_boundary": restored_session.delegated_swarm_root_read_boundary,
+    });
+    eprintln!("restore runtime pre-save gate: {pre_save_gate}");
+    restored_session.saved = true;
     restored_session.save().expect("save restored session");
+    let restored_path = crate::session::session_path(&restored_session.id).expect("session path");
+    assert!(
+        restored_path.is_file(),
+        "saved restore fixture must create {}",
+        restored_path.display()
+    );
 
     seed_transient_session_state(&mut agent);
     assert_eq!(agent.soft_interrupt_count(), 1);
@@ -1385,7 +1401,23 @@ async fn restore_session_rehydrates_injected_memory_ids() {
         5,
         vec!["memory-persisted".to_string()],
     );
+    let pre_save_gate = serde_json::json!({
+        "saved": restored_session.saved,
+        "messages": restored_session.messages.len(),
+        "custom_title": restored_session.custom_title,
+        "title": restored_session.title,
+        "parent_id": restored_session.parent_id,
+        "delegated_swarm_root_read_boundary": restored_session.delegated_swarm_root_read_boundary,
+    });
+    eprintln!("restore memory pre-save gate: {pre_save_gate}");
+    restored_session.saved = true;
     restored_session.save().expect("save restored session");
+    let restored_path = crate::session::session_path(&restored_session.id).expect("session path");
+    assert!(
+        restored_path.is_file(),
+        "saved memory fixture must create {}",
+        restored_path.display()
+    );
 
     crate::memory::mark_memories_injected(&restored_session.id, &["memory-stale".to_string()]);
 
@@ -1527,15 +1559,29 @@ async fn memory_injection_message_can_persist_to_history() {
 #[tokio::test]
 async fn mark_closed_persists_soft_interrupts_for_restore_after_reload() {
     let _guard = crate::storage::lock_test_env();
-    let temp = tempfile::TempDir::new().expect("temp dir");
-    let prev_home = std::env::var_os("JCODE_HOME");
-    crate::env::set_var("JCODE_HOME", temp.path());
+    let _home = IsolatedSessionHome::new();
 
     let provider: Arc<dyn Provider> = Arc::new(NativeAutoCompactionProvider);
     let registry = Registry::new(provider.clone()).await;
     let mut agent = Agent::new(provider.clone(), registry.clone());
     let session_id = agent.session_id().to_string();
+    let pre_save_gate = serde_json::json!({
+        "saved": agent.session.saved,
+        "messages": agent.session.messages.len(),
+        "custom_title": agent.session.custom_title,
+        "title": agent.session.title,
+        "parent_id": agent.session.parent_id,
+        "delegated_swarm_root_read_boundary": agent.session.delegated_swarm_root_read_boundary,
+    });
+    eprintln!("mark-closed pre-save gate: {pre_save_gate}");
+    agent.session.saved = true;
     agent.session.save().expect("save active session");
+    let session_path = crate::session::session_path(&session_id).expect("session path");
+    assert!(
+        session_path.is_file(),
+        "saved mark-closed fixture must create {}",
+        session_path.display()
+    );
     agent.queue_soft_interrupt(
         "resume me after reload".to_string(),
         Vec::new(),
@@ -1558,11 +1604,7 @@ async fn mark_closed_persists_soft_interrupts_for_restore_after_reload() {
             .is_empty()
     );
 
-    if let Some(prev_home) = prev_home {
-        crate::env::set_var("JCODE_HOME", prev_home);
-    } else {
-        crate::env::remove_var("JCODE_HOME");
-    }
+    // `IsolatedSessionHome` restores JCODE_HOME while `_guard` remains held.
 }
 
 #[tokio::test]
@@ -2441,5 +2483,29 @@ async fn fable_guardrail_reconsideration_recovers_the_streaming_turn() {
     assert!(
         text.contains("Reconsidered and completed safely"),
         "{text:?}"
+    );
+}
+
+#[tokio::test]
+async fn astra_inline_swarm_await_scope_does_not_leak_to_spawned_tasks_or_next_turn() {
+    let handle = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    assert!(crate::agent::astra_inline_swarm_await().is_none());
+
+    crate::agent::scope_astra_inline_swarm_await(Arc::clone(&handle), async {
+        assert!(crate::agent::astra_inline_swarm_await().is_some());
+        let child = tokio::spawn(async { crate::agent::astra_inline_swarm_await() });
+        assert!(
+            child
+                .await
+                .expect("scoped child should not panic")
+                .is_none(),
+            "task-local inline await handle must not reach spawned worker tasks"
+        );
+    })
+    .await;
+
+    assert!(
+        crate::agent::astra_inline_swarm_await().is_none(),
+        "inline await scope must not leak into a later turn"
     );
 }

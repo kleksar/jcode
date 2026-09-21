@@ -1,4 +1,5 @@
 use super::ClientConnectionInfo;
+use super::astra_first::{AnalystIdentity, validate_analyst_identity};
 use super::client_lifecycle::process_message_streaming_mpsc;
 use super::swarm_mutation_state::{
     PersistedSwarmMutationResponse, SwarmMutationRuntime, begin_or_replay, finish_request,
@@ -24,9 +25,26 @@ use std::sync::{Arc, Mutex as StdMutex, OnceLock, Weak};
 use std::time::Instant;
 use tokio::sync::{Mutex, RwLock, broadcast, mpsc};
 
-type SessionAgents = Arc<RwLock<HashMap<String, Arc<Mutex<Agent>>>>>;
+pub(super) type SessionAgents = super::SessionAgents;
 type ChannelSubscriptions = Arc<RwLock<HashMap<String, HashMap<String, HashSet<String>>>>>;
-type ClientConnections = Arc<RwLock<HashMap<String, ClientConnectionInfo>>>;
+pub(super) type ClientConnections = Arc<RwLock<HashMap<String, ClientConnectionInfo>>>;
+
+#[derive(Clone)]
+pub(super) struct AstraFirstSpawnContext {
+    pub(super) sessions: SessionAgents,
+    pub(super) global_session_id: Arc<RwLock<String>>,
+    pub(super) provider_template: Arc<dyn Provider>,
+    pub(super) swarm_members: Arc<RwLock<HashMap<String, SwarmMember>>>,
+    pub(super) swarms_by_id: Arc<RwLock<HashMap<String, HashSet<String>>>>,
+    pub(super) swarm_coordinators: Arc<RwLock<HashMap<String, String>>>,
+    pub(super) swarm_plans: Arc<RwLock<HashMap<String, VersionedPlan>>>,
+    pub(super) event_history: Arc<RwLock<std::collections::VecDeque<SwarmEvent>>>,
+    pub(super) event_counter: Arc<std::sync::atomic::AtomicU64>,
+    pub(super) swarm_event_tx: broadcast::Sender<SwarmEvent>,
+    pub(super) mcp_pool: Arc<crate::mcp::SharedMcpPool>,
+    pub(super) soft_interrupt_queues: SessionInterruptQueues,
+    pub(super) client_connections: ClientConnections,
+}
 
 /// A tool RPC must never await its caller's Agent mutex: the caller holds it
 /// throughout the turn while waiting for this response. Enforce the live policy
@@ -93,6 +111,7 @@ fn create_visible_spawn_session(
     provider_key_override: Option<&str>,
     route_api_method_override: Option<&str>,
     effort_override: Option<&str>,
+    parent_session_id: Option<&str>,
     selfdev_requested: bool,
 ) -> anyhow::Result<(String, PathBuf)> {
     if let Some(model) = model_override {
@@ -102,8 +121,11 @@ fn create_visible_spawn_session(
         .map(PathBuf::from)
         .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
 
-    let mut session =
-        Session::create_with_origin(None, None, crate::session::SessionOrigin::SwarmWorker);
+    let mut session = Session::create_with_origin(
+        parent_session_id.map(str::to_string),
+        None,
+        crate::session::SessionOrigin::SwarmWorker,
+    );
     session.working_dir = Some(cwd.display().to_string());
     if let Some(model) = model_override {
         session.model = Some(model.to_string());
@@ -263,7 +285,7 @@ async fn resolve_coordinator_spawn_identity(
 ) -> CoordinatorSpawnIdentity {
     if let Some(agent) = {
         let agent_sessions = sessions.read().await;
-        agent_sessions.get(req_session_id).cloned()
+        agent_sessions.get(req_session_id).map(|entry| entry.agent())
     } && let Ok(agent_guard) = agent.try_lock()
     {
         return CoordinatorSpawnIdentity {
@@ -422,6 +444,35 @@ fn resolve_swarm_spawn_selection(
     }
 }
 
+pub(super) async fn resolve_astra_first_identity(
+    req_session_id: &str,
+    requested_model: &str,
+    requested_effort: &str,
+    sessions: &SessionAgents,
+) -> anyhow::Result<AnalystIdentity> {
+    let coordinator = resolve_coordinator_spawn_identity(req_session_id, sessions).await;
+    let selection =
+        resolve_swarm_spawn_selection(Some(requested_model.trim().to_string()), None, &coordinator);
+    let model = selection
+        .model
+        .unwrap_or_else(|| requested_model.trim().to_string());
+    let route = selection.route_api_method.or_else(|| {
+        jcode_provider_core::is_chatgpt_web_model(&model).then(|| "chatgpt-web".to_string())
+    });
+    if route.is_none() {
+        anyhow::bail!(
+            "Astra-first analyst model '{}' has no explicit resolved route; use a route-qualified selector",
+            requested_model.trim()
+        );
+    }
+    crate::provider::ensure_model_route_enabled(&model, route.as_deref())?;
+    Ok(AnalystIdentity {
+        model,
+        route,
+        effort: Some(requested_effort.trim().to_string()),
+    })
+}
+
 fn persist_headed_startup_message(session_id: &str, message: &str) {
     crate::logging::info(&format!(
         "Headed spawn: persisting startup submission for {session_id} (chars={}) to client-input handoff file",
@@ -458,6 +509,7 @@ fn prepare_visible_spawn_session<F>(
     provider_key_override: Option<&str>,
     route_api_method_override: Option<&str>,
     effort_override: Option<&str>,
+    parent_session_id: Option<&str>,
     selfdev_requested: bool,
     startup_message: Option<&str>,
     launch_visible: F,
@@ -472,6 +524,7 @@ where
         provider_key.as_deref(),
         route_api_method_override,
         effort_override,
+        parent_session_id,
         selfdev_requested,
     )?;
 
@@ -625,10 +678,66 @@ pub(super) async fn spawn_swarm_agent(
     soft_interrupt_queues: &SessionInterruptQueues,
     client_connections: &ClientConnections,
 ) -> anyhow::Result<String> {
+    spawn_swarm_agent_with_route(
+        req_session_id,
+        swarm_id,
+        working_dir,
+        initial_message,
+        spawn_mode,
+        requested_model,
+        None,
+        requested_effort,
+        label,
+        sessions,
+        global_session_id,
+        provider_template,
+        swarm_members,
+        swarms_by_id,
+        swarm_coordinators,
+        swarm_plans,
+        event_history,
+        event_counter,
+        swarm_event_tx,
+        mcp_pool,
+        soft_interrupt_queues,
+        client_connections,
+    )
+    .await
+}
+
+async fn spawn_swarm_agent_with_route(
+    req_session_id: &str,
+    swarm_id: &str,
+    working_dir: Option<String>,
+    initial_message: Option<String>,
+    spawn_mode: Option<SwarmSpawnMode>,
+    requested_model: Option<String>,
+    resolved_route_api_method: Option<String>,
+    requested_effort: Option<String>,
+    label: Option<String>,
+    sessions: &SessionAgents,
+    global_session_id: &Arc<RwLock<String>>,
+    provider_template: &Arc<dyn Provider>,
+    swarm_members: &Arc<RwLock<HashMap<String, SwarmMember>>>,
+    swarms_by_id: &Arc<RwLock<HashMap<String, HashSet<String>>>>,
+    swarm_coordinators: &Arc<RwLock<HashMap<String, String>>>,
+    swarm_plans: &Arc<RwLock<HashMap<String, VersionedPlan>>>,
+    event_history: &Arc<RwLock<std::collections::VecDeque<SwarmEvent>>>,
+    event_counter: &Arc<std::sync::atomic::AtomicU64>,
+    swarm_event_tx: &broadcast::Sender<SwarmEvent>,
+    mcp_pool: &Arc<crate::mcp::SharedMcpPool>,
+    soft_interrupt_queues: &SessionInterruptQueues,
+    client_connections: &ClientConnections,
+) -> anyhow::Result<String> {
     let resolved_working_dir =
         resolve_spawn_working_dir(working_dir, req_session_id, sessions, swarm_members).await;
     let coordinator = resolve_coordinator_spawn_identity(req_session_id, sessions).await;
     let coordinator_is_canary = coordinator.is_canary;
+    let inherited_fast_state = sessions
+        .read()
+        .await
+        .get(req_session_id)
+        .map(|entry| entry.fast_state());
     // Capture the requesting client's terminal env so spawn hooks place the new
     // window in the terminal the user is attached to, not the server's stale
     // startup env (#405).
@@ -644,7 +753,7 @@ pub(super) async fn spawn_swarm_agent(
     );
     let spawn_model = selection.model.clone();
     let spawn_provider_key = selection.provider_key.clone();
-    let spawn_route_api_method = selection.route_api_method.clone();
+    let spawn_route_api_method = resolved_route_api_method.or(selection.route_api_method.clone());
     if let Some(model) = spawn_model.as_deref() {
         crate::provider::ensure_model_route_enabled(
             model.trim(),
@@ -685,6 +794,7 @@ pub(super) async fn spawn_swarm_agent(
             spawn_provider_key.as_deref(),
             spawn_route_api_method.as_deref(),
             spawn_effort.as_deref(),
+            Some(req_session_id),
             coordinator_is_canary,
             startup_message.as_deref(),
             |session_id, cwd, selfdev_requested, provider_key| {
@@ -732,6 +842,7 @@ pub(super) async fn spawn_swarm_agent(
                 Some(req_session_id.to_string()),
                 super::headless::HeadlessMemoryScope::RealProject,
                 crate::session::SessionOrigin::SwarmWorker,
+                inherited_fast_state,
             )
             .await
             .and_then(|result_json| {
@@ -800,7 +911,13 @@ pub(super) async fn spawn_swarm_agent(
 
     // The root, not its workers, now delegates repository inspection. Persist
     // the mode on the root session and install the registry-level boundary.
-    let root = { sessions.read().await.get(req_session_id).cloned() };
+    let root = {
+        sessions
+            .read()
+            .await
+            .get(req_session_id)
+            .map(|entry| entry.agent())
+    };
     if let Some(root) = root {
         if let Err(error) = update_root_read_boundary(root, req_session_id, true) {
             crate::logging::warn(&format!(
@@ -826,7 +943,9 @@ pub(super) async fn spawn_swarm_agent(
 
         let agent_arc = {
             let agent_sessions = sessions.read().await;
-            agent_sessions.get(&new_session_id).cloned()
+            agent_sessions
+                .get(&new_session_id)
+                .map(|entry| entry.agent())
         };
         if let Some(agent_arc) = agent_arc {
             let sid_clone = new_session_id.clone();
@@ -890,6 +1009,111 @@ pub(super) async fn spawn_swarm_agent(
     }
 
     Ok(new_session_id)
+}
+
+/// Spawn the one managed Astra-first analyst. This intentionally follows the
+/// ordinary swarm admission path, never supplies an initial prompt, and never
+/// emits a spawn approval event. The caller owns consent and only records the
+/// returned session after the actual model/route/effort are verified.
+#[allow(clippy::too_many_arguments)]
+pub(super) async fn spawn_astra_first_analyst(
+    request_id: u64,
+    req_session_id: &str,
+    working_dir: Option<String>,
+    model: String,
+    effort: String,
+    client_event_tx: &mpsc::UnboundedSender<ServerEvent>,
+    context: &AstraFirstSpawnContext,
+) -> anyhow::Result<String> {
+    let admission_key = context
+        .swarm_members
+        .read()
+        .await
+        .get(req_session_id)
+        .and_then(|member| member.swarm_id.clone())
+        .unwrap_or_else(|| req_session_id.to_string());
+    let admission_lock = spawn_admission_lock(&admission_key);
+    let admission_guard = admission_lock.lock().await;
+
+    let swarm_id = ensure_spawn_coordinator_swarm(
+        request_id,
+        req_session_id,
+        client_event_tx,
+        &context.swarm_members,
+        &context.swarms_by_id,
+        &context.swarm_coordinators,
+        &context.swarm_plans,
+        crate::config::config().agents.swarm_max_concurrent_agents,
+    )
+    .await
+    .ok_or_else(|| {
+        anyhow::anyhow!("Astra-first analyst admission could not enter the root swarm")
+    })?;
+
+    let expected =
+        resolve_astra_first_identity(req_session_id, &model, &effort, &context.sessions).await?;
+
+    let analyst_id = spawn_swarm_agent_with_route(
+        req_session_id,
+        &swarm_id,
+        working_dir,
+        None,
+        Some(SwarmSpawnMode::Headless),
+        Some(model.clone()),
+        expected.route.clone(),
+        Some(effort.clone()),
+        Some("astra-first analyst".to_string()),
+        &context.sessions,
+        &context.global_session_id,
+        &context.provider_template,
+        &context.swarm_members,
+        &context.swarms_by_id,
+        &context.swarm_coordinators,
+        &context.swarm_plans,
+        &context.event_history,
+        &context.event_counter,
+        &context.swarm_event_tx,
+        &context.mcp_pool,
+        &context.soft_interrupt_queues,
+        &context.client_connections,
+    )
+    .await?;
+    drop(admission_guard);
+
+    let analyst = context
+        .sessions
+        .read()
+        .await
+        .get(&analyst_id)
+        .cloned()
+        .ok_or_else(|| anyhow::anyhow!("Astra-first analyst session disappeared after spawn"))?;
+    {
+        let analyst_guard = analyst.lock().await;
+        if analyst_guard.session_for_split().origin() != crate::session::SessionOrigin::SwarmWorker
+            || analyst_guard.session_for_split().parent_id.as_deref() != Some(req_session_id)
+        {
+            anyhow::bail!("Astra-first analyst provenance did not match the requesting root");
+        }
+        let actual = AnalystIdentity {
+            model: analyst_guard.provider_model(),
+            route: analyst_guard.session_route_api_method(),
+            effort: analyst_guard.provider_reasoning_effort(),
+        };
+        validate_analyst_identity(&expected, &actual)?;
+    }
+
+    let report_back_matches = context
+        .swarm_members
+        .read()
+        .await
+        .get(&analyst_id)
+        .and_then(|member| member.report_back_to_session_id.as_deref())
+        == Some(req_session_id);
+    if !report_back_matches {
+        anyhow::bail!("Astra-first analyst report-back ownership mismatch");
+    }
+
+    Ok(analyst_id)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1039,7 +1263,12 @@ pub(super) async fn handle_comm_single_agent(
         .await
         .get(&requesting_session_id)
         .is_some_and(|member| member.report_back_to_session_id.is_none());
-    let Some(agent) = sessions.read().await.get(&requesting_session_id).cloned() else {
+    let Some(agent) = sessions
+        .read()
+        .await
+        .get(&requesting_session_id)
+        .map(|entry| entry.agent())
+    else {
         let _ = client_event_tx.send(ServerEvent::Error {
             id,
             message: "Single-agent override requires the current root session to be live."
@@ -1095,7 +1324,7 @@ pub(super) async fn handle_comm_list_models(
 
     let agent = {
         let agent_sessions = sessions.read().await;
-        agent_sessions.get(req_session_id).cloned()
+        agent_sessions.get(req_session_id).map(|entry| entry.agent())
     };
     let model_routes = match agent.as_ref().and_then(|agent| agent.try_lock().ok()) {
         Some(agent_guard) => agent_guard.model_routes(),
@@ -1214,7 +1443,7 @@ pub(super) async fn handle_comm_stop(
         return;
     };
 
-    let removed_agent = super::remove_session_entry(sessions, &target_session).await;
+    let removed_agent = super::remove_session_agent_entry(sessions, &target_session).await;
     let removed_live_agent = removed_agent.is_some();
     if let Some(agent_arc) = removed_agent {
         remove_session_interrupt_queue(soft_interrupt_queues, &target_session).await;

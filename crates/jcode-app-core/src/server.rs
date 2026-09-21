@@ -1,3 +1,4 @@
+mod astra_first;
 mod available_models_dedup;
 mod await_members_state;
 mod background_tasks;
@@ -106,11 +107,228 @@ use jcode_swarm_core::{
 };
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::ops::Deref;
+use std::sync::{Arc, RwLock as StdRwLock};
 use std::time::{Duration, Instant};
 use tokio::sync::{Mutex, OnceCell, RwLock, broadcast, mpsc};
 
-pub(super) type SessionAgents = Arc<RwLock<HashMap<String, Arc<Mutex<Agent>>>>>;
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum RuntimeFastTier {
+    Ordinary,
+    Priority,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct RuntimeFastSnapshot {
+    pub(super) tier: RuntimeFastTier,
+    pub(super) valid: bool,
+    pub(super) retired: bool,
+}
+
+/// Lock-free runtime ownership and tier state for one session root.
+///
+/// Workers retain the same Arc as their owning root, so a root removal can
+/// invalidate every descendant without waiting for any Agent mutex. The
+/// provider/session map stores this beside the Agent Arc rather than in a
+/// second registry.
+pub(super) struct RuntimeFastState {
+    owner_root_session_id: String,
+    snapshot: StdRwLock<RuntimeFastSnapshot>,
+}
+
+impl RuntimeFastState {
+    pub(super) fn from_provider(
+        owner_root_session_id: impl Into<String>,
+        provider: &dyn Provider,
+    ) -> Arc<Self> {
+        let service_tier = provider.service_tier();
+        let tier = match service_tier.as_deref() {
+            Some("priority") => RuntimeFastTier::Priority,
+            _ => RuntimeFastTier::Ordinary,
+        };
+        let valid = provider.supports_scoped_service_tier_override();
+        Arc::new(Self {
+            owner_root_session_id: owner_root_session_id.into(),
+            snapshot: StdRwLock::new(RuntimeFastSnapshot {
+                tier,
+                valid,
+                retired: false,
+            }),
+        })
+    }
+
+    pub(super) fn invalid(owner_root_session_id: impl Into<String>) -> Arc<Self> {
+        Arc::new(Self {
+            owner_root_session_id: owner_root_session_id.into(),
+            snapshot: StdRwLock::new(RuntimeFastSnapshot {
+                tier: RuntimeFastTier::Ordinary,
+                valid: false,
+                retired: true,
+            }),
+        })
+    }
+
+    pub(super) fn owner_root_session_id(&self) -> &str {
+        &self.owner_root_session_id
+    }
+
+    pub(super) fn snapshot(&self) -> RuntimeFastSnapshot {
+        self.snapshot
+            .read()
+            .map(|guard| *guard)
+            .unwrap_or(RuntimeFastSnapshot {
+                tier: RuntimeFastTier::Ordinary,
+                valid: false,
+                retired: true,
+            })
+    }
+
+    pub(super) fn publish(&self, tier: RuntimeFastTier) {
+        if let Ok(mut snapshot) = self.snapshot.write() {
+            if snapshot.retired {
+                return;
+            }
+            *snapshot = RuntimeFastSnapshot {
+                tier,
+                valid: true,
+                retired: false,
+            };
+        }
+    }
+
+    pub(super) fn publish_from_provider(&self, provider: &dyn Provider) {
+        let service_tier = provider.service_tier();
+        let tier = match service_tier.as_deref() {
+            Some("priority") => RuntimeFastTier::Priority,
+            _ => RuntimeFastTier::Ordinary,
+        };
+        let valid = provider.supports_scoped_service_tier_override();
+        if let Ok(mut snapshot) = self.snapshot.write() {
+            if snapshot.retired {
+                return;
+            }
+            *snapshot = RuntimeFastSnapshot {
+                tier,
+                valid,
+                retired: false,
+            };
+        }
+    }
+
+    pub(super) fn invalidate(&self) {
+        if let Ok(mut snapshot) = self.snapshot.write() {
+            snapshot.valid = false;
+            snapshot.retired = true;
+        }
+    }
+}
+
+fn is_native_fast_model(model: &str) -> bool {
+    matches!(model.trim(), "gpt-6-astra" | "gpt-5.6-luna")
+}
+
+/// Apply the provider-local fast policy at a safe admitted-turn boundary.
+///
+/// Main sessions mirror their already-applied provider tier. Swarm workers
+/// require durable worker provenance and an owning root fast-state handle, then
+/// apply Luna=priority or Astra=the owning root snapshot. Unsupported routes
+/// deliberately clear/ignore the scoped override and keep their existing
+/// provider behavior.
+pub(super) fn apply_runtime_fast_policy(
+    provider: &dyn Provider,
+    session: &crate::session::Session,
+    owner_state: Option<&RuntimeFastState>,
+) -> Result<bool> {
+    let model = provider.model();
+    let native_model = is_native_fast_model(&model);
+
+    if session.origin() == crate::session::SessionOrigin::SwarmWorker {
+        // Route scope is decided before provenance validation. Unsupported,
+        // Web, and unrelated providers have no scoped native fast policy and
+        // must remain a harmless no-op even when worker ownership metadata is
+        // absent or stale.
+        if !native_model || !provider.supports_scoped_service_tier_override() {
+            let _ = provider.set_scoped_service_tier_override(None);
+            return Ok(false);
+        }
+
+        let Some(parent_id) = session.parent_id.as_deref().filter(|id| !id.is_empty()) else {
+            anyhow::bail!(
+                "Cannot apply scoped fast tier for worker {}: missing authorized parent provenance",
+                session.id
+            );
+        };
+        let Some(owner_state) = owner_state else {
+            anyhow::bail!(
+                "Cannot apply scoped fast tier for worker {}: owning root {} is not resident",
+                session.id,
+                parent_id
+            );
+        };
+        let snapshot = owner_state.snapshot();
+        if snapshot.retired || !snapshot.valid || owner_state.owner_root_session_id() == session.id {
+            anyhow::bail!(
+                "Cannot apply scoped fast tier for worker {}: owning root {} is invalid",
+                session.id,
+                owner_state.owner_root_session_id()
+            );
+        }
+
+        let tier = if model.trim() == "gpt-5.6-luna" {
+            RuntimeFastTier::Priority
+        } else {
+            snapshot.tier
+        };
+        let override_tier = match tier {
+            RuntimeFastTier::Ordinary => Some(None),
+            RuntimeFastTier::Priority => Some(Some("priority".to_string())),
+        };
+        provider.set_scoped_service_tier_override(override_tier)?;
+        return Ok(true);
+    }
+
+    if provider.supports_scoped_service_tier_override() && native_model {
+        let override_tier = match provider.service_tier().as_deref() {
+            Some("priority") => Some(Some("priority".to_string())),
+            Some("flex") => None,
+            _ => Some(None),
+        };
+        provider.set_scoped_service_tier_override(override_tier)?;
+    } else {
+        let _ = provider.set_scoped_service_tier_override(None);
+    }
+    Ok(false)
+}
+
+#[derive(Clone)]
+pub(super) struct SessionAgentEntry {
+    pub(super) agent: Arc<Mutex<Agent>>,
+    pub(super) fast_state: Arc<RuntimeFastState>,
+}
+
+impl SessionAgentEntry {
+    pub(super) fn new(agent: Arc<Mutex<Agent>>, fast_state: Arc<RuntimeFastState>) -> Self {
+        Self { agent, fast_state }
+    }
+
+    pub(super) fn agent(&self) -> Arc<Mutex<Agent>> {
+        Arc::clone(&self.agent)
+    }
+
+    pub(super) fn fast_state(&self) -> Arc<RuntimeFastState> {
+        Arc::clone(&self.fast_state)
+    }
+}
+
+impl Deref for SessionAgentEntry {
+    type Target = Arc<Mutex<Agent>>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.agent
+    }
+}
+
+pub(super) type SessionAgents = Arc<RwLock<HashMap<String, SessionAgentEntry>>>;
 pub(super) type ChannelSubscriptions =
     Arc<RwLock<HashMap<String, HashMap<String, HashSet<String>>>>>;
 
@@ -140,6 +358,25 @@ pub(super) async fn remove_session_entry<T>(
     session_id: &str,
 ) -> Option<T> {
     let removed = sessions.write().await.remove(session_id);
+    if removed.is_some() {
+        crate::storage::unregister_active_pid(session_id);
+    }
+    removed
+}
+
+pub(super) async fn remove_session_agent_entry(
+    sessions: &SessionAgents,
+    session_id: &str,
+) -> Option<SessionAgentEntry> {
+    let removed = {
+        let mut sessions_guard = sessions.write().await;
+        if let Some(entry) = sessions_guard.get(session_id)
+            && entry.fast_state.owner_root_session_id() == session_id
+        {
+            entry.fast_state.invalidate();
+        }
+        sessions_guard.remove(session_id)
+    };
     if removed.is_some() {
         crate::storage::unregister_active_pid(session_id);
     }
@@ -278,7 +515,7 @@ async fn reap_idle_spawned_workers(
         )
         .await;
 
-        if let Some(agent_arc) = remove_session_entry(sessions, &session_id).await {
+        if let Some(agent_arc) = remove_session_agent_entry(sessions, &session_id).await {
             remove_session_interrupt_queue(soft_interrupt_queues, &session_id).await;
             remove_background_tool_signal(&session_id);
             if let Ok(mut agent) = agent_arc.try_lock() {
@@ -699,8 +936,8 @@ pub struct Server {
     identity: ServerIdentity,
     /// Broadcast channel for streaming events to all subscribers
     event_tx: broadcast::Sender<ServerEvent>,
-    /// Active sessions (session_id -> Agent)
-    sessions: Arc<RwLock<HashMap<String, Arc<Mutex<Agent>>>>>,
+    /// Active sessions (session_id -> Agent plus lock-free runtime metadata)
+    sessions: SessionAgents,
     /// Current processing state
     is_processing: Arc<RwLock<bool>>,
     /// Session ID for the default session
@@ -968,16 +1205,54 @@ impl Server {
                 )
                 .await;
 
+            let session_origin = session.origin();
+            let session_parent_id = session.parent_id.clone();
+            let inherited_fast_state = if session_origin == crate::session::SessionOrigin::SwarmWorker
+            {
+                let sessions = self.sessions.read().await;
+                session_parent_id
+                    .as_deref()
+                    .and_then(|parent_id| sessions.get(parent_id).map(|entry| entry.fast_state()))
+            } else {
+                None
+            };
             let agent = Arc::new(Mutex::new(Agent::new_with_session(
                 provider, registry, session, None,
             )));
+            let (fast_state, fast_policy_error) = {
+                let agent_guard = agent.lock().await;
+                let session = agent_guard.session_for_split();
+                let provider = agent_guard.provider_handle();
+                let policy = apply_runtime_fast_policy(
+                    provider.as_ref(),
+                    session,
+                    inherited_fast_state.as_deref(),
+                );
+                let state = if session.origin() == crate::session::SessionOrigin::SwarmWorker {
+                    inherited_fast_state
+                        .clone()
+                        .unwrap_or_else(|| RuntimeFastState::invalid(session_id.clone()))
+                } else {
+                    RuntimeFastState::from_provider(session_id.clone(), provider.as_ref())
+                };
+                (state, policy.err())
+            };
+            if let Some(error) = fast_policy_error {
+                crate::logging::warn(&format!(
+                    "Headless session {} fast policy unavailable during startup recovery: {}",
+                    session_id, error
+                ));
+            }
 
             {
                 let mut sessions = self.sessions.write().await;
                 if sessions.contains_key(&session_id) {
                     continue;
                 }
-                sessions.insert(session_id.clone(), Arc::clone(&agent));
+                sessions.insert(
+                    session_id.clone(),
+                    SessionAgentEntry::new(Arc::clone(&agent), fast_state),
+                );
             }
 
             {
@@ -1968,7 +2243,7 @@ impl Server {
         _swarm_plans: Arc<RwLock<HashMap<String, VersionedPlan>>>,
         _swarm_coordinators: Arc<RwLock<HashMap<String, String>>>,
         _shared_context: Arc<RwLock<HashMap<String, HashMap<String, SharedContext>>>>,
-        sessions: Arc<RwLock<HashMap<String, Arc<Mutex<Agent>>>>>,
+        sessions: SessionAgents,
         soft_interrupt_queues: SessionInterruptQueues,
         event_history: Arc<RwLock<std::collections::VecDeque<SwarmEvent>>>,
         event_counter: Arc<std::sync::atomic::AtomicU64>,
@@ -2443,7 +2718,7 @@ impl Server {
     }
 
     async fn adopt_session_worktree(
-        sessions: &Arc<RwLock<HashMap<String, Arc<Mutex<Agent>>>>>,
+        sessions: &SessionAgents,
         swarm_members: &Arc<RwLock<HashMap<String, SwarmMember>>>,
         session_id: &str,
         worktree_root: String,
@@ -2467,7 +2742,11 @@ impl Server {
             return;
         }
 
-        let agent = sessions.read().await.get(session_id).cloned();
+        let agent = sessions
+            .read()
+            .await
+            .get(session_id)
+            .map(|entry| entry.agent());
         if let Some(agent) = agent {
             if let Ok(mut agent) = agent.try_lock() {
                 agent.set_working_dir(&worktree_root);

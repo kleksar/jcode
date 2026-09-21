@@ -19,6 +19,7 @@ async fn initiative_tool_create_and_resume_round_trip() {
         stdin_request_tx: None,
         graceful_shutdown_signal: None,
         execution_mode: crate::tool::ToolExecutionMode::AgentTurn,
+        inline_swarm_await: None,
     };
 
     let mut bus_rx = Bus::global().subscribe();
@@ -100,6 +101,7 @@ async fn initiative_tool_list_does_not_open_side_panel_by_default() {
         stdin_request_tx: None,
         graceful_shutdown_signal: None,
         execution_mode: crate::tool::ToolExecutionMode::AgentTurn,
+        inline_swarm_await: None,
     };
 
     let list = tool
@@ -152,6 +154,7 @@ async fn initiative_tool_update_refreshes_open_overview_without_stealing_focus()
         stdin_request_tx: None,
         graceful_shutdown_signal: None,
         execution_mode: crate::tool::ToolExecutionMode::AgentTurn,
+        inline_swarm_await: None,
     };
 
     // The user opens the overview explicitly (e.g. via /goals); the tool

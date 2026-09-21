@@ -4,7 +4,9 @@ fn assistant_tool_use(id: &str, name: &str, input: serde_json::Value) -> ChatMes
         content: vec![ContentBlock::ToolUse {
             id: id.to_string(),
             name: name.to_string(),
-            input, thought_signature: None, }],
+            input,
+            thought_signature: None,
+        }],
         timestamp: None,
         tool_duration_ms: None,
     }
@@ -106,6 +108,82 @@ fn model_service_tier_fast_override_wins_over_session_off_for_luna() {
         OpenAIProvider::normalize_service_tier("fast").unwrap(),
     )]));
     provider.set_service_tier("off").unwrap();
+
+    let request = provider.response_request_for_model("gpt-5.6-luna", &[], &[], "system", false);
+
+    assert_eq!(request["service_tier"], serde_json::json!("priority"));
+}
+
+#[test]
+fn scoped_service_tier_ordinary_defeats_model_priority_and_preserves_effort() {
+    let provider = provider_with_model_service_tiers(HashMap::from([(
+        "gpt-5.6-luna".to_string(),
+        Some("priority".to_string()),
+    )]));
+    provider.set_reasoning_effort("high").unwrap();
+    provider
+        .set_scoped_service_tier_override(Some(None))
+        .unwrap();
+
+    let request = provider.response_request_for_model("gpt-5.6-luna", &[], &[], "system", false);
+
+    assert!(request.get("service_tier").is_none());
+    assert_eq!(request["reasoning"]["effort"], serde_json::json!("high"));
+}
+
+#[test]
+fn scoped_service_tier_priority_is_serialized_and_clear_restores_model_precedence() {
+    let provider =
+        provider_with_model_service_tiers(HashMap::from([("gpt-5.6-luna".to_string(), None)]));
+    provider.set_service_tier("flex").unwrap();
+    provider
+        .set_scoped_service_tier_override(Some(Some("priority".to_string())))
+        .unwrap();
+
+    let forced = provider.response_request_for_model("gpt-5.6-luna", &[], &[], "system", false);
+    assert_eq!(forced["service_tier"], serde_json::json!("priority"));
+
+    provider.set_scoped_service_tier_override(None).unwrap();
+    let cleared = provider.response_request_for_model("gpt-5.6-luna", &[], &[], "system", false);
+    assert!(cleared.get("service_tier").is_none());
+}
+
+#[test]
+fn scoped_service_tier_fork_retains_initial_value_but_isolation_holds() {
+    let provider = provider_with_model_service_tiers(HashMap::from([(
+        "gpt-5.6-luna".to_string(),
+        Some("priority".to_string()),
+    )]));
+    provider
+        .set_scoped_service_tier_override(Some(None))
+        .unwrap();
+    let fork = provider.fork_openai();
+
+    provider
+        .set_scoped_service_tier_override(Some(Some("priority".to_string())))
+        .unwrap();
+    let parent_request =
+        provider.response_request_for_model("gpt-5.6-luna", &[], &[], "system", false);
+    let fork_request = fork.response_request_for_model("gpt-5.6-luna", &[], &[], "system", false);
+
+    assert_eq!(
+        parent_request["service_tier"],
+        serde_json::json!("priority")
+    );
+    assert!(fork_request.get("service_tier").is_none());
+}
+
+#[test]
+fn scoped_service_tier_is_cleared_on_model_switch() {
+    let provider = provider_with_model_service_tiers(HashMap::from([(
+        "gpt-5.6-luna".to_string(),
+        Some("priority".to_string()),
+    )]));
+    provider
+        .set_scoped_service_tier_override(Some(None))
+        .unwrap();
+    provider.set_model("gpt-5.6-sol").unwrap();
+    provider.set_model("gpt-5.6-luna").unwrap();
 
     let request = provider.response_request_for_model("gpt-5.6-luna", &[], &[], "system", false);
 
@@ -296,8 +374,8 @@ fn test_build_responses_input_keeps_image_context_after_tool_output() {
 
 #[test]
 fn test_build_responses_input_replaces_oversized_native_compaction_with_text() {
-    let oversized =
-        "x".repeat(jcode_base::provider::openai_request::OPENAI_ENCRYPTED_CONTENT_SAFE_MAX_CHARS + 1);
+    let oversized = "x"
+        .repeat(jcode_base::provider::openai_request::OPENAI_ENCRYPTED_CONTENT_SAFE_MAX_CHARS + 1);
     let messages = vec![ChatMessage {
         role: Role::User,
         content: vec![ContentBlock::OpenAICompaction {

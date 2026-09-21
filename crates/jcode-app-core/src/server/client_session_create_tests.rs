@@ -390,7 +390,13 @@ async fn clean_session_creation_does_not_wait_for_busy_source() {
     sessions
         .write()
         .await
-        .insert(source_id.clone(), Arc::clone(&source));
+        .insert(
+            source_id.clone(),
+            crate::server::SessionAgentEntry::new(
+                Arc::clone(&source),
+                crate::server::RuntimeFastState::invalid(source_id.clone()),
+            ),
+        );
     let busy_source = source.lock().await;
 
     let (client_stream, server_task, _state) =
@@ -464,7 +470,13 @@ async fn clean_session_first_message_is_persisted_once_and_starts_one_turn() {
     sessions
         .write()
         .await
-        .insert(source_id.clone(), Arc::clone(&source));
+        .insert(
+            source_id.clone(),
+            crate::server::SessionAgentEntry::new(
+                Arc::clone(&source),
+                crate::server::RuntimeFastState::invalid(source_id.clone()),
+            ),
+        );
 
     let (client_stream, server_task, _state) =
         start_clean_session_client(Arc::clone(&provider), Arc::clone(&sessions)).await;

@@ -110,6 +110,20 @@ impl Agent {
         self.append_user_context_message_with_display_role(user_message, images, None)
     }
 
+    /// Persist an externally relayed final without starting another provider
+    /// turn. Astra-first uses this only after the root turn and the same
+    /// analyst have both completed, so the user-visible final is exact.
+    pub(crate) fn append_relayed_assistant(&mut self, text: &str) -> Result<()> {
+        self.add_message(
+            Role::Assistant,
+            vec![ContentBlock::Text {
+                text: text.to_string(),
+                cache_control: None,
+            }],
+        );
+        self.session.save()
+    }
+
     fn append_user_context_message_with_display_role(
         &mut self,
         user_message: &str,
@@ -211,6 +225,7 @@ impl Agent {
         new_session.ensure_initial_session_context_message();
 
         self.session = new_session;
+        self.reset_astra_first_state();
         self.begin_concurrency_tracking();
         self._tool_policy_registration = crate::tool::register_session_tool_policy(
             &self.session.id,
@@ -585,6 +600,7 @@ impl Agent {
             stdin_request_tx: self.stdin_request_tx.clone(),
             graceful_shutdown_signal: Some(self.graceful_shutdown.clone()),
             execution_mode: ToolExecutionMode::Direct,
+            inline_swarm_await: None,
         };
         self.registry.execute(name, input, ctx).await
     }
@@ -662,6 +678,7 @@ impl Agent {
         working_dir: Option<&str>,
     ) -> Result<SessionStatus> {
         let restore_start = Instant::now();
+        let previous_session_id = self.session.id.clone();
         let load_start = Instant::now();
         let mut session = Session::load(session_id)?;
         if let Some(working_dir) = working_dir {
@@ -754,6 +771,12 @@ impl Agent {
             ));
         }
         let save_ms = save_start.elapsed().as_millis();
+
+        // A successful cold restore changes the root session identity. Do not
+        // carry the previous root's Astra generation or analyst handle into
+        // the newly restored session. The client lifecycle rebinds to this
+        // fresh shared handle after restore returns.
+        self.reset_astra_first_state_if_session_changed(&previous_session_id);
 
         logging::info(&format!(
             "[TIMING] restore_session: session={}, messages={}, restored_soft_interrupts={}, load={}ms, assign={}ms, reset={}ms, model={}ms, mark_active={}ms, compaction={}ms, env_snapshot={}ms, save={}ms, total={}ms",

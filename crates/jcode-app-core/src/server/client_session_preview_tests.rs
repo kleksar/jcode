@@ -3,7 +3,7 @@ use crate::agent::Agent;
 use crate::message::{ContentBlock, Message, ToolDefinition};
 use crate::protocol::ServerEvent;
 use crate::provider::{EventStream, Provider};
-use crate::server::{ClientConnectionInfo, SessionAgents};
+use crate::server::{ClientConnectionInfo, RuntimeFastState, SessionAgentEntry, SessionAgents};
 use crate::tool::Registry;
 use anyhow::Result;
 use async_trait::async_trait;
@@ -91,9 +91,12 @@ async fn session_preview_bounds_the_rendered_tail_and_wire_payload() {
         session.append_stored_message(stored_text(index, format!("message-{index}")));
     }
     let agent = live_agent(session);
-    let sessions = Arc::new(RwLock::new(HashMap::from([(
+    let sessions = Arc::new(RwLock::new(HashMap::<String, crate::server::SessionAgentEntry>::from([(
         session_id.to_string(),
-        agent,
+        crate::server::SessionAgentEntry::new(
+            agent,
+            RuntimeFastState::invalid(session_id.to_string()),
+        ),
     )])));
     let event = request_preview(7, session_id, u16::MAX, &sessions, &empty_connections()).await;
 
@@ -157,9 +160,15 @@ async fn session_preview_omits_image_data_but_keeps_an_attachment_label() {
         tool_duration_ms: None,
         token_usage: None,
     });
-    let sessions = Arc::new(RwLock::new(HashMap::from([(
+    let sessions = Arc::new(RwLock::new(HashMap::<String, crate::server::SessionAgentEntry>::from([(
         session_id.to_string(),
-        live_agent(session),
+        {
+            let agent = live_agent(session);
+            crate::server::SessionAgentEntry::new(
+                agent,
+                RuntimeFastState::invalid(session_id.to_string()),
+            )
+        },
     )])));
     let event = request_preview(8, session_id, 20, &sessions, &empty_connections()).await;
     let wire = crate::protocol::encode_event(&event);
@@ -192,9 +201,12 @@ async fn busy_session_without_persisted_snapshot_returns_temporary_error_without
     if journal.exists() {
         std::fs::remove_file(journal).expect("remove automatic session journal");
     }
-    let sessions = Arc::new(RwLock::new(HashMap::from([(
+    let sessions = Arc::new(RwLock::new(HashMap::<String, crate::server::SessionAgentEntry>::from([(
         session_id.to_string(),
-        Arc::clone(&agent),
+        crate::server::SessionAgentEntry::new(
+            Arc::clone(&agent),
+            RuntimeFastState::invalid(session_id.to_string()),
+        ),
     )])));
     let (tx, mut rx) = mpsc::unbounded_channel();
     let held_lock = agent.lock().await;

@@ -109,9 +109,12 @@ async fn failed_server_resume_keeps_original_concurrency_owner() -> Result<()> {
     let registry = Registry::new(provider.clone()).await;
     let source = Arc::new(Mutex::new(Agent::new(provider.clone(), registry.clone())));
     let source_id = source.lock().await.session_id().to_owned();
-    let sessions = Arc::new(RwLock::new(HashMap::from([(
+    let sessions = Arc::new(RwLock::new(HashMap::<String, crate::server::SessionAgentEntry>::from([(
         source_id.clone(),
-        source.clone(),
+        crate::server::SessionAgentEntry::new(
+            source.clone(),
+            crate::server::RuntimeFastState::invalid(source_id.clone()),
+        ),
     )])));
     let restored = restore_for_concurrency_test(
         "missing-concurrency-target",
@@ -145,9 +148,21 @@ async fn viewer_attach_reuses_live_owner_without_tracking_placeholder() -> Resul
         None,
     )));
     let placeholder_id = placeholder.lock().await.session_id().to_owned();
-    let sessions = Arc::new(RwLock::new(HashMap::from([
-        (live_id.clone(), live.clone()),
-        (placeholder_id, placeholder.clone()),
+    let sessions = Arc::new(RwLock::new(HashMap::<String, crate::server::SessionAgentEntry>::from([
+        (
+            live_id.clone(),
+            crate::server::SessionAgentEntry::new(
+                live.clone(),
+                crate::server::RuntimeFastState::invalid(live_id.clone()),
+            ),
+        ),
+        (
+            placeholder_id.clone(),
+            crate::server::SessionAgentEntry::new(
+                placeholder.clone(),
+                crate::server::RuntimeFastState::invalid(placeholder_id),
+            ),
+        ),
     ])));
     assert!(!placeholder.lock().await.has_concurrency_tracking());
     let attached =

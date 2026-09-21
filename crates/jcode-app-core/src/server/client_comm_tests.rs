@@ -7,7 +7,9 @@ use crate::protocol::{
     CommDeliveryMode, NotificationType, ServerEvent, default_comm_await_target_statuses,
 };
 use crate::provider::{EventStream, Provider};
-use crate::server::{ClientConnectionInfo, SessionInterruptQueues, SwarmEvent, SwarmMember};
+use crate::server::{
+    ClientConnectionInfo, SessionAgentEntry, SessionInterruptQueues, SwarmEvent, SwarmMember,
+};
 use crate::tool::Registry;
 use anyhow::Result;
 use async_trait::async_trait;
@@ -57,8 +59,20 @@ async fn comm_message_default_does_not_queue_soft_interrupt_for_connected_sessio
     let target_queue = target.lock().await.soft_interrupt_queue();
 
     let sessions = Arc::new(RwLock::new(HashMap::from([
-        (sender_id.clone(), sender.clone()),
-        (target_id.clone(), target.clone()),
+        (
+            sender_id.clone(),
+            SessionAgentEntry::new(
+                sender.clone(),
+                crate::server::RuntimeFastState::invalid(sender_id.clone()),
+            ),
+        ),
+        (
+            target_id.clone(),
+            SessionAgentEntry::new(
+                target.clone(),
+                crate::server::RuntimeFastState::invalid(target_id.clone()),
+            ),
+        ),
     ])));
     let soft_interrupt_queues: SessionInterruptQueues = Arc::new(RwLock::new(HashMap::new()));
 
@@ -260,8 +274,20 @@ async fn assert_pending_wake_freshness(wake_mode: &str, initial_status: &str) {
     let target_queue = target.lock().await.soft_interrupt_queue();
 
     let sessions = Arc::new(RwLock::new(HashMap::from([
-        (sender_id.clone(), sender.clone()),
-        (target_id.clone(), target.clone()),
+        (
+            sender_id.clone(),
+            SessionAgentEntry::new(
+                sender.clone(),
+                crate::server::RuntimeFastState::invalid(sender_id.clone()),
+            ),
+        ),
+        (
+            target_id.clone(),
+            SessionAgentEntry::new(
+                target.clone(),
+                crate::server::RuntimeFastState::invalid(target_id.clone()),
+            ),
+        ),
     ])));
     let soft_interrupt_queues: SessionInterruptQueues = Arc::new(RwLock::new(HashMap::new()));
     crate::server::register_session_interrupt_queue(
@@ -582,8 +608,20 @@ async fn comm_list_includes_member_status_and_detail() {
     )])));
     let file_touch = crate::server::FileTouchService::new();
     let sessions = Arc::new(RwLock::new(HashMap::from([
-        (requester_id.clone(), requester.clone()),
-        (peer_id.clone(), peer.clone()),
+        (
+            requester_id.clone(),
+            SessionAgentEntry::new(
+                requester.clone(),
+                crate::server::RuntimeFastState::invalid(requester_id.clone()),
+            ),
+        ),
+        (
+            peer_id.clone(),
+            SessionAgentEntry::new(
+                peer.clone(),
+                crate::server::RuntimeFastState::invalid(peer_id.clone()),
+            ),
+        ),
     ])));
     let client_connections = Arc::new(RwLock::new(HashMap::new()));
 
@@ -623,8 +661,20 @@ async fn comm_message_accepts_friendly_name_dm_target() {
     let swarm_id = "swarm-test".to_string();
 
     let sessions = Arc::new(RwLock::new(HashMap::from([
-        (sender_id.clone(), sender.clone()),
-        (target_id.clone(), target.clone()),
+        (
+            sender_id.clone(),
+            SessionAgentEntry::new(
+                sender.clone(),
+                crate::server::RuntimeFastState::invalid(sender_id.clone()),
+            ),
+        ),
+        (
+            target_id.clone(),
+            SessionAgentEntry::new(
+                target.clone(),
+                crate::server::RuntimeFastState::invalid(target_id.clone()),
+            ),
+        ),
     ])));
     let soft_interrupt_queues: SessionInterruptQueues = Arc::new(RwLock::new(HashMap::new()));
 
@@ -756,9 +806,27 @@ async fn comm_message_rejects_ambiguous_friendly_name_dm_target() {
     let swarm_id = "swarm-test".to_string();
 
     let sessions = Arc::new(RwLock::new(HashMap::from([
-        (sender_id.clone(), sender.clone()),
-        (target_one_id.clone(), target_one.clone()),
-        (target_two_id.clone(), target_two.clone()),
+        (
+            sender_id.clone(),
+            SessionAgentEntry::new(
+                sender.clone(),
+                crate::server::RuntimeFastState::invalid(sender_id.clone()),
+            ),
+        ),
+        (
+            target_one_id.clone(),
+            SessionAgentEntry::new(
+                target_one.clone(),
+                crate::server::RuntimeFastState::invalid(target_one_id.clone()),
+            ),
+        ),
+        (
+            target_two_id.clone(),
+            SessionAgentEntry::new(
+                target_two.clone(),
+                crate::server::RuntimeFastState::invalid(target_two_id.clone()),
+            ),
+        ),
     ])));
     let soft_interrupt_queues: SessionInterruptQueues = Arc::new(RwLock::new(HashMap::new()));
 

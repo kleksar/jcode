@@ -27,7 +27,7 @@ pub(super) async fn handle_get_session_preview(
     let limit = usize::from(requested_limit).min(MAX_SESSION_PREVIEW_MESSAGES);
     let target_agent = {
         let sessions = sessions.read().await;
-        sessions.get(target_session_id).cloned()
+        sessions.get(target_session_id).map(|entry| entry.agent())
     };
 
     let activity = session_activity_snapshot(client_connections, target_session_id, false)

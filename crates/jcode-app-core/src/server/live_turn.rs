@@ -25,7 +25,7 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
 use tokio::sync::{Mutex, OwnedMutexGuard, RwLock, broadcast};
 
-type SessionAgents = Arc<RwLock<HashMap<String, Arc<Mutex<Agent>>>>>;
+type SessionAgents = super::SessionAgents;
 
 /// Swarm bookkeeping handles needed to keep member status accurate around a
 /// server-initiated turn.
@@ -69,7 +69,7 @@ pub(super) async fn idle_live_agent(
 ) -> Option<OwnedMutexGuard<Agent>> {
     let agent = {
         let guard = sessions.read().await;
-        guard.get(session_id).cloned()
+        guard.get(session_id).map(|entry| entry.agent())
     }?;
 
     let has_live_attachments = {
@@ -95,6 +95,7 @@ pub(super) async fn idle_live_agent(
 /// finish rendering the externally started turn.
 pub(super) async fn spawn_tracked_live_turn(
     session_id: &str,
+    sessions: &SessionAgents,
     mut agent: OwnedMutexGuard<Agent>,
     message: String,
     system_reminder: Option<String>,
@@ -116,28 +117,53 @@ pub(super) async fn spawn_tracked_live_turn(
 
     let event_tx = session_event_fanout_sender(session_id.to_string(), Arc::clone(&swarm.members));
     let session_id = session_id.to_string();
+    let sessions = Arc::clone(sessions);
     tokio::spawn(async move {
         let start_message_index = agent.message_count();
-        let result = if let Some(display_role) = display_role {
-            agent
-                .run_once_streaming_mpsc_with_display_role(
+        let result: anyhow::Result<()> = async {
+            let runtime_fast_state = {
+                let guard = sessions.read().await;
+                guard.get(&session_id).and_then(|entry| {
+                    Arc::ptr_eq(&entry.agent(), OwnedMutexGuard::mutex(&agent))
+                        .then(|| entry.fast_state())
+                })
+            };
+            let provider = agent.provider_handle();
+            let session = agent.session_for_split();
+            let is_worker = session.origin() == crate::session::SessionOrigin::SwarmWorker;
+            super::apply_runtime_fast_policy(
+                provider.as_ref(),
+                session,
+                runtime_fast_state.as_deref(),
+            )?;
+            if !is_worker {
+                if let Some(fast_state) = runtime_fast_state.as_ref() {
+                    fast_state.publish_from_provider(provider.as_ref());
+                }
+            }
+
+            if let Some(display_role) = display_role {
+                agent
+                    .run_once_streaming_mpsc_with_display_role(
+                        &message,
+                        vec![],
+                        system_reminder,
+                        event_tx.clone(),
+                        Some(display_role),
+                    )
+                    .await
+            } else {
+                process_locked_message_streaming_mpsc(
+                    &mut agent,
                     &message,
                     vec![],
                     system_reminder,
                     event_tx.clone(),
-                    Some(display_role),
                 )
                 .await
-        } else {
-            process_locked_message_streaming_mpsc(
-                &mut agent,
-                &message,
-                vec![],
-                system_reminder,
-                event_tx.clone(),
-            )
-            .await
-        };
+            }
+        }
+        .await;
         let completion_report = result
             .is_ok()
             .then(|| agent.latest_assistant_text_after(start_message_index))
@@ -206,6 +232,7 @@ pub(super) async fn run_live_turn_if_idle(
     let detail = Some(truncate_detail(message, 120)).filter(|detail| !detail.is_empty());
     spawn_tracked_live_turn(
         session_id,
+        sessions,
         agent,
         message.to_string(),
         system_reminder,
@@ -229,6 +256,7 @@ pub(super) async fn run_live_system_turn_if_idle(
     let detail = Some(truncate_detail(message, 120)).filter(|detail| !detail.is_empty());
     spawn_tracked_live_turn(
         session_id,
+        sessions,
         agent,
         message.to_string(),
         None,

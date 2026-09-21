@@ -836,6 +836,7 @@ pub(super) async fn queue_soft_interrupt_for_session(
         let guard = sessions.read().await;
         guard.get(session_id).and_then(|agent| {
             agent
+                .agent()
                 .try_lock()
                 .ok()
                 .map(|agent_guard| agent_guard.soft_interrupt_queue())

@@ -20,6 +20,20 @@ use std::sync::atomic::AtomicU64;
 use std::time::Instant;
 use tokio::sync::{Mutex, RwLock, broadcast, mpsc};
 
+fn session_entry(
+    session_id: impl Into<String>,
+    agent: Arc<Mutex<Agent>>,
+) -> (String, crate::server::SessionAgentEntry) {
+    let session_id = session_id.into();
+    (
+        session_id.clone(),
+        crate::server::SessionAgentEntry::new(
+            agent,
+            crate::server::RuntimeFastState::invalid(session_id),
+        ),
+    )
+}
+
 struct DisabledWebRouteHome {
     home: tempfile::TempDir,
     previous: Option<std::ffi::OsString>,
@@ -138,8 +152,8 @@ async fn single_agent_override_responds_while_root_turn_is_busy() {
     let home = DisabledWebRouteHome::new();
     let id = "busy-single-root";
     let agent = test_delegated_root_agent(id, home.home.path().to_str().unwrap()).await;
-    let sessions = Arc::new(RwLock::new(HashMap::from([(
-        id.to_string(),
+    let sessions = Arc::new(RwLock::new(HashMap::from([session_entry(
+        id,
         agent.clone(),
     )])));
     let (root, _rx) = member(id, Some("busy-single-swarm"), "coordinator");
@@ -247,11 +261,12 @@ async fn test_delegated_root_agent(session_id: &str, working_dir: &str) -> Arc<M
 
 #[tokio::test]
 async fn resolve_spawn_working_dir_prefers_explicit_then_spawner_agent_dir() {
-    let sessions = Arc::new(RwLock::new(HashMap::new()));
-    sessions.write().await.insert(
-        "req".to_string(),
+    let sessions: crate::server::SessionAgents = Arc::new(RwLock::new(HashMap::new()));
+    let (session_id, entry) = session_entry(
+        "req",
         test_agent_with_working_dir("req", "/tmp/spawner-agent").await,
     );
+    sessions.write().await.insert(session_id, entry);
     let swarm_members = Arc::new(RwLock::new(HashMap::new()));
 
     assert_eq!(
@@ -284,6 +299,7 @@ fn visible_disabled_web_spawn_rejects_before_session_persistence_or_window_launc
         None,
         Some("chatgpt-web"),
         None,
+        None,
         false,
         Some("must not persist"),
         |_, _, _, _| -> anyhow::Result<bool> {
@@ -305,7 +321,7 @@ fn visible_disabled_web_spawn_rejects_before_session_persistence_or_window_launc
 
 #[tokio::test]
 async fn resolve_spawn_working_dir_falls_back_to_member_dir() {
-    let sessions = Arc::new(RwLock::new(HashMap::new()));
+    let sessions: crate::server::SessionAgents = Arc::new(RwLock::new(HashMap::new()));
     let swarm_members = Arc::new(RwLock::new(HashMap::new()));
     let (mut req_member, _rx) = member("req", Some("swarm-1"), "coordinator");
     req_member.working_dir = Some(std::path::PathBuf::from("/tmp/member-dir"));
@@ -324,11 +340,10 @@ async fn resolve_spawn_working_dir_falls_back_to_member_dir() {
 
 #[tokio::test]
 async fn single_agent_override_rejects_requester_that_is_not_the_target_root() {
-    let sessions = Arc::new(RwLock::new(HashMap::new()));
-    sessions.write().await.insert(
-        "root".to_string(),
-        test_delegated_root_agent("root", "/tmp/root").await,
-    );
+    let sessions: crate::server::SessionAgents = Arc::new(RwLock::new(HashMap::new()));
+    let (session_id, entry) =
+        session_entry("root", test_delegated_root_agent("root", "/tmp/root").await);
+    sessions.write().await.insert(session_id, entry);
     let swarm_members = Arc::new(RwLock::new(HashMap::new()));
     let (root, _root_events) = member("root", Some("swarm-1"), "coordinator");
     let (mut worker, _worker_events) = member("worker", Some("swarm-1"), "agent");
@@ -379,11 +394,10 @@ async fn single_agent_override_cannot_remove_an_enforced_root_boundary() {
     crate::env::set_var("JCODE_HOME", home.path());
     crate::config::invalidate_config_cache();
 
-    let sessions = Arc::new(RwLock::new(HashMap::new()));
-    sessions.write().await.insert(
-        "root".to_string(),
-        test_delegated_root_agent("root", "/tmp/root").await,
-    );
+    let sessions: crate::server::SessionAgents = Arc::new(RwLock::new(HashMap::new()));
+    let (session_id, entry) =
+        session_entry("root", test_delegated_root_agent("root", "/tmp/root").await);
+    sessions.write().await.insert(session_id, entry);
     let swarm_members = Arc::new(RwLock::new(HashMap::new()));
     let (root, _root_events) = member("root", Some("swarm-1"), "coordinator");
     swarm_members.write().await.insert("root".to_string(), root);
@@ -544,6 +558,7 @@ fn prepare_visible_spawn_session_persists_startup_before_launch() {
         None,
         None,
         None,
+        None,
         false,
         Some(startup),
         |session_id, _cwd: &std::path::Path, _selfdev, provider_key| {
@@ -597,6 +612,7 @@ fn prepare_visible_spawn_session_cleans_startup_when_launch_not_started() {
         None,
         None,
         None,
+        None,
         false,
         Some("Do the thing."),
         |_session_id, _cwd: &std::path::Path, _selfdev, _provider_key| Ok(false),
@@ -629,6 +645,7 @@ fn prepare_visible_spawn_session_cleans_session_when_launch_errors() {
 
     let error = prepare_visible_spawn_session(
         Some(worktree.path().to_str().expect("utf8 worktree path")),
+        None,
         None,
         None,
         None,
@@ -669,6 +686,7 @@ fn prepare_visible_spawn_session_persists_and_launches_provider_key_for_openrout
         None,
         None,
         None,
+        None,
         false,
         None,
         |_session_id, _cwd: &std::path::Path, _selfdev, provider_key| {
@@ -699,6 +717,7 @@ fn prepare_visible_spawn_session_persists_requested_effort() {
         None,
         None,
         Some("low"),
+        None,
         false,
         None,
         |_session_id, _cwd: &std::path::Path, _selfdev, _provider_key| Ok(true),
@@ -728,6 +747,7 @@ fn prepare_visible_spawn_session_prefers_parent_provider_key_over_model_guess() 
         Some(worktree.path().to_str().expect("utf8 worktree path")),
         Some("gpt-5.4"),
         Some("ollama"),
+        None,
         None,
         None,
         false,
@@ -1060,11 +1080,11 @@ fn resolve_swarm_spawn_model_blank_requested_model_inherits_when_unconfigured() 
 async fn coordinator_identity_uses_live_agent_when_lock_is_available() {
     let agent = test_agent_with_working_dir("coord", "/tmp/coord").await;
     let live_model = agent.lock().await.provider_model();
-    let sessions = Arc::new(RwLock::new(HashMap::new()));
-    sessions
-        .write()
-        .await
-        .insert("coord".to_string(), Arc::clone(&agent));
+    let sessions: crate::server::SessionAgents = Arc::new(RwLock::new(HashMap::new()));
+    sessions.write().await.insert(
+        "coord".to_string(),
+        session_entry("coord", Arc::clone(&agent)).1,
+    );
 
     let identity = resolve_coordinator_spawn_identity("coord", &sessions).await;
     assert_eq!(identity.model.as_deref(), Some(live_model.as_str()));
@@ -1096,11 +1116,11 @@ async fn coordinator_identity_falls_back_to_persisted_session_when_agent_busy() 
     // Hold the agent lock to simulate a coordinator mid-turn: the spawn path
     // must not block and must read the persisted identity instead of defaults.
     let _held = agent.lock().await;
-    let sessions = Arc::new(RwLock::new(HashMap::new()));
-    sessions
-        .write()
-        .await
-        .insert("coord_busy".to_string(), Arc::clone(&agent));
+    let sessions: crate::server::SessionAgents = Arc::new(RwLock::new(HashMap::new()));
+    sessions.write().await.insert(
+        "coord_busy".to_string(),
+        session_entry("coord_busy", Arc::clone(&agent)).1,
+    );
 
     let identity = resolve_coordinator_spawn_identity("coord_busy", &sessions).await;
     assert_eq!(identity.model.as_deref(), Some("claude-opus-4-6"));
@@ -1517,7 +1537,7 @@ fn worker_origin_visible_save_failure_prevents_launch() {
     crate::env::set_var("JCODE_HOME", home.path());
     std::fs::write(home.path().join("sessions"), "block snapshots").unwrap();
     let result =
-        prepare_visible_spawn_session(None, None, None, None, None, false, None, |_, _, _, _| {
+        prepare_visible_spawn_session(None, None, None, None, None, None, false, None, |_, _, _, _| {
             panic!("failed persistence must not launch")
         });
     assert!(result.is_err());

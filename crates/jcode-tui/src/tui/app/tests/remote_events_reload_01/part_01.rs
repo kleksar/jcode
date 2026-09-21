@@ -2110,6 +2110,7 @@ fn modified_file_touch_adopts_its_worktree_for_the_current_session() {
                     stdin_request_tx: None,
                     graceful_shutdown_signal: None,
                     execution_mode: crate::tool::ToolExecutionMode::AgentTurn,
+                    inline_swarm_await: None,
                 },
             ),
     )

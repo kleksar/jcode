@@ -11,6 +11,7 @@ fn test_ctx(root: &Path) -> ToolContext {
         stdin_request_tx: None,
         graceful_shutdown_signal: None,
         execution_mode: super::super::ToolExecutionMode::Direct,
+        inline_swarm_await: None,
     }
 }
 

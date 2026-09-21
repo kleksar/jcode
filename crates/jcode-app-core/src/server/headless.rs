@@ -2,7 +2,8 @@ use crate::agent::Agent;
 use crate::protocol::ServerEvent;
 use crate::provider::Provider;
 use crate::server::{
-    SessionInterruptQueues, SwarmMember, VersionedPlan, broadcast_swarm_status,
+    RuntimeFastState, SessionAgentEntry, SessionInterruptQueues, SwarmMember, VersionedPlan,
+    broadcast_swarm_status,
     register_background_tool_signal, register_session_interrupt_queue, swarm_id_for_session,
 };
 use crate::tool::Registry;
@@ -12,7 +13,7 @@ use std::sync::Arc;
 use std::time::Instant;
 use tokio::sync::{Mutex, RwLock};
 
-type SessionAgents = Arc<RwLock<HashMap<String, Arc<Mutex<Agent>>>>>;
+type SessionAgents = super::SessionAgents;
 
 /// Which memory store a headless session gets.
 ///
@@ -53,6 +54,7 @@ pub(super) async fn create_headless_session(
     report_back_to_session_id: Option<String>,
     memory_scope: HeadlessMemoryScope,
     origin: crate::session::SessionOrigin,
+    inherited_fast_state: Option<Arc<RuntimeFastState>>,
 ) -> Result<String> {
     if let Some(model) = model_override.as_deref() {
         crate::provider::ensure_model_route_enabled(
@@ -155,6 +157,28 @@ pub(super) async fn create_headless_session(
         }
     }
 
+    if let Some(route_api_method) = route_api_method_override
+        .as_deref()
+        .map(str::trim)
+        .filter(|route| !route.is_empty())
+    {
+        // The provider was already switched through the resolved route above.
+        // Apply that same structured route to the Agent so the live session and
+        // its persisted snapshot retain the exact route used for identity checks.
+        let provider_label = new_agent.provider_name();
+        let selection = crate::provider::RouteSelection {
+            model: new_agent.provider_model(),
+            runtime_key: crate::provider::RuntimeKey::from_api_method(
+                &crate::provider::ModelRouteApiMethod::parse(route_api_method),
+                &provider_label,
+            ),
+            api_method: route_api_method.to_string(),
+            provider_label,
+            detail: String::new(),
+        };
+        new_agent.set_route_selection(&selection)?;
+    }
+
     if let Some(effort) = effort_override
         .as_deref()
         .map(str::trim)
@@ -180,10 +204,24 @@ pub(super) async fn create_headless_session(
         }
     }
 
+    crate::server::apply_runtime_fast_policy(
+        provider.as_ref(),
+        new_agent.session_for_split(),
+        inherited_fast_state.as_deref(),
+    )?;
+    let fast_state = if origin == crate::session::SessionOrigin::SwarmWorker {
+        inherited_fast_state
+            .unwrap_or_else(|| RuntimeFastState::invalid(client_session_id.clone()))
+    } else {
+        RuntimeFastState::from_provider(client_session_id.clone(), provider.as_ref())
+    };
     let agent = Arc::new(Mutex::new(new_agent));
     {
         let mut sessions_guard = sessions.write().await;
-        sessions_guard.insert(client_session_id.clone(), Arc::clone(&agent));
+        sessions_guard.insert(
+            client_session_id.clone(),
+            SessionAgentEntry::new(Arc::clone(&agent), fast_state),
+        );
     }
     let (provider_model, provider_name, auth_method, effort) = {
         let agent_guard = agent.lock().await;
@@ -435,6 +473,7 @@ mod tests {
             Some("origin-parent".to_string()),
             memory_scope,
             origin,
+            None,
         )
         .await;
         if fail_save {
@@ -522,6 +561,7 @@ mod tests {
             Some("origin-parent".to_string()),
             HeadlessMemoryScope::RealProject,
             SessionOrigin::SwarmWorker,
+            None,
         )
         .await
         .expect_err("disabled headless Web route must be rejected");
@@ -571,6 +611,7 @@ mod tests {
             Some("origin-parent".to_string()),
             HeadlessMemoryScope::RealProject,
             SessionOrigin::SwarmWorker,
+            None,
         )
         .await
         .expect("headless fallback factory should create a worker");

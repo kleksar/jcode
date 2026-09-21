@@ -32,6 +32,7 @@ fn test_context() -> ToolContext {
         stdin_request_tx: None,
         graceful_shutdown_signal: None,
         execution_mode: super::super::ToolExecutionMode::Direct,
+        inline_swarm_await: None,
     }
 }
 
@@ -88,6 +89,30 @@ async fn batch_executes_through_surviving_registry_clone() {
 
     assert!(output.output.contains("still alive"));
     assert!(output.output.contains("Completed: 1 succeeded, 0 failed"));
+}
+
+#[tokio::test]
+async fn scoped_inline_await_is_rejected_inside_batch() {
+    let registry = registry_with_batch_and_echo().await;
+    let mut ctx = test_context();
+    ctx.inline_swarm_await = Some(Arc::new(std::sync::atomic::AtomicUsize::new(0)));
+
+    let error = registry
+        .execute(
+            "batch",
+            json!({
+                "tool_calls": [{
+                    "tool": "swarm",
+                    "parameters": {"action": "await_members"}
+                }]
+            }),
+            ctx,
+        )
+        .await
+        .expect_err("scoped await inside batch must fail closed");
+    assert!(error
+        .to_string()
+        .contains("cannot be used inside batch"));
 }
 
 #[tokio::test]

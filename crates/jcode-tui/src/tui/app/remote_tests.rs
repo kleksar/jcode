@@ -10,6 +10,7 @@ use crate::protocol::{
 use crate::provider::Provider;
 use crate::tui::info_widget::{MemoryState, StepStatus};
 use anyhow::Result;
+use crossterm::event::{KeyCode, KeyModifiers};
 use std::sync::Arc;
 
 struct MockProvider;

@@ -4,7 +4,7 @@ use super::session_activity_snapshot;
 use crate::agent::Agent;
 use crate::message::{Message, ToolDefinition};
 use crate::provider::{EventStream, Provider};
-use crate::server::ClientConnectionInfo;
+use crate::server::{ClientConnectionInfo, SessionAgentEntry};
 use crate::tool::Registry;
 use anyhow::Result;
 use async_trait::async_trait;
@@ -158,9 +158,12 @@ async fn assert_busy_history_service_tier(tier: Option<&'static str>) {
     )));
     let busy_guard = agent.lock().await;
 
-    let sessions = Arc::new(RwLock::new(HashMap::from([(
+    let sessions = Arc::new(RwLock::new(HashMap::<String, SessionAgentEntry>::from([(
         session_id.to_string(),
-        Arc::clone(&agent),
+        SessionAgentEntry::new(
+            Arc::clone(&agent),
+            crate::server::RuntimeFastState::invalid(session_id.to_string()),
+        ),
     )])));
     let client_connections = Arc::new(RwLock::new(HashMap::<String, ClientConnectionInfo>::new()));
     let client_count = Arc::new(RwLock::new(1usize));

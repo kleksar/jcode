@@ -23,7 +23,8 @@ pub fn classify_network_interruption(error: &(dyn std::error::Error + 'static)) 
 }
 
 pub fn classify_message(message: &str) -> Option<String> {
-    classify_text(&message.to_ascii_lowercase())
+    let text = message.to_ascii_lowercase();
+    classify_text(&text)
 }
 
 fn classify_text(text: &str) -> Option<String> {
@@ -189,6 +190,14 @@ mod tests {
         assert!(classify_message("temporary failure in name resolution").is_some());
         assert!(classify_message("network is unreachable").is_some());
         assert!(classify_message("401 unauthorized").is_none());
+    }
+
+    #[test]
+    fn provider_timeout_after_consent_remains_retryable() {
+        assert!(classify_message("provider request timed out after consent").is_some());
+        let provider = anyhow::anyhow!("provider operation timed out")
+            .context("analyst provider failed after consent");
+        assert!(classify_network_interruption(provider.as_ref()).is_some());
     }
 
     /// Real error strings harvested from ~/.jcode/logs. Every wifi-outage

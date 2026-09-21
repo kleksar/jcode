@@ -29,7 +29,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use tokio::sync::{Mutex, RwLock, broadcast, mpsc, watch};
 
-type SessionAgents = Arc<RwLock<HashMap<String, Arc<Mutex<Agent>>>>>;
+type SessionAgents = super::SessionAgents;
 
 /// Eligible auto-assignment targets for a swarm task.
 ///
@@ -494,7 +494,7 @@ async fn task_agent_session(
     sessions: &SessionAgents,
 ) -> Option<Arc<Mutex<Agent>>> {
     let guard = sessions.read().await;
-    guard.get(session_id).cloned()
+    guard.get(session_id).map(|entry| entry.agent())
 }
 
 async fn resolve_assignment_target_session(
@@ -1751,7 +1751,7 @@ async fn handle_comm_assign_task_with_mode(
 
     let target_agent = {
         let agent_sessions = sessions.read().await;
-        agent_sessions.get(&target_session).cloned()
+        agent_sessions.get(&target_session).map(|entry| entry.agent())
     };
     let _ = queue_soft_interrupt_for_session(
         &target_session,

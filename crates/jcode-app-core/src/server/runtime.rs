@@ -89,7 +89,7 @@ fn log_task_completion(result: Result<(), tokio::task::JoinError>) {
 
 #[derive(Clone)]
 pub(super) struct ServerRuntime {
-    sessions: Arc<RwLock<HashMap<String, Arc<Mutex<Agent>>>>>,
+    sessions: super::SessionAgents,
     event_tx: broadcast::Sender<ServerEvent>,
     provider: Arc<dyn Provider>,
     is_processing: Arc<RwLock<bool>>,
@@ -440,10 +440,43 @@ impl ServerRuntime {
 
 #[cfg(test)]
 mod tests {
-    use super::RuntimeTaskScope;
+    use super::{RuntimeTaskScope, ServerRuntime};
+    use crate::message::{Message, ToolDefinition};
+    use crate::provider::{EventStream, Provider};
+    use crate::server::{Client, Server};
+    use crate::transport::Listener;
+    use anyhow::Result;
+    use async_trait::async_trait;
+    use futures::future::poll_fn;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::time::Duration;
+    use tokio::sync::Notify;
+
+    struct NoCompleteProvider;
+
+    #[async_trait]
+    impl Provider for NoCompleteProvider {
+        async fn complete(
+            &self,
+            _messages: &[Message],
+            _tools: &[ToolDefinition],
+            _system: &str,
+            _resume_session_id: Option<&str>,
+        ) -> Result<EventStream> {
+            Err(anyhow::anyhow!(
+                "runtime teardown probe must not dispatch provider completion"
+            ))
+        }
+
+        fn name(&self) -> &str {
+            "runtime-teardown-probe"
+        }
+
+        fn fork(&self) -> Arc<dyn Provider> {
+            Arc::new(Self)
+        }
+    }
 
     struct DropFlag(Arc<AtomicBool>);
 
@@ -480,5 +513,114 @@ mod tests {
                 .spawn(|_| async { panic!("task spawned after shutdown") })
                 .await
         );
+    }
+
+    #[tokio::test]
+    async fn same_runtime_shutdown_joins_accept_connection_and_gated_tasks() {
+        let _storage_guard = crate::storage::lock_test_env();
+        let temp = tempfile::tempdir().expect("runtime teardown tempdir");
+        let socket_path = temp.path().join("jcode.sock");
+        let debug_socket_path = temp.path().join("jcode-debug.sock");
+        let provider: Arc<dyn Provider> = Arc::new(NoCompleteProvider);
+        let server = Server::new_with_paths(provider, socket_path.clone(), debug_socket_path.clone());
+        let runtime = ServerRuntime::from_server(&server);
+        let main_listener = Listener::bind(&socket_path).expect("bind main listener");
+        let debug_listener = Listener::bind(&debug_socket_path).expect("bind debug listener");
+        let main_handle = runtime.spawn_main_accept_loop(main_listener);
+        let debug_handle = runtime.spawn_debug_accept_loop(debug_listener, std::time::Instant::now());
+
+        let mut client = tokio::time::timeout(
+            Duration::from_secs(1),
+            Client::connect_with_path(socket_path),
+        )
+        .await
+        .expect("main client connect should complete")
+        .expect("main client should connect");
+        let subscribe_id = client
+            .subscribe_with_info(
+                Some(std::env::current_dir().expect("test cwd").to_string_lossy().into_owned()),
+                None,
+                None,
+                false,
+                false,
+            )
+            .await
+            .expect("send real Subscribe");
+        loop {
+            let event = tokio::time::timeout(Duration::from_secs(1), client.read_event())
+                .await
+                .expect("Subscribe response should complete")
+                .expect("Subscribe response should decode");
+            match event {
+                crate::protocol::ServerEvent::Done { id } if id == subscribe_id => break,
+                crate::protocol::ServerEvent::Error { id, message, .. } if id == subscribe_id => {
+                    panic!("Subscribe failed: {message}")
+                }
+                _ => {}
+            }
+        }
+        assert_eq!(*server.client_count.read().await, 1);
+
+        let child_started = Arc::new(Notify::new());
+        let child_cancelled = Arc::new(Notify::new());
+        let child_release = Arc::new(Notify::new());
+        let started_for_task = Arc::clone(&child_started);
+        let cancelled_for_task = Arc::clone(&child_cancelled);
+        let release_for_task = Arc::clone(&child_release);
+        assert!(
+            runtime
+                .tasks
+                .spawn(move |cancellation| async move {
+                    started_for_task.notify_one();
+                    cancellation.cancelled().await;
+                    cancelled_for_task.notify_one();
+                    release_for_task.notified().await;
+                })
+                .await
+        );
+        child_started.notified().await;
+
+        let shutdown = runtime.shutdown();
+        tokio::pin!(shutdown);
+        let shutdown_started = poll_fn(|cx| {
+            if shutdown.as_mut().poll(cx).is_pending() {
+                std::task::Poll::Ready(true)
+            } else {
+                std::task::Poll::Ready(false)
+            }
+        })
+        .await;
+        assert!(shutdown_started, "shutdown should wait on the gated child");
+        child_cancelled.notified().await;
+        let shutdown_still_pending = poll_fn(|cx| {
+            if shutdown.as_mut().poll(cx).is_pending() {
+                std::task::Poll::Ready(true)
+            } else {
+                std::task::Poll::Ready(false)
+            }
+        })
+        .await;
+        assert!(
+            shutdown_still_pending,
+            "shutdown must remain pending until the cancelled child releases"
+        );
+        child_release.notify_one();
+        tokio::time::timeout(Duration::from_secs(1), &mut shutdown)
+            .await
+            .expect("same-runtime shutdown should join after child release");
+
+        tokio::time::timeout(Duration::from_secs(1), main_handle)
+            .await
+            .expect("main accept loop should observe cancellation")
+            .expect("main accept loop should exit cleanly");
+        tokio::time::timeout(Duration::from_secs(1), debug_handle)
+            .await
+            .expect("debug accept loop should observe cancellation")
+            .expect("debug accept loop should exit cleanly");
+        assert_eq!(*server.client_count.read().await, 0);
+        let eof = tokio::time::timeout(Duration::from_secs(1), client.read_event())
+            .await
+            .expect("client should observe connection closure");
+        assert!(eof.is_err(), "client should observe EOF after runtime shutdown");
     }
 }

@@ -5,6 +5,7 @@ use jcode_message_types::ToolDefinition;
 use jcode_tool_types::ToolOutput;
 use serde_json::Value;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, atomic::AtomicUsize};
 
 pub const TOOL_INTENT_DESCRIPTION: &str =
     "Required short label shown in the UI: why this call is being made.";
@@ -108,6 +109,10 @@ pub struct ToolContext {
     pub stdin_request_tx: Option<tokio::sync::mpsc::UnboundedSender<StdinInputRequest>>,
     pub graceful_shutdown_signal: Option<InterruptSignal>,
     pub execution_mode: ToolExecutionMode,
+    /// Root-scoped counter for an inline native swarm await. This is only set
+    /// for the root Astra-first process stream and is deliberately absent from
+    /// ordinary, analyst, worker, and direct tool contexts.
+    pub inline_swarm_await: Option<Arc<AtomicUsize>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -126,6 +131,7 @@ impl ToolContext {
             stdin_request_tx: self.stdin_request_tx.clone(),
             graceful_shutdown_signal: self.graceful_shutdown_signal.clone(),
             execution_mode: self.execution_mode,
+            inline_swarm_await: self.inline_swarm_await.clone(),
         }
     }
 

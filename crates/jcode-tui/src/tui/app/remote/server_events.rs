@@ -1616,12 +1616,11 @@ pub(in crate::tui::app) fn handle_server_event(
             false
         }
         ServerEvent::SessionId { session_id } => {
-            if app
+            let session_changed = app
                 .remote_session_id
                 .as_deref()
-                .is_some_and(|previous| previous != session_id)
-                && !app.reload_recovery_is_authorized(&session_id)
-            {
+                .is_some_and(|previous| previous != session_id);
+            if session_changed && !app.reload_recovery_is_authorized(&session_id) {
                 app.reload_recovery_authorized_session = None;
             }
             remote.set_session_id(session_id.clone());
@@ -3101,10 +3100,6 @@ pub(in crate::tui::app) fn handle_server_event(
             } else {
                 app.set_status_notice(format!("Resuming {} sessions", resumed));
             }
-            false
-        }
-        ServerEvent::StdinRequest { .. } => {
-            app.set_status_notice("⌨ Interactive terminal detected (command will timeout)");
             false
         }
         _ => false,

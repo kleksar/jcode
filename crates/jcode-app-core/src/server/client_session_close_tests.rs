@@ -64,7 +64,13 @@ async fn live_session() -> (String, Arc<Mutex<Agent>>, SessionAgents) {
     let agent = Arc::new(Mutex::new(Agent::new_with_session(
         provider, registry, session, None,
     )));
-    let sessions = Arc::new(RwLock::new(HashMap::from([(id.clone(), agent.clone())])));
+    let sessions = Arc::new(RwLock::new(HashMap::from([(
+        id.clone(),
+        SessionAgentEntry::new(
+            agent.clone(),
+            crate::server::RuntimeFastState::invalid(id.clone()),
+        ),
+    )])));
     (id, agent, sessions)
 }
 

@@ -249,7 +249,7 @@ pub(super) async fn inject_transcript(
 )]
 pub(super) async fn handle_debug_client(
     stream: Stream,
-    sessions: Arc<RwLock<HashMap<String, Arc<Mutex<Agent>>>>>,
+    sessions: super::SessionAgents,
     is_processing: Arc<RwLock<bool>>,
     session_id: Arc<RwLock<String>>,
     provider: Arc<dyn Provider>,

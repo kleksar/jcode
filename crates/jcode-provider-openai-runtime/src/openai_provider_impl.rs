@@ -33,6 +33,15 @@ impl OpenAIProvider {
             model_reasoning_efforts: Arc::clone(&self.model_reasoning_efforts),
             service_tier: Arc::new(StdRwLock::new(self.service_tier())),
             model_service_tiers: Arc::clone(&self.model_service_tiers),
+            // Copy the current scoped override into an independent lock. A
+            // provider fork must retain the desired initial value without
+            // sharing later mutations with its parent or siblings.
+            scoped_service_tier_override: Arc::new(StdRwLock::new(
+                self.scoped_service_tier_override
+                    .read()
+                    .map(|guard| guard.clone())
+                    .unwrap_or_else(|poisoned| poisoned.into_inner().clone()),
+            )),
             native_compaction_mode: self.native_compaction_mode,
             native_compaction_threshold_tokens: self.native_compaction_threshold_tokens,
             transport_mode: Arc::clone(&self.transport_mode),
@@ -849,6 +858,9 @@ impl Provider for OpenAIProvider {
             if changed {
                 self.clear_persistent_ws_try("manual OpenAI model change reset the response chain");
                 self.revalidate_reasoning_effort();
+                if let Ok(mut override_guard) = self.scoped_service_tier_override.write() {
+                    *override_guard = None;
+                }
             }
             Ok(())
         } else {
@@ -1082,6 +1094,40 @@ impl Provider for OpenAIProvider {
         let normalized = Self::normalize_service_tier(service_tier)?;
         let mut guard = self
             .service_tier
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        *guard = normalized;
+        Ok(())
+    }
+
+    fn supports_scoped_service_tier_override(&self) -> bool {
+        is_native_luna_astra_model(&self.model())
+    }
+
+    fn set_scoped_service_tier_override(
+        &self,
+        override_tier: Option<Option<String>>,
+    ) -> Result<()> {
+        if override_tier.is_some() && !self.supports_scoped_service_tier_override() {
+            anyhow::bail!(
+                "Scoped service tier overrides are only supported for native Luna/Astra models"
+            );
+        }
+        let normalized = match override_tier {
+            None => None,
+            Some(None) => Some(None),
+            Some(Some(value)) => {
+                let normalized = Self::normalize_service_tier(&value)?;
+                if normalized.as_deref() != Some("priority") {
+                    anyhow::bail!(
+                        "Scoped service tier overrides only support ordinary or priority"
+                    );
+                }
+                Some(normalized)
+            }
+        };
+        let mut guard = self
+            .scoped_service_tier_override
             .write()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         *guard = normalized;

@@ -11,7 +11,35 @@ use std::sync::{Arc, Mutex as StdMutex, OnceLock};
 use std::time::Instant;
 use tokio::sync::{Mutex, RwLock, mpsc};
 
-type SessionAgents = Arc<RwLock<HashMap<String, Arc<Mutex<Agent>>>>>;
+type SessionAgents = super::SessionAgents;
+
+fn apply_main_service_tier(
+    provider: &dyn Provider,
+    requested: &str,
+    fast_state: Option<&super::RuntimeFastState>,
+) -> anyhow::Result<()> {
+    provider.set_service_tier(requested)?;
+    if provider.supports_scoped_service_tier_override() {
+        let normalized = requested.trim().to_ascii_lowercase();
+        let override_tier = match normalized.as_str() {
+            "priority" | "fast" => Some(Some("priority".to_string())),
+            "off" | "default" | "auto" | "none" | "standard" => Some(None),
+            "flex" => None,
+            _ => match provider.service_tier().as_deref() {
+                Some("priority") => Some(Some("priority".to_string())),
+                Some("flex") => None,
+                _ => Some(None),
+            },
+        };
+        provider.set_scoped_service_tier_override(override_tier)?;
+    } else {
+        let _ = provider.set_scoped_service_tier_override(None);
+    }
+    if let Some(fast_state) = fast_state {
+        fast_state.publish_from_provider(provider);
+    }
+    Ok(())
+}
 static AUTH_REFRESH_GENERATIONS: OnceLock<StdMutex<HashMap<String, u64>>> = OnceLock::new();
 static NEXT_AUTH_REFRESH_GENERATION: AtomicU64 = AtomicU64::new(1);
 
@@ -220,7 +248,7 @@ async fn auth_refresh_targets(
 
     let agents: Vec<Arc<Mutex<Agent>>> = {
         let sessions_guard = sessions.read().await;
-        sessions_guard.values().cloned().collect()
+        sessions_guard.values().map(|entry| entry.agent()).collect()
     };
 
     for agent in agents {
@@ -840,11 +868,12 @@ pub(super) async fn handle_set_service_tier(
     id: u64,
     service_tier: String,
     agent: &Arc<Mutex<Agent>>,
+    fast_state: Option<Arc<super::RuntimeFastState>>,
     client_event_tx: &mpsc::UnboundedSender<ServerEvent>,
 ) {
     let apply = move |provider: Arc<dyn Provider>,
                       client_event_tx: &mpsc::UnboundedSender<ServerEvent>| {
-        match provider.set_service_tier(&service_tier) {
+        match apply_main_service_tier(&*provider, &service_tier, fast_state.as_deref()) {
             Ok(()) => {
                 let _ = client_event_tx.send(ServerEvent::ServiceTierChanged {
                     id,
@@ -1585,7 +1614,13 @@ mod tests {
 
         timeout(
             Duration::from_millis(100),
-            handle_set_service_tier(9, "priority".to_string(), &agent, &client_event_tx),
+            handle_set_service_tier(
+                9,
+                "priority".to_string(),
+                &agent,
+                None,
+                &client_event_tx,
+            ),
         )
         .await
         .expect("service tier changes must not wait for a busy agent mutex");

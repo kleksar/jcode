@@ -9,7 +9,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::{Mutex, RwLock, broadcast, watch};
 
-type SessionAgents = Arc<RwLock<HashMap<String, Arc<Mutex<Agent>>>>>;
+type SessionAgents = super::SessionAgents;
 
 const RELOAD_GRACEFUL_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(2);
 
@@ -55,7 +55,7 @@ async fn receive_reload_signal(
 }
 
 pub(super) async fn await_reload_signal(
-    sessions: Arc<RwLock<HashMap<String, Arc<Mutex<Agent>>>>>,
+    sessions: SessionAgents,
     swarm_members: Arc<RwLock<HashMap<String, SwarmMember>>>,
     shutdown_signals: Arc<RwLock<HashMap<String, InterruptSignal>>>,
     swarm_event_tx: broadcast::Sender<SwarmEvent>,

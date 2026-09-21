@@ -24,8 +24,8 @@ async fn assign_task_to_client_attached_session_skips_server_side_run() {
     // the agent exists, so the only reason to skip the server-side run is the
     // client attachment.
     let worker_agent = test_agent().await;
-    let sessions = Arc::new(RwLock::new(HashMap::from([(
-        worker.to_string(),
+    let sessions = Arc::new(RwLock::new(HashMap::from([session_entry(
+        worker,
         Arc::clone(&worker_agent),
     )])));
     let soft_interrupt_queues = Arc::new(RwLock::new(HashMap::new()));

@@ -6,8 +6,8 @@ async fn assign_task_rejects_explicit_blocked_task() {
     let worker = "worker";
     let (client_tx, mut client_rx) = mpsc::unbounded_channel();
     let worker_agent = test_agent().await;
-    let sessions = Arc::new(RwLock::new(HashMap::from([(
-        worker.to_string(),
+    let sessions = Arc::new(RwLock::new(HashMap::from([session_entry(
+        worker,
         worker_agent,
     )])));
     let soft_interrupt_queues = Arc::new(RwLock::new(HashMap::new()));

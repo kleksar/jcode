@@ -12,8 +12,8 @@ use crate::message::{Message, ToolDefinition};
 use crate::protocol::ServerEvent;
 use crate::provider::{EventStream, Provider};
 use crate::server::{
-    ClientConnectionInfo, ClientDebugState, FileTouchService, SessionInterruptQueues, SwarmEvent,
-    SwarmMember, VersionedPlan,
+    ClientConnectionInfo, ClientDebugState, FileTouchService, SessionAgentEntry,
+    SessionInterruptQueues, SwarmEvent, SwarmMember, VersionedPlan,
 };
 use crate::tool::Registry;
 use anyhow::Result;
@@ -408,9 +408,12 @@ async fn live_target_claim_is_atomic_with_detached_source_cleanup() {
             &source_id,
             Vec::new(),
         )));
-        let sessions = Arc::new(RwLock::new(HashMap::from([(
+        let sessions = Arc::new(RwLock::new(HashMap::<String, SessionAgentEntry>::from([(
             target_id.clone(),
-            Arc::clone(&target_agent),
+            SessionAgentEntry::new(
+                Arc::clone(&target_agent),
+                crate::server::RuntimeFastState::invalid(target_id.clone()),
+            ),
         )])));
         let now = Instant::now();
         let (disconnect_tx, _disconnect_rx) = mpsc::unbounded_channel();
