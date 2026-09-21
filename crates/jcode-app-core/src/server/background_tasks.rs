@@ -1,5 +1,6 @@
 use super::live_turn::{LiveTurnSwarmContext, run_live_turn_if_idle};
 use super::state::SwarmEvent;
+use super::swarm::SwarmCompletionDelivery;
 use super::{
     SessionAgents, SessionInterruptQueues, SwarmMember, fanout_session_event,
     queue_soft_interrupt_for_session,
@@ -34,6 +35,78 @@ async fn emit_external_wake(
     )
     .await;
     true
+}
+
+/// Resume the parent/owner that received a completed CommReport.
+///
+/// The status update has already emitted the one canonical owner notification
+/// and released every swarm lock before this function is called. Preserve the
+/// shared wake policy used by other server-originated deliveries: external
+/// wake mode wins, otherwise start exactly one idle live turn, and finally
+/// defer a soft interrupt when the owner is busy, unavailable, or absent.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "completed report resumption needs session, interrupt, and swarm status state"
+)]
+pub(super) async fn resume_owner_after_completed_comm_report(
+    delivery: Option<SwarmCompletionDelivery>,
+    sessions: &SessionAgents,
+    soft_interrupt_queues: &SessionInterruptQueues,
+    swarm_members: &Arc<RwLock<HashMap<String, SwarmMember>>>,
+    swarms_by_id: &Arc<RwLock<HashMap<String, HashSet<String>>>>,
+    event_history: &Arc<RwLock<VecDeque<SwarmEvent>>>,
+    event_counter: &Arc<AtomicU64>,
+    swarm_event_tx: &broadcast::Sender<SwarmEvent>,
+) {
+    let Some(delivery) = delivery else {
+        return;
+    };
+    let recipient_session_id = delivery.recipient_session_id;
+    let notification = delivery.message;
+
+    if emit_external_wake(
+        &recipient_session_id,
+        "comm_report_completed",
+        &notification,
+        swarm_members,
+    )
+    .await
+    {
+        return;
+    }
+
+    if !run_live_turn_if_idle(
+        &recipient_session_id,
+        &notification,
+        Some(
+            "A worker just submitted a completed report. Review it and continue if useful."
+                .to_string(),
+        ),
+        sessions,
+        LiveTurnSwarmContext::new(
+            swarm_members,
+            swarms_by_id,
+            event_history,
+            event_counter,
+            swarm_event_tx,
+        ),
+    )
+    .await
+        && !queue_soft_interrupt_for_session(
+            &recipient_session_id,
+            notification,
+            false,
+            SoftInterruptSource::System,
+            soft_interrupt_queues,
+            sessions,
+        )
+        .await
+    {
+        crate::logging::warn(&format!(
+            "Failed to deliver completed CommReport to session {}",
+            recipient_session_id
+        ));
+    }
 }
 
 #[expect(

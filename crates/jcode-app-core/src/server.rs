@@ -22,6 +22,7 @@ mod comm_await;
 mod comm_control;
 mod comm_graph;
 mod comm_plan;
+mod comm_report;
 mod comm_session;
 mod comm_sync;
 mod debug;
@@ -60,6 +61,7 @@ use self::background_tasks::{
     dispatch_swarm_batch_progress, dispatch_swarm_output_tail, dispatch_swarm_runtime_status,
     dispatch_swarm_todo_progress, dispatch_swarm_tool_activity, dispatch_ui_activity,
 };
+use self::comm_report::{CommReportContext, handle_comm_report};
 use self::debug::{ClientConnectionInfo, ClientDebugState};
 use self::debug_jobs::DebugJob;
 use self::headless::create_headless_session;
@@ -72,7 +74,6 @@ use self::swarm::{
     refresh_swarm_task_staleness, remove_plan_participant, remove_session_from_swarm,
     rename_plan_participant, run_swarm_message, send_swarm_plan_to_session, set_member_task_label,
     swarm_is_self_or_ancestor, update_member_status, update_member_status_with_report,
-    update_member_status_with_report_tldr,
 };
 use self::swarm_channels::{
     remove_session_channel_subscriptions, subscribe_session_to_channel,
@@ -102,12 +103,11 @@ use crate::transport::Listener;
 use anyhow::Result;
 use jcode_agent_runtime::{InterruptSignal, SoftInterruptSource};
 use jcode_swarm_core::{
-    append_swarm_completion_report_instructions, format_structured_completion_report,
-    summarize_plan_items, truncate_detail,
+    append_swarm_completion_report_instructions, summarize_plan_items, truncate_detail,
 };
 use std::collections::{HashMap, HashSet};
-use std::path::PathBuf;
 use std::ops::Deref;
+use std::path::PathBuf;
 use std::sync::{Arc, RwLock as StdRwLock};
 use std::time::{Duration, Instant};
 use tokio::sync::{Mutex, OnceCell, RwLock, broadcast, mpsc};
@@ -266,7 +266,8 @@ pub(super) fn apply_runtime_fast_policy(
             );
         };
         let snapshot = owner_state.snapshot();
-        if snapshot.retired || !snapshot.valid || owner_state.owner_root_session_id() == session.id {
+        if snapshot.retired || !snapshot.valid || owner_state.owner_root_session_id() == session.id
+        {
             anyhow::bail!(
                 "Cannot apply scoped fast tier for worker {}: owning root {} is invalid",
                 session.id,
@@ -1207,15 +1208,15 @@ impl Server {
 
             let session_origin = session.origin();
             let session_parent_id = session.parent_id.clone();
-            let inherited_fast_state = if session_origin == crate::session::SessionOrigin::SwarmWorker
-            {
-                let sessions = self.sessions.read().await;
-                session_parent_id
-                    .as_deref()
-                    .and_then(|parent_id| sessions.get(parent_id).map(|entry| entry.fast_state()))
-            } else {
-                None
-            };
+            let inherited_fast_state =
+                if session_origin == crate::session::SessionOrigin::SwarmWorker {
+                    let sessions = self.sessions.read().await;
+                    session_parent_id.as_deref().and_then(|parent_id| {
+                        sessions.get(parent_id).map(|entry| entry.fast_state())
+                    })
+                } else {
+                    None
+                };
             let agent = Arc::new(Mutex::new(Agent::new_with_session(
                 provider, registry, session, None,
             )));

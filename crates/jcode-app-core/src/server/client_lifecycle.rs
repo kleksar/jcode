@@ -53,11 +53,11 @@ use super::provider_control::{
     try_available_models_updated_event,
 };
 use super::{
-    AwaitMembersRuntime, ClientConnectionInfo, ClientDebugState, FileTouchService,
-    SessionControlHandle, SessionInterruptQueues, SharedContext, SwarmEvent, SwarmMember,
-    SwarmMutationRuntime, VersionedPlan, format_structured_completion_report,
+    AwaitMembersRuntime, ClientConnectionInfo, ClientDebugState, CommReportContext,
+    FileTouchService, SessionControlHandle, SessionInterruptQueues, SharedContext, SwarmEvent,
+    SwarmMember, SwarmMutationRuntime, VersionedPlan, handle_comm_report,
     register_session_interrupt_queue, send_swarm_plan_to_session, truncate_detail,
-    update_member_status, update_member_status_with_report, update_member_status_with_report_tldr,
+    update_member_status, update_member_status_with_report,
 };
 use crate::agent::Agent;
 use crate::bus::{Bus, BusEvent};
@@ -2942,32 +2942,26 @@ pub(super) async fn handle_client(
                 follow_up,
                 tldr,
             } => {
-                let status = status.unwrap_or_else(|| "ready".to_string());
-                let report = format_structured_completion_report(
-                    &message,
-                    validation.as_deref(),
-                    follow_up.as_deref(),
-                );
-                let detail = Some(truncate_detail(&message, 160));
-                update_member_status_with_report_tldr(
-                    &req_session_id,
-                    &status,
-                    detail,
-                    Some(report),
+                handle_comm_report(
+                    id,
+                    req_session_id,
+                    status,
+                    message,
+                    validation,
+                    follow_up,
                     tldr,
-                    &swarm_members,
-                    &swarms_by_id,
-                    Some(&event_history),
-                    Some(&event_counter),
-                    Some(&swarm_event_tx),
+                    &client_event_tx,
+                    CommReportContext {
+                        sessions: &sessions,
+                        soft_interrupt_queues: &soft_interrupt_queues,
+                        swarm_members: &swarm_members,
+                        swarms_by_id: &swarms_by_id,
+                        event_history: &event_history,
+                        event_counter: &event_counter,
+                        swarm_event_tx: &swarm_event_tx,
+                    },
                 )
                 .await;
-                let _ = client_event_tx.send(ServerEvent::CommReportResponse {
-                    id,
-                    status,
-                    message: "Report recorded and delivered to the coordinator when applicable."
-                        .to_string(),
-                });
             }
 
             Request::CommPlanStatus {

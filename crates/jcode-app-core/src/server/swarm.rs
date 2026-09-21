@@ -1332,7 +1332,7 @@ pub(super) async fn update_member_status_with_report(
     event_counter: Option<&Arc<std::sync::atomic::AtomicU64>>,
     swarm_event_tx: Option<&broadcast::Sender<SwarmEvent>>,
 ) {
-    update_member_status_with_report_tldr(
+    let _ = update_member_status_with_report_tldr_and_delivery(
         session_id,
         status,
         detail,
@@ -1344,14 +1344,23 @@ pub(super) async fn update_member_status_with_report(
         event_counter,
         swarm_event_tx,
     )
-    .await
+    .await;
+}
+
+/// The single notification emitted for a status/report delivery, along with
+/// its canonical recipient. Callers that need to resume that recipient may
+/// use this metadata after the status update has released all swarm locks.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct SwarmCompletionDelivery {
+    pub(super) recipient_session_id: String,
+    pub(super) message: String,
 }
 
 #[expect(
     clippy::too_many_arguments,
     reason = "member status updates need swarm membership, broadcast state, optional report text, and event history sinks"
 )]
-pub(super) async fn update_member_status_with_report_tldr(
+pub(super) async fn update_member_status_with_report_tldr_and_delivery(
     session_id: &str,
     status: &str,
     detail: Option<String>,
@@ -1362,7 +1371,7 @@ pub(super) async fn update_member_status_with_report_tldr(
     event_history: Option<&Arc<RwLock<std::collections::VecDeque<SwarmEvent>>>>,
     event_counter: Option<&Arc<std::sync::atomic::AtomicU64>>,
     swarm_event_tx: Option<&broadcast::Sender<SwarmEvent>>,
-) {
+) -> Option<SwarmCompletionDelivery> {
     update_member_status_with_report_tldr_if_idle(
         session_id,
         status,
@@ -1376,7 +1385,7 @@ pub(super) async fn update_member_status_with_report_tldr(
         event_counter,
         swarm_event_tx,
     )
-    .await;
+    .await
 }
 
 /// Move an idle or terminal member to queued without racing a newly started
@@ -1389,7 +1398,7 @@ pub(super) async fn queue_member_if_idle(
     event_counter: Option<&Arc<std::sync::atomic::AtomicU64>>,
     swarm_event_tx: Option<&broadcast::Sender<SwarmEvent>>,
 ) {
-    update_member_status_with_report_tldr_if_idle(
+    let _ = update_member_status_with_report_tldr_if_idle(
         session_id,
         "queued",
         None,
@@ -1421,7 +1430,7 @@ async fn update_member_status_with_report_tldr_if_idle(
     event_history: Option<&Arc<RwLock<std::collections::VecDeque<SwarmEvent>>>>,
     event_counter: Option<&Arc<std::sync::atomic::AtomicU64>>,
     swarm_event_tx: Option<&broadcast::Sender<SwarmEvent>>,
-) {
+) -> Option<SwarmCompletionDelivery> {
     let completion_report = normalize_completion_report(completion_report);
     let detail_present = detail.is_some();
     let (
@@ -1438,7 +1447,7 @@ async fn update_member_status_with_report_tldr_if_idle(
             if only_if_idle
                 && !(member.status == "ready" || member_status_is_terminal(&member.status))
             {
-                return;
+                return None;
             }
             let previous_status = member.status.clone();
             let status_changed = member.status != status;
@@ -1489,7 +1498,7 @@ async fn update_member_status_with_report_tldr_if_idle(
     };
     if let Some(ref id) = swarm_id {
         if !member_changed {
-            return;
+            return None;
         }
 
         log_swarm_lifecycle(
@@ -1549,6 +1558,7 @@ async fn update_member_status_with_report_tldr_if_idle(
                         old_status.as_str(),
                         "running" | "running_stale" | "queued"
                     )));
+        let mut delivery = None;
         if should_notify_coordinator {
             let fallback_coordinator_id =
                 if report_back_to_session_id.as_deref() == Some(session_id) {
@@ -1574,6 +1584,10 @@ async fn update_member_status_with_report_tldr_if_idle(
                     .unwrap_or(&session_id[..8.min(session_id.len())]);
                 let msg =
                     completion_notification_message(name, status, completion_report.as_deref());
+                delivery = Some(SwarmCompletionDelivery {
+                    recipient_session_id: recipient_session_id.clone(),
+                    message: msg.clone(),
+                });
                 let _ = fanout_session_event(
                     swarm_members,
                     &recipient_session_id,
@@ -1591,7 +1605,9 @@ async fn update_member_status_with_report_tldr_if_idle(
                 .await;
             }
         }
+        return delivery;
     }
+    None
 }
 
 pub(super) async fn run_swarm_task(
