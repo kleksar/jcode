@@ -20,7 +20,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
-use std::sync::atomic::Ordering;
+use jcode_tool_core::{ScopedInlineAwaitKey, ScopedInlineAwaitMode};
 
 const REQUEST_ID: u64 = 1;
 
@@ -1862,6 +1862,36 @@ fn default_await_target_statuses() -> Vec<String> {
     default_comm_await_target_statuses()
 }
 
+fn scoped_await_key(
+    ctx: &ToolContext,
+    session_ids: &[String],
+    target_status: &[String],
+    mode: Option<&str>,
+) -> ScopedInlineAwaitKey {
+    let mut session_ids = session_ids.to_vec();
+    session_ids.sort();
+    session_ids.dedup();
+    let mut target_status = target_status.to_vec();
+    target_status.sort();
+    target_status.dedup();
+    ScopedInlineAwaitKey {
+        root_session_id: ctx.session_id.clone(),
+        session_ids,
+        target_status,
+        mode: if mode == Some("any") {
+            ScopedInlineAwaitMode::Any
+        } else {
+            ScopedInlineAwaitMode::All
+        },
+    }
+}
+
+fn scoped_await_was_cancelled(error: &anyhow::Error) -> bool {
+    error
+        .to_string()
+        .contains("cancelled by graceful shutdown")
+}
+
 fn format_channels(channels: &[SwarmChannelInfo]) -> ToolOutput {
     ToolOutput::new(format_comm_channels(channels))
 }
@@ -3446,6 +3476,12 @@ impl Tool for CommunicateTool {
                 {
                     session_ids.push(target_session);
                 }
+                let scoped_await_key = scoped_await_key(
+                    &ctx,
+                    &session_ids,
+                    &target_status,
+                    params.mode.as_deref(),
+                );
                 let timeout_minutes = params.timeout_minutes.unwrap_or(60);
                 let timeout_secs = timeout_minutes * 60;
                 let scoped_inline_await = ctx.inline_swarm_await.clone();
@@ -3486,16 +3522,24 @@ impl Tool for CommunicateTool {
                     std::time::Duration::from_secs(timeout_secs + 30)
                 };
 
-                if let Some(counter) = scoped_inline_await.as_ref() {
-                    counter.fetch_add(1, Ordering::AcqRel);
+                if let Some(state) = scoped_inline_await.as_ref() {
+                    let attempt = state
+                        .begin(scoped_await_key)
+                        .map_err(|error| anyhow::anyhow!(error))?;
                     let result = run_scoped_await_members(&ctx, request, socket_timeout).await;
                     return match result {
                         Ok(output) => {
-                            let previous = counter.fetch_sub(1, Ordering::AcqRel);
-                            debug_assert!(previous > 0);
+                            attempt.succeed();
                             Ok(output)
                         }
-                        Err(error) => Err(error),
+                        Err(error) if scoped_await_was_cancelled(&error) => {
+                            attempt.cancel();
+                            Err(error)
+                        }
+                        Err(error) => {
+                            attempt.retain();
+                            Err(error)
+                        }
                     };
                 }
 

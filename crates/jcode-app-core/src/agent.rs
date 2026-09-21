@@ -38,12 +38,13 @@ use crate::skill::SkillRegistry;
 use crate::tool::{Registry, ToolContext, ToolExecutionMode};
 use anyhow::Result;
 use futures::StreamExt;
+use jcode_tool_core::ScopedInlineAwaitState;
 use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 use std::io::{self, Write};
 use std::path::PathBuf;
 use std::sync::{Arc, LazyLock, Mutex as StdMutex};
-use std::sync::atomic::{AtomicBool, AtomicUsize};
+use std::sync::atomic::AtomicBool;
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 
@@ -71,19 +72,19 @@ static WORKING_GIT_STATE_CACHE: LazyLock<StdMutex<HashMap<PathBuf, Option<GitSta
 const STREAM_KEEPALIVE_PONG_ID: u64 = 0;
 
 tokio::task_local! {
-    /// Counter for inline native `swarm await_members` calls owned by the
+    /// State for inline native `swarm await_members` calls owned by the
     /// current Astra-first root process stream. Task-local scope prevents the
     /// handle from reaching the persistent analyst or independently spawned
     /// workers; streaming tool contexts copy the value explicitly before their
     /// tool task is spawned.
-    static ASTRA_INLINE_SWARM_AWAIT: Option<Arc<AtomicUsize>>;
+    static ASTRA_INLINE_SWARM_AWAIT: Option<Arc<ScopedInlineAwaitState>>;
     /// Set when the root streaming loop aborts a scoped await before the tool
     /// can claim the unresolved counter. This keeps cancellation fail-closed
     /// even when a pre_tool gate or an unpolled tool task is interrupted.
     static ASTRA_INLINE_SWARM_AWAIT_ABORTED: Option<Arc<AtomicBool>>;
 }
 
-pub(crate) fn astra_inline_swarm_await() -> Option<Arc<AtomicUsize>> {
+pub(crate) fn astra_inline_swarm_await() -> Option<Arc<ScopedInlineAwaitState>> {
     ASTRA_INLINE_SWARM_AWAIT
         .try_with(Clone::clone)
         .ok()
@@ -98,7 +99,7 @@ pub(crate) fn astra_inline_swarm_await_aborted() -> Option<Arc<AtomicBool>> {
 }
 
 pub(crate) fn scope_astra_inline_swarm_await<F>(
-    handle: Arc<AtomicUsize>,
+    handle: Arc<ScopedInlineAwaitState>,
     future: F,
 ) -> impl std::future::Future<Output = F::Output>
 where
@@ -108,7 +109,7 @@ where
 }
 
 pub(crate) fn scope_astra_inline_swarm_await_with_abort<F>(
-    handle: Arc<AtomicUsize>,
+    handle: Arc<ScopedInlineAwaitState>,
     aborted: Arc<AtomicBool>,
     future: F,
 ) -> impl std::future::Future<Output = F::Output>

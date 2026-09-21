@@ -31,6 +31,27 @@ fn tool_is_named_swarm() {
 }
 
 #[test]
+fn scoped_await_key_canonicalizes_only_semantic_request_fields() {
+    let ctx = test_ctx("root", Path::new("."));
+    let key = super::scoped_await_key(
+        &ctx,
+        &["worker-b".to_string(), "worker-a".to_string(), "worker-a".to_string()],
+        &["failed".to_string(), "completed".to_string(), "failed".to_string()],
+        Some("ANY"),
+    );
+    assert_eq!(key.root_session_id, "root");
+    assert_eq!(
+        key.session_ids,
+        vec!["worker-a".to_string(), "worker-b".to_string()]
+    );
+    assert_eq!(
+        key.target_status,
+        vec!["completed".to_string(), "failed".to_string()]
+    );
+    assert_eq!(key.mode, jcode_tool_core::ScopedInlineAwaitMode::All);
+}
+
+#[test]
 fn task_graph_seed_collision_is_detected_from_server_error() {
     let response = ServerEvent::Error {
         id: 1,

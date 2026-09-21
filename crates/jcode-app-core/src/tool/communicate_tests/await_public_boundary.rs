@@ -95,9 +95,9 @@ async fn communicate_await_members_scoped_waits_for_terminal_response_and_fetche
     let socket_path = runtime_dir.path().join("scoped-await.sock");
     let _socket = EnvGuard::set("JCODE_SOCKET", &socket_path);
     let repo_dir = std::env::current_dir().expect("repo cwd");
-    let counter = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let state = Arc::new(jcode_tool_core::ScopedInlineAwaitState::new());
     let mut ctx = test_ctx("scoped-await-session", &repo_dir);
-    ctx.inline_swarm_await = Some(Arc::clone(&counter));
+    ctx.inline_swarm_await = Some(Arc::clone(&state));
 
     let listener = crate::transport::Listener::bind(&socket_path).expect("bind scripted socket");
     let (request_seen_tx, request_seen_rx) = tokio::sync::oneshot::channel();
@@ -219,7 +219,7 @@ async fn communicate_await_members_scoped_waits_for_terminal_response_and_fetche
     assert!(!background, "scoped await must not be backgrounded");
     assert!(!notify);
     assert!(!wake);
-    assert_eq!(counter.load(std::sync::atomic::Ordering::Acquire), 1);
+    assert!(!state.is_idle());
 
     release_tx.send(()).expect("release scoped await");
     let output = tokio::time::timeout(Duration::from_secs(1), execute_task)
@@ -228,21 +228,21 @@ async fn communicate_await_members_scoped_waits_for_terminal_response_and_fetche
         .expect("scoped await task should not panic")
         .expect("scoped await should succeed");
     assert!(output.output.contains("terminal worker report"));
-    assert_eq!(counter.load(std::sync::atomic::Ordering::Acquire), 0);
+    assert!(state.is_idle());
     server.await.expect("scripted socket task");
 }
 
 #[cfg(unix)]
 #[tokio::test]
-async fn communicate_await_members_scoped_timeout_retains_unresolved_counter() {
+async fn communicate_await_members_scoped_failure_retains_key_for_retry() {
     let _env_lock = crate::storage::lock_test_env();
     let runtime_dir = tempfile::TempDir::new().expect("runtime tempdir");
     let socket_path = runtime_dir.path().join("scoped-await-timeout.sock");
     let _socket = EnvGuard::set("JCODE_SOCKET", &socket_path);
     let repo_dir = std::env::current_dir().expect("repo cwd");
-    let counter = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let state = Arc::new(jcode_tool_core::ScopedInlineAwaitState::new());
     let mut ctx = test_ctx("scoped-timeout-session", &repo_dir);
-    ctx.inline_swarm_await = Some(Arc::clone(&counter));
+    ctx.inline_swarm_await = Some(Arc::clone(&state));
 
     let listener = crate::transport::Listener::bind(&socket_path).expect("bind scripted socket");
     let server = tokio::spawn(async move {
@@ -270,18 +270,134 @@ async fn communicate_await_members_scoped_timeout_retains_unresolved_counter() {
             )
             .await
             .expect("write timeout response");
+
+        let (stream, _) = listener.accept().await.expect("accept retry request");
+        let (reader, mut writer) = stream.into_split();
+        let mut reader = BufReader::new(reader);
+        let mut line = String::new();
+        reader.read_line(&mut line).await.expect("read retry request");
+        let request: Request = serde_json::from_str(line.trim()).expect("deserialize retry request");
+        let response = ServerEvent::CommAwaitMembersResponse {
+            id: request.id(),
+            completed: true,
+            members: vec![AwaitedMemberStatus {
+                session_id: "worker".to_string(),
+                friendly_name: Some("worker".to_string()),
+                status: "completed".to_string(),
+                done: true,
+                completion_report: None,
+            }],
+            summary: "worker completed".to_string(),
+            background_started: false,
+        };
+        writer
+            .write_all(format!("{}\n", serde_json::to_string(&response).unwrap()).as_bytes())
+            .await
+            .expect("write retry response");
+
+        let (stream, _) = listener.accept().await.expect("accept retry report request");
+        let (reader, mut writer) = stream.into_split();
+        let mut reader = BufReader::new(reader);
+        let mut line = String::new();
+        reader
+            .read_line(&mut line)
+            .await
+            .expect("read retry report request");
+        let response = ServerEvent::CommContextHistory {
+            id: 1,
+            session_id: "worker".to_string(),
+            messages: vec![HistoryMessage {
+                role: "assistant".to_string(),
+                content: "retried worker report".to_string(),
+                tool_calls: None,
+                tool_data: None,
+            }],
+        };
+        writer
+            .write_all(format!("{}\n", serde_json::to_string(&response).unwrap()).as_bytes())
+            .await
+            .expect("write retry report response");
     });
 
     let error = CommunicateTool::new()
         .execute(
             json!({"action": "await_members", "session_ids": ["worker"]}),
-            ctx,
+            ctx.clone(),
         )
         .await
         .expect_err("incomplete scoped await must fail closed");
     assert!(error.to_string().contains("timed out"));
-    assert_eq!(counter.load(std::sync::atomic::Ordering::Acquire), 1);
+    assert!(state.is_retained());
+
+    let output = CommunicateTool::new()
+        .execute(
+            json!({"action": "await_members", "session_ids": ["worker"]}),
+            ctx,
+        )
+        .await
+        .expect("same-key retry should succeed")
+        .output;
+    assert!(output.contains("retried worker report"));
+    assert!(state.is_idle(), "full success must clear the retained state");
     server.await.expect("scripted socket task");
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn communicate_await_members_different_key_fails_before_io_while_retained() {
+    let _env_lock = crate::storage::lock_test_env();
+    let runtime_dir = tempfile::TempDir::new().expect("runtime tempdir");
+    let socket_path = runtime_dir.path().join("scoped-await-different-key.sock");
+    let _socket = EnvGuard::set("JCODE_SOCKET", &socket_path);
+    let repo_dir = std::env::current_dir().expect("repo cwd");
+    let state = Arc::new(jcode_tool_core::ScopedInlineAwaitState::new());
+    let mut ctx = test_ctx("scoped-different-key-session", &repo_dir);
+    ctx.inline_swarm_await = Some(Arc::clone(&state));
+
+    let listener = crate::transport::Listener::bind(&socket_path).expect("bind scripted socket");
+    let server = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.expect("accept retained request");
+        let (reader, mut writer) = stream.into_split();
+        let mut reader = BufReader::new(reader);
+        let mut line = String::new();
+        reader.read_line(&mut line).await.expect("read retained request");
+        let request: Request = serde_json::from_str(line.trim()).expect("deserialize retained request");
+        let response = ServerEvent::CommAwaitMembersResponse {
+            id: request.id(),
+            completed: false,
+            members: Vec::new(),
+            summary: "worker still running".to_string(),
+            background_started: false,
+        };
+        writer
+            .write_all(format!("{}\n", serde_json::to_string(&response).unwrap()).as_bytes())
+            .await
+            .expect("write retained response");
+    });
+
+    let error = CommunicateTool::new()
+        .execute(
+            json!({"action": "await_members", "session_ids": ["worker"]}),
+            ctx.clone(),
+        )
+        .await
+        .expect_err("first failure should retain the await key");
+    assert!(error.to_string().contains("timed out"));
+    server.await.expect("retained server task");
+    assert!(state.is_retained());
+
+    let error = tokio::time::timeout(
+        Duration::from_secs(1),
+        CommunicateTool::new().execute(
+            json!({"action": "await_members", "session_ids": ["other-worker"]}),
+            ctx,
+        ),
+    )
+    .await
+    .expect("different-key refusal should be immediate")
+    .expect_err("different retained key must be rejected");
+    assert!(error.to_string().contains("different scoped inline swarm await"));
+    assert!(state.is_retained(), "different-key rejection must preserve the retained key");
 }
 
 #[cfg(unix)]
@@ -292,10 +408,10 @@ async fn communicate_await_members_scoped_cancellation_retains_unresolved_counte
     let socket_path = runtime_dir.path().join("scoped-await-cancel.sock");
     let _socket = EnvGuard::set("JCODE_SOCKET", &socket_path);
     let repo_dir = std::env::current_dir().expect("repo cwd");
-    let counter = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let state = Arc::new(jcode_tool_core::ScopedInlineAwaitState::new());
     let shutdown = jcode_agent_runtime::InterruptSignal::new();
     let mut ctx = test_ctx("scoped-cancel-session", &repo_dir);
-    ctx.inline_swarm_await = Some(Arc::clone(&counter));
+    ctx.inline_swarm_await = Some(Arc::clone(&state));
     ctx.graceful_shutdown_signal = Some(shutdown.clone());
 
     let listener = crate::transport::Listener::bind(&socket_path).expect("bind scripted socket");
@@ -316,6 +432,7 @@ async fn communicate_await_members_scoped_cancellation_retains_unresolved_counte
         release_rx.await.expect("release cancellation server");
     });
 
+    let retry_ctx = ctx.clone();
     let execute_task = tokio::spawn(async move {
         CommunicateTool::new()
             .execute(
@@ -335,7 +452,19 @@ async fn communicate_await_members_scoped_cancellation_retains_unresolved_counte
         .expect("scoped cancellation task should not panic")
         .expect_err("scoped cancellation must fail closed");
     assert!(error.to_string().contains("cancelled"));
-    assert_eq!(counter.load(std::sync::atomic::Ordering::Acquire), 1);
+    assert!(state.is_cancelled());
     release_tx.send(()).expect("release cancellation server");
     server.await.expect("scripted socket task");
+
+    let error = tokio::time::timeout(
+        Duration::from_secs(1),
+        CommunicateTool::new().execute(
+            json!({"action": "await_members", "session_ids": ["worker"]}),
+            retry_ctx,
+        ),
+    )
+    .await
+    .expect("cancelled state should reject retry immediately")
+    .expect_err("cancelled scoped await must remain sticky");
+    assert!(error.to_string().contains("cancelled and cannot be retried"));
 }

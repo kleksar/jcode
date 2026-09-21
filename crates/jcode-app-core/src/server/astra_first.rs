@@ -8,9 +8,10 @@ use crate::agent::{Agent, AstraFirstStateHandle};
 use crate::protocol::ServerEvent;
 use anyhow::{anyhow, Result};
 use futures::FutureExt;
+use jcode_tool_core::ScopedInlineAwaitState;
 use serde::Deserialize;
 use std::collections::HashMap;
-use std::sync::{Arc, atomic::{AtomicBool, AtomicUsize, Ordering}};
+use std::sync::{Arc, atomic::{AtomicBool, Ordering}};
 #[cfg(test)]
 use std::sync::{Mutex as StdMutex, OnceLock};
 use tokio::sync::{mpsc, Mutex};
@@ -198,11 +199,11 @@ fn member_status_is_quiescent(status: &str) -> bool {
 }
 
 fn scoped_inline_await_blocks_finalization(
-    inline_swarm_await: &AtomicUsize,
+    inline_swarm_await: &ScopedInlineAwaitState,
     inline_swarm_await_aborted: &AtomicBool,
 ) -> bool {
     inline_swarm_await_aborted.load(Ordering::Acquire)
-        || inline_swarm_await.load(Ordering::Acquire) != 0
+        || !inline_swarm_await.is_idle()
 }
 
 fn owned_child_finalization_blockers(
@@ -230,7 +231,7 @@ async fn ensure_root_finalize_safe(
     state: &AstraFirstStateHandle,
     generation: u64,
     root_session_id: &str,
-    inline_swarm_await: &Arc<AtomicUsize>,
+    inline_swarm_await: &Arc<ScopedInlineAwaitState>,
     inline_swarm_await_aborted: &Arc<AtomicBool>,
     context: &AstraFirstSpawnContext,
 ) -> Result<()> {
@@ -244,8 +245,7 @@ async fn ensure_root_finalize_safe(
             );
         }
         anyhow::bail!(
-            "Astra-first orchestration unsafe: {} scoped inline swarm await(s) remain unresolved",
-            inline_swarm_await.load(Ordering::Acquire)
+            "Astra-first orchestration unsafe: scoped inline swarm await is not idle"
         );
     }
 
@@ -630,7 +630,7 @@ async fn run_root_turn_proxy(
     images: Vec<(String, String)>,
     system_reminder: Option<String>,
     event_tx: mpsc::UnboundedSender<ServerEvent>,
-    inline_swarm_await: Arc<AtomicUsize>,
+    inline_swarm_await: Arc<ScopedInlineAwaitState>,
     inline_swarm_await_aborted: Arc<AtomicBool>,
 ) -> (Result<()>, Option<RootDraft>) {
     let start_message_index = root_agent.lock().await.message_count();
@@ -711,7 +711,7 @@ async fn release_direct_root_with_safety(
     root_session_id: &str,
     root_draft: RootDraft,
     event_tx: &mpsc::UnboundedSender<ServerEvent>,
-    inline_swarm_await: Option<&Arc<AtomicUsize>>,
+    inline_swarm_await: Option<&Arc<ScopedInlineAwaitState>>,
     inline_swarm_await_aborted: Option<&Arc<AtomicBool>>,
     context: Option<&AstraFirstSpawnContext>,
 ) -> Result<String> {
@@ -895,7 +895,7 @@ async fn run_inner(
     if !is_current(&state, generation).await {
         anyhow::bail!("Astra-first generation became stale before Luna run");
     }
-    let inline_swarm_await = Arc::new(AtomicUsize::new(0));
+    let inline_swarm_await = Arc::new(ScopedInlineAwaitState::new());
     let inline_swarm_await_aborted = Arc::new(AtomicBool::new(false));
     let (root_result, root_draft) = run_root_turn_proxy(
         Arc::clone(&root_agent),

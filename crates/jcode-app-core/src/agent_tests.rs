@@ -2488,7 +2488,7 @@ async fn fable_guardrail_reconsideration_recovers_the_streaming_turn() {
 
 #[tokio::test]
 async fn astra_inline_swarm_await_scope_does_not_leak_to_spawned_tasks_or_next_turn() {
-    let handle = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let handle = Arc::new(jcode_tool_core::ScopedInlineAwaitState::new());
     assert!(crate::agent::astra_inline_swarm_await().is_none());
 
     crate::agent::scope_astra_inline_swarm_await(Arc::clone(&handle), async {

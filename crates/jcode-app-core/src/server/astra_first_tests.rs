@@ -1813,7 +1813,7 @@ async fn cancel_during_luna_does_not_arm_the_next_analyst_phase() {
         Vec::new(),
         None,
         event_tx,
-        Arc::new(AtomicUsize::new(0)),
+        Arc::new(jcode_tool_core::ScopedInlineAwaitState::new()),
         Arc::new(AtomicBool::new(false)),
     ));
     root_started.notified().await;
@@ -2108,16 +2108,22 @@ fn ready_owned_child_blocks_only_while_active_and_excludes_persistent_analyst() 
 }
 
 #[test]
-fn scoped_abort_blocks_both_final_paths_before_claim_and_after_decrement() {
-    let counter = AtomicUsize::new(0);
+fn scoped_abort_blocks_both_final_paths_before_claim_and_after_retention() {
+    let state = jcode_tool_core::ScopedInlineAwaitState::new();
     let aborted = AtomicBool::new(true);
-    assert!(scoped_inline_await_blocks_finalization(&counter, &aborted));
+    assert!(scoped_inline_await_blocks_finalization(&state, &aborted));
 
     aborted.store(false, Ordering::Release);
-    counter.store(1, Ordering::Release);
-    assert!(scoped_inline_await_blocks_finalization(&counter, &aborted));
+    let state = Arc::new(state);
+    let key = jcode_tool_core::ScopedInlineAwaitKey {
+        root_session_id: "root".to_string(),
+        session_ids: vec!["worker".to_string()],
+        target_status: vec!["completed".to_string()],
+        mode: jcode_tool_core::ScopedInlineAwaitMode::All,
+    };
+    state.begin(key).unwrap().retain();
+    assert!(scoped_inline_await_blocks_finalization(&state, &aborted));
 
-    counter.store(0, Ordering::Release);
     aborted.store(true, Ordering::Release);
-    assert!(scoped_inline_await_blocks_finalization(&counter, &aborted));
+    assert!(scoped_inline_await_blocks_finalization(&state, &aborted));
 }

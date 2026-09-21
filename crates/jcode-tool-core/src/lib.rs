@@ -5,7 +5,140 @@ use jcode_message_types::ToolDefinition;
 use jcode_tool_types::ToolOutput;
 use serde_json::Value;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, atomic::AtomicUsize};
+use std::sync::{Arc, Mutex};
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScopedInlineAwaitKey {
+    pub root_session_id: String,
+    pub session_ids: Vec<String>,
+    pub target_status: Vec<String>,
+    pub mode: ScopedInlineAwaitMode,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScopedInlineAwaitMode {
+    Any,
+    All,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ScopedInlineAwaitPhase {
+    Idle,
+    InFlight(ScopedInlineAwaitKey),
+    Retained(ScopedInlineAwaitKey),
+    Cancelled,
+}
+
+/// Root-scoped ownership for the one inline `swarm await_members` obligation.
+/// The mutex is held only while changing this small phase machine, never over
+/// socket or report-fetch work.
+pub struct ScopedInlineAwaitState {
+    phase: Mutex<ScopedInlineAwaitPhase>,
+}
+
+impl ScopedInlineAwaitState {
+    pub fn new() -> Self {
+        Self {
+            phase: Mutex::new(ScopedInlineAwaitPhase::Idle),
+        }
+    }
+
+    pub fn begin(
+        self: &Arc<Self>,
+        key: ScopedInlineAwaitKey,
+    ) -> Result<ScopedInlineAwaitAttempt, String> {
+        let mut phase = self.phase.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        match &*phase {
+            ScopedInlineAwaitPhase::Idle => {
+                *phase = ScopedInlineAwaitPhase::InFlight(key.clone());
+            }
+            ScopedInlineAwaitPhase::Retained(existing) if existing == &key => {
+                *phase = ScopedInlineAwaitPhase::InFlight(key.clone());
+            }
+            ScopedInlineAwaitPhase::Retained(_) => {
+                return Err("A different scoped inline swarm await is retained".to_string());
+            }
+            ScopedInlineAwaitPhase::InFlight(_) => {
+                return Err("A scoped inline swarm await is already in flight".to_string());
+            }
+            ScopedInlineAwaitPhase::Cancelled => {
+                return Err("The scoped inline swarm await was cancelled and cannot be retried".to_string());
+            }
+        }
+        Ok(ScopedInlineAwaitAttempt {
+            state: Arc::clone(self),
+            key,
+            finished: false,
+        })
+    }
+
+    pub fn is_idle(&self) -> bool {
+        matches!(
+            *self.phase.lock().unwrap_or_else(|poisoned| poisoned.into_inner()),
+            ScopedInlineAwaitPhase::Idle
+        )
+    }
+
+    pub fn is_retained(&self) -> bool {
+        matches!(
+            *self.phase.lock().unwrap_or_else(|poisoned| poisoned.into_inner()),
+            ScopedInlineAwaitPhase::Retained(_)
+        )
+    }
+
+    pub fn is_cancelled(&self) -> bool {
+        matches!(
+            *self.phase.lock().unwrap_or_else(|poisoned| poisoned.into_inner()),
+            ScopedInlineAwaitPhase::Cancelled
+        )
+    }
+
+    fn finish(&self, key: &ScopedInlineAwaitKey, phase_after: ScopedInlineAwaitPhase) {
+        let mut phase = self.phase.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        if matches!(&*phase, ScopedInlineAwaitPhase::InFlight(existing) if existing == key) {
+            *phase = phase_after;
+        }
+    }
+}
+
+impl Default for ScopedInlineAwaitState {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+pub struct ScopedInlineAwaitAttempt {
+    state: Arc<ScopedInlineAwaitState>,
+    key: ScopedInlineAwaitKey,
+    finished: bool,
+}
+
+impl ScopedInlineAwaitAttempt {
+    pub fn retain(mut self) {
+        self.state
+            .finish(&self.key, ScopedInlineAwaitPhase::Retained(self.key.clone()));
+        self.finished = true;
+    }
+
+    pub fn succeed(mut self) {
+        self.state.finish(&self.key, ScopedInlineAwaitPhase::Idle);
+        self.finished = true;
+    }
+
+    pub fn cancel(mut self) {
+        self.state.finish(&self.key, ScopedInlineAwaitPhase::Cancelled);
+        self.finished = true;
+    }
+}
+
+impl Drop for ScopedInlineAwaitAttempt {
+    fn drop(&mut self) {
+        if !self.finished {
+            self.state
+                .finish(&self.key, ScopedInlineAwaitPhase::Cancelled);
+        }
+    }
+}
 
 pub const TOOL_INTENT_DESCRIPTION: &str =
     "Required short label shown in the UI: why this call is being made.";
@@ -109,10 +242,10 @@ pub struct ToolContext {
     pub stdin_request_tx: Option<tokio::sync::mpsc::UnboundedSender<StdinInputRequest>>,
     pub graceful_shutdown_signal: Option<InterruptSignal>,
     pub execution_mode: ToolExecutionMode,
-    /// Root-scoped counter for an inline native swarm await. This is only set
+    /// Root-scoped state for an inline native swarm await. This is only set
     /// for the root Astra-first process stream and is deliberately absent from
     /// ordinary, analyst, worker, and direct tool contexts.
-    pub inline_swarm_await: Option<Arc<AtomicUsize>>,
+    pub inline_swarm_await: Option<Arc<ScopedInlineAwaitState>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -288,5 +421,48 @@ mod escape_hatch_tests {
         // ever diverge, the flag would be advertised but never honored, which is
         // worse than not offering it at all.
         assert_eq!(ACCEPT_LARGE_OUTPUT_KEY, "accept_large_output");
+    }
+}
+
+#[cfg(test)]
+mod scoped_inline_await_tests {
+    use super::*;
+
+    fn key(worker: &str) -> ScopedInlineAwaitKey {
+        ScopedInlineAwaitKey {
+            root_session_id: "root".to_string(),
+            session_ids: vec![worker.to_string()],
+            target_status: vec!["completed".to_string()],
+            mode: ScopedInlineAwaitMode::All,
+        }
+    }
+
+    #[test]
+    fn retained_attempt_is_adopted_by_same_key_and_cleared_once() {
+        let state = Arc::new(ScopedInlineAwaitState::new());
+        state.begin(key("worker")).unwrap().retain();
+        assert!(state.is_retained());
+
+        state.begin(key("worker")).unwrap().succeed();
+        assert!(state.is_idle());
+    }
+
+    #[test]
+    fn different_key_and_concurrent_attempts_fail_without_changing_state() {
+        let state = Arc::new(ScopedInlineAwaitState::new());
+        let attempt = state.begin(key("worker")).unwrap();
+        assert!(state.begin(key("other")).is_err());
+        assert!(!state.is_idle());
+        attempt.retain();
+        assert!(state.begin(key("other")).is_err());
+        assert!(state.is_retained());
+    }
+
+    #[test]
+    fn dropped_attempt_is_sticky_cancelled() {
+        let state = Arc::new(ScopedInlineAwaitState::new());
+        drop(state.begin(key("worker")).unwrap());
+        assert!(state.is_cancelled());
+        assert!(state.begin(key("worker")).is_err());
     }
 }

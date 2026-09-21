@@ -95,7 +95,7 @@ async fn batch_executes_through_surviving_registry_clone() {
 async fn scoped_inline_await_is_rejected_inside_batch() {
     let registry = registry_with_batch_and_echo().await;
     let mut ctx = test_context();
-    ctx.inline_swarm_await = Some(Arc::new(std::sync::atomic::AtomicUsize::new(0)));
+    ctx.inline_swarm_await = Some(Arc::new(jcode_tool_core::ScopedInlineAwaitState::new()));
 
     let error = registry
         .execute(
